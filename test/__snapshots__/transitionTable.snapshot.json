@@ -1,0 +1,97 @@
+[
+  {
+    "from": "DRAFT",
+    "event": "PUBLISH",
+    "to": "OPEN"
+  },
+  {
+    "from": "OPEN",
+    "event": "ACCEPT",
+    "to": "ACCEPTED"
+  },
+  {
+    "from": "OPEN",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
+    "from": "ACCEPTED",
+    "event": "START_CAPTURE",
+    "to": "CAPTURING"
+  },
+  {
+    "from": "ACCEPTED",
+    "event": "ABANDON",
+    "to": "ABANDONED"
+  },
+  {
+    "from": "ACCEPTED",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
+    "from": "CAPTURING",
+    "event": "SUBMIT",
+    "to": "SUBMITTED"
+  },
+  {
+    "from": "CAPTURING",
+    "event": "ABANDON",
+    "to": "ABANDONED"
+  },
+  {
+    "from": "CAPTURING",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
+    "from": "SUBMITTED",
+    "event": "BEGIN_REVIEW",
+    "to": "IN_REVIEW"
+  },
+  {
+    "from": "SUBMITTED",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
+    "from": "IN_REVIEW",
+    "event": "APPROVE",
+    "to": "APPROVED"
+  },
+  {
+    "from": "IN_REVIEW",
+    "event": "REJECT",
+    "to": "REJECTED"
+  },
+  {
+    "from": "APPROVED",
+    "event": "REQUEST_PAYOUT",
+    "to": "PAYOUT_PENDING"
+  },
+  {
+    "from": "PAYOUT_PENDING",
+    "event": "PAYOUT_COMPLETE",
+    "to": "PAID"
+  },
+  {
+    "from": "REJECTED",
+    "event": "DISPUTE",
+    "to": "DISPUTED"
+  },
+  {
+    "from": "REJECTED",
+    "event": "RESUBMIT",
+    "to": "CAPTURING"
+  },
+  {
+    "from": "DISPUTED",
+    "event": "ARBITRATE_APPROVE",
+    "to": "APPROVED"
+  },
+  {
+    "from": "DISPUTED",
+    "event": "ARBITRATE_REJECT",
+    "to": "REJECTED"
+  }
+]

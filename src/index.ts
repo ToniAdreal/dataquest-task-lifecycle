@@ -5,6 +5,7 @@ export {
   stateDiagram,
   transition,
   transitionTable,
+  transitionTableJson,
 } from "./taskLifecycle.js";
 export type {
   TaskEvent,

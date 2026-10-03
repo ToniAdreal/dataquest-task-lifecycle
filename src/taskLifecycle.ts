@@ -95,6 +95,14 @@ export function transitionTable(): TransitionEdge[] {
 }
 
 /**
+ * Transition table as canonical JSON (declaration order, 2-space indent).
+ * Committed snapshot: test/__snapshots__/transitionTable.snapshot.json.
+ */
+export function transitionTableJson(): string {
+  return JSON.stringify(transitionTable(), null, 2) + "\n";
+}
+
+/**
  * Render the transition table as a Mermaid stateDiagram-v2 block.
  * Paste the output into README.md verbatim; test/stateDiagram.test.ts
  * fails if the README copy drifts from this generated text.

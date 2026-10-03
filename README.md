@@ -72,6 +72,10 @@ stateDiagram-v2
   from → to, ISO timestamp, actor, note).
 - `allowedEvents(state)` / `isTerminal(state)` helpers for UI gating.
 - Terminal states: `PAID`, `ABANDONED`, `EXPIRED`.
+- `transitionTableJson()` exports the whole transition table as canonical
+  JSON; `test/__snapshots__/transitionTable.snapshot.json` is the committed
+  snapshot (`test/transitionSnapshot.test.ts` fails if the table ever
+  changes without regenerating it).
 
 ## Limitations (honest)
 
