@@ -73,6 +73,41 @@ const TERMINAL: ReadonlySet<TaskState> = new Set([
   "EXPIRED",
 ]);
 
+export interface TransitionEdge {
+  from: TaskState;
+  event: TaskEvent;
+  to: TaskState;
+}
+
+/**
+ * Full transition table: the single source of truth for docs and diagrams.
+ * Edges are emitted in declaration order (state, then event within state).
+ */
+export function transitionTable(): TransitionEdge[] {
+  const edges: TransitionEdge[] = [];
+  for (const from of Object.keys(TRANSITIONS) as TaskState[]) {
+    const events = TRANSITIONS[from];
+    for (const event of Object.keys(events) as TaskEvent[]) {
+      edges.push({ from, event, to: events[event]! });
+    }
+  }
+  return edges;
+}
+
+/**
+ * Render the transition table as a Mermaid stateDiagram-v2 block.
+ * Paste the output into README.md verbatim; test/stateDiagram.test.ts
+ * fails if the README copy drifts from this generated text.
+ */
+export function stateDiagram(): string {
+  const lines = ["```mermaid", "stateDiagram-v2", "    direction LR", "    [*] --> DRAFT"];
+  for (const { from, event, to } of transitionTable()) {
+    lines.push(`    ${from} --> ${to} : ${event}`);
+  }
+  lines.push("```");
+  return lines.join("\n");
+}
+
 /** Pure transition function: current state + event -> next state. */
 export function transition(state: TaskState, event: TaskEvent): TaskState {
   const next = TRANSITIONS[state][event];
