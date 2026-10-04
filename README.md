@@ -15,8 +15,12 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 12 tests, all local
+npm test   # all tests, all local
 ```
+
+Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
+through the full `DRAFT → PAID` chain with the append-only audit history
+printed to stdout.
 
 ## Quickstart
 
