@@ -132,6 +132,22 @@ export function isTerminal(state: TaskState): boolean {
   return TERMINAL.has(state);
 }
 
+/**
+ * Is the task currently past its SLA deadline?
+ *
+ * Reads the deadline attached to the task's CURRENT state (see
+ * TaskLifecycle.setSlaDeadline). Returns false when no deadline is set,
+ * and false for terminal states — a completed/abandoned/expired task is
+ * no longer "overdue", even if its deadline passed. Advisory only: it
+ * never transitions the task; a watchdog dispatches EXPIRE explicitly.
+ */
+export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean {
+  const deadline = task.getSlaDeadline(task.state);
+  if (deadline === undefined) return false;
+  if (task.isTerminal) return false;
+  return now.getTime() >= Date.parse(deadline);
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
@@ -162,6 +178,45 @@ export class TaskLifecycle {
 
   get isTerminal(): boolean {
     return isTerminal(this._state);
+  }
+
+  // ------------------------------------------------------------------
+  // SLA deadlines — advisory only.
+  //
+  // A state may carry an optional ISO-8601 deadline. The deadline is
+  // informational: it NEVER moves the task by itself. There is no timer,
+  // no auto-EXPIRE — a watchdog (or a human) reads isOverdue() and
+  // dispatches EXPIRE explicitly, which keeps expiry auditable in the
+  // append-only history.
+  // ------------------------------------------------------------------
+
+  private _slaDeadlines: Map<TaskState, string> = new Map();
+
+  /**
+   * Attach an SLA deadline to a state (defaults to the task's current
+   * state). Overwrites any existing deadline for that state.
+   * Throws on unparseable input; stores the normalized ISO string.
+   */
+  setSlaDeadline(deadline: Date | string, forState: TaskState = this._state): void {
+    const ms = deadline instanceof Date ? deadline.getTime() : Date.parse(deadline);
+    if (Number.isNaN(ms)) {
+      throw new Error(`invalid SLA deadline: ${String(deadline)}`);
+    }
+    this._slaDeadlines.set(forState, new Date(ms).toISOString());
+  }
+
+  /** SLA deadline attached to a state, or undefined if none set. */
+  getSlaDeadline(state: TaskState = this._state): string | undefined {
+    return this._slaDeadlines.get(state);
+  }
+
+  /**
+   * Clear the SLA deadline for one state, or for all states when called
+   * without an argument.
+   */
+  clearSlaDeadline(state?: TaskState): void {
+    if (state === undefined) this._slaDeadlines.clear();
+    else this._slaDeadlines.delete(state);
   }
 
   dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {

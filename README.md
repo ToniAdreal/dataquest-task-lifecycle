@@ -77,6 +77,20 @@ stateDiagram-v2
   snapshot (`test/transitionSnapshot.test.ts` fails if the table ever
   changes without regenerating it).
 
+## SLA deadlines
+
+A state may carry an optional SLA deadline (`TaskLifecycle.setSlaDeadline`,
+per-state, stored as normalized ISO). `isOverdue(task, now)` answers
+"is the task past its deadline right now" — `false` when no deadline is
+set, `false` in terminal states, and true at/after the deadline.
+
+Relationship to `EXPIRE`: the deadline is **advisory only** and never moves
+the task by itself — there is no timer, no background scheduler. Expiry
+stays an explicit `EXPIRE` event so it lands in the append-only history. The
+intended wiring is a watchdog (cron, queue consumer) that polls
+`isOverdue()` and dispatches `EXPIRE` itself, which is exactly what
+`test/sla.test.ts` demonstrates in its last case.
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
@@ -84,15 +98,17 @@ stateDiagram-v2
   persistence, no auth/RBAC, no deadline scheduler (expiry is an explicit
   event, not a timer), no notification fan-out.
 - **Simplified arbitration.** One appeal round is modeled; production would
-  bound appeals and add SLAs per state.
+  bound appeals and add per-state retry budgets. (Per-state SLA deadlines
+  exist since v0.1.0 — see "SLA deadlines" above; expiry remains explicit.)
 - **No reputation/quality scoring.** The case study's contributor tiers and
   earnings wallet are out of scope here.
 
 ## Reproducibility
 
-`npm test` runs 12 tests covering the happy path, reject→resubmit,
-dispute→arbitration (both outcomes), abandonment, expiration, invalid
-transitions, terminal-state locking, and the README-diagram sync guard. No network, no randomness in
+`npm test` runs 25 tests covering the happy path, reject→resubmit,
+dispute→arbitration (both outcomes), abandonment, expiration, SLA
+deadlines and overdue checks, invalid transitions, terminal-state
+locking, and the README-diagram sync guard. No network, no randomness in
 assertions.
 
 ## License

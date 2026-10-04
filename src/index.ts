@@ -1,6 +1,7 @@
 export {
   TaskLifecycle,
   allowedEvents,
+  isOverdue,
   isTerminal,
   stateDiagram,
   transition,
