@@ -128,6 +128,31 @@ inconsistent input throws a specific `invalid snapshot: …` error instead
 of producing a task with a broken audit trail. See
 `test/serialization.test.ts` for the full checklist.
 
+### Event-sourced replay
+
+When only the raw audit log survives (e.g. an event stream, a forwarded
+batch), the history alone is enough to rebuild the task — no snapshot
+envelope needed, and no `state` field to trust:
+
+```ts
+import { TaskLifecycle, replay } from "dataquest-task-lifecycle";
+
+const log = await eventStore.read("task-042"); // plain JSON entries
+
+replay(log); // => "PAID" (pure: just the final state)
+
+const task = TaskLifecycle.fromHistory("task-042", log);
+task.dispatch("ACCEPT"); // history continues at the next seq, no gaps
+```
+
+Every entry is validated with the same audit invariants as `fromJSON()`
+(seq continuity, from/to chain, legal edges, canonical ISO timestamps) —
+a broken log throws a specific `invalid history: …` error instead of a
+guessed state. Replay restores state + history only: the task id is not
+recoverable from the log (entries carry no id), so it is passed
+explicitly, and advisory SLA deadlines are not part of the audit log, so
+they are not restored (use `fromJSON()` for the full snapshot).
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
@@ -144,11 +169,12 @@ of producing a task with a broken audit trail. See
 
 ## Reproducibility
 
-`npm test` runs 43 tests covering the happy path, reject→resubmit,
+`npm test` runs 60 tests covering the happy path, reject→resubmit,
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, and rejection of 18 malformed-snapshot
-shapes), invalid transitions, terminal-state
+shapes), event-sourced replay (golden paths, input detachment, and 10
+malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
 canonical ISO timestamps, no partial entry on failed dispatch), and per-edge agreement between the rendered diagram and

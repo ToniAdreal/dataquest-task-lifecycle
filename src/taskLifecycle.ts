@@ -190,45 +190,28 @@ function isCanonicalIso(s: unknown): s is string {
 }
 
 /**
- * Parse and strictly validate an untrusted value into a TaskSnapshot.
+ * Parse and strictly validate an untrusted value into a sanitized audit
+ * history — the append-only event log every TaskLifecycle carries.
  *
- * Throws with a specific message on the first problem found:
- *  - not an object / missing id / unknown state
- *  - history entry shape violations (seq, event, from, to, at)
+ * Throws `invalid history: …` on the first problem found:
+ *  - history is not an array, or an entry is not an object
+ *  - entry shape violations (seq, event, from, to, at, actor, note)
  *  - seq must restart at 1 and increment by 1 with no gaps
- *  - the from/to chain must be continuous, start at DRAFT, and land on
- *    the snapshot's state
+ *  - the from/to chain must be continuous and start at DRAFT
  *  - every (from, event) -> to edge must be a legal transition edge
  *  - timestamps must be canonical ISO-8601 and non-decreasing
- *  - SLA deadlines must name real states with parseable dates (values
- *    are normalized to canonical ISO, exactly like setSlaDeadline does)
  *
- * Anything produced by toJSON() passes; anything else must earn its way.
+ * The returned entries are fresh, sanitized copies: mutating the input
+ * afterwards never affects them.
  */
-function parseSnapshot(snapshot: unknown): {
-  id: string;
-  state: TaskState;
-  history: TaskHistoryEntry[];
-  slaDeadlines: Partial<Record<TaskState, string>>;
-} {
-  if (!isRecord(snapshot)) {
-    throw new Error("invalid snapshot: expected a JSON object");
+function parseHistory(history: unknown): TaskHistoryEntry[] {
+  if (!Array.isArray(history)) {
+    throw new Error("invalid history: history must be an array");
   }
-  if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
-    throw new Error("invalid snapshot: id must be a non-empty string");
-  }
-  if (!STATES.has(snapshot.state as TaskState)) {
-    throw new Error(`invalid snapshot: unknown state ${String(snapshot.state)}`);
-  }
-  const state = snapshot.state as TaskState;
-
-  if (!Array.isArray(snapshot.history)) {
-    throw new Error("invalid snapshot: history must be an array");
-  }
-  const history: TaskHistoryEntry[] = [];
-  for (let i = 0; i < snapshot.history.length; i++) {
-    const raw = snapshot.history[i];
-    const tag = `invalid snapshot: history[${i}]`;
+  const entries: TaskHistoryEntry[] = [];
+  for (let i = 0; i < history.length; i++) {
+    const raw = history[i];
+    const tag = `invalid history: entry[${i}]`;
     if (!isRecord(raw)) throw new Error(`${tag}: entry must be an object`);
     if (raw.seq !== i + 1) {
       throw new Error(`${tag}: seq must be ${i + 1}, got ${String(raw.seq)}`);
@@ -252,7 +235,7 @@ function parseSnapshot(snapshot: unknown): {
       throw new Error(`${tag}: chain must start at DRAFT, got ${from}`);
     }
     if (i > 0) {
-      const prev = history[i - 1];
+      const prev = entries[i - 1];
       if (from !== prev.to) {
         throw new Error(
           `${tag}: from ${from} does not continue previous to ${prev.to}`,
@@ -287,8 +270,53 @@ function parseSnapshot(snapshot: unknown): {
       }
       entry.note = raw.note;
     }
-    history.push(entry);
+    entries.push(entry);
   }
+  return entries;
+}
+
+/**
+ * Event-sourced replay: derive the final state from a pure audit history
+ * log — no snapshot envelope, no state field to trust. The history is the
+ * only source of truth; every entry must survive the same integrity
+ * checks as the audit tests enforce (see parseHistory). An empty history
+ * replays to DRAFT, the state of a task with no events yet.
+ */
+export function replay(history: unknown): TaskState {
+  const entries = parseHistory(history);
+  return entries.length === 0 ? "DRAFT" : entries[entries.length - 1].to;
+}
+
+/**
+ * Parse and strictly validate an untrusted value into a TaskSnapshot.
+ *
+ * Throws with a specific message on the first problem found:
+ *  - not an object / missing id / unknown state
+ *  - history entry violations — see parseHistory for the full checklist
+ *  - the history's replayed state must land on the snapshot's state
+ *  - SLA deadlines must name real states with parseable dates (values
+ *    are normalized to canonical ISO, exactly like setSlaDeadline does)
+ *
+ * Anything produced by toJSON() passes; anything else must earn its way.
+ */
+function parseSnapshot(snapshot: unknown): {
+  id: string;
+  state: TaskState;
+  history: TaskHistoryEntry[];
+  slaDeadlines: Partial<Record<TaskState, string>>;
+} {
+  if (!isRecord(snapshot)) {
+    throw new Error("invalid snapshot: expected a JSON object");
+  }
+  if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
+    throw new Error("invalid snapshot: id must be a non-empty string");
+  }
+  if (!STATES.has(snapshot.state as TaskState)) {
+    throw new Error(`invalid snapshot: unknown state ${String(snapshot.state)}`);
+  }
+  const state = snapshot.state as TaskState;
+
+  const history = parseHistory(snapshot.history);
 
   if (history.length > 0) {
     const last = history[history.length - 1];
@@ -441,6 +469,28 @@ export class TaskLifecycle {
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
       task.setSlaDeadline(deadline, state as TaskState);
     }
+    return task;
+  }
+
+  /**
+   * Rebuild a TaskLifecycle from a pure audit history log, making the
+   * history the only source of truth: the final state is derived by
+   * replaying the entries, not read from a state field.
+   *
+   * The task id is not recoverable from the log (history entries carry
+   * no id), so it is passed explicitly rather than invented. Advisory
+   * SLA deadlines are not part of the audit log and are therefore not
+   * restored — use fromJSON() when the snapshot envelope is available.
+   * Throws a specific `invalid history: …` error on any malformed or
+   * inconsistent input — see parseHistory for the full checklist.
+   */
+  static fromHistory(id: string, history: unknown): TaskLifecycle {
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error("invalid history: id must be a non-empty string");
+    }
+    const task = new TaskLifecycle(id);
+    task._state = replay(history);
+    task._history = parseHistory(history);
     return task;
   }
 }

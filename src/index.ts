@@ -3,6 +3,7 @@ export {
   allowedEvents,
   isOverdue,
   isTerminal,
+  replay,
   stateDiagram,
   transition,
   transitionTable,
