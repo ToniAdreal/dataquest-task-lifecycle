@@ -112,11 +112,12 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 
 ## Reproducibility
 
-`npm test` runs 29 tests covering the happy path, reject→resubmit,
+`npm test` runs 34 tests covering the happy path, reject→resubmit,
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
 deadlines and overdue checks, invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
-output, and per-edge agreement between the rendered diagram and
+output, audit-history integrity (seq increment, from/to chain continuity,
+canonical ISO timestamps, no partial entry on failed dispatch), and per-edge agreement between the rendered diagram and
 `transition()`. No network, no randomness in
 assertions.
 
