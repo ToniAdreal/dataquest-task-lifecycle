@@ -365,8 +365,15 @@ export class TaskLifecycle {
     return this._state;
   }
 
+  /**
+   * Append-only audit history. Returns a frozen snapshot: the array and
+   * every entry are Object.freeze'd copies, so the audit trail cannot be
+   * rewritten at runtime — push/splice/entry-field writes all fail —
+   * even by an accidental caller. dispatch() remains the only way to
+   * append.
+   */
   get history(): readonly TaskHistoryEntry[] {
-    return this._history;
+    return Object.freeze(this._history.map((e) => Object.freeze({ ...e })));
   }
 
   get isTerminal(): boolean {

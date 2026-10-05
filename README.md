@@ -166,10 +166,15 @@ they are not restored (use `fromJSON()` for the full snapshot).
   exist since v0.1.0 — see "SLA deadlines" above; expiry remains explicit.)
 - **No reputation/quality scoring.** The case study's contributor tiers and
   earnings wallet are out of scope here.
+- **Append-only history is runtime-frozen.** `task.history` returns a frozen
+  copy (array and entries), so consumers cannot rewrite the audit log at
+  runtime, even by accident — `dispatch()` is the only append path. This is
+  in-memory integrity, not tamper-proofing: persisted snapshots must still
+  be validated on rehydration (`fromJSON()` rejects broken logs).
 
 ## Reproducibility
 
-`npm test` runs 60 tests covering the happy path, reject→resubmit,
+`npm test` runs 67 tests covering the happy path, reject→resubmit,
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, and rejection of 18 malformed-snapshot
@@ -177,7 +182,8 @@ shapes), event-sourced replay (golden paths, input detachment, and 10
 malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
-canonical ISO timestamps, no partial entry on failed dispatch), and per-edge agreement between the rendered diagram and
+canonical ISO timestamps, no partial entry on failed dispatch, runtime
+freeze of the returned history), and per-edge agreement between the rendered diagram and
 `transition()`. No network, no randomness in
 assertions.
 
