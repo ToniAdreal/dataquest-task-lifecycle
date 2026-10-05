@@ -11,6 +11,7 @@ export {
 export type {
   TaskEvent,
   TaskHistoryEntry,
+  TaskSnapshot,
   TaskState,
   TransitionEdge,
 } from "./taskLifecycle.js";

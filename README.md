@@ -98,12 +98,44 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 `isOverdue()` and dispatches `EXPIRE` itself, which is exactly what
 `test/sla.test.ts` demonstrates in its last case.
 
+## Persistence
+
+A task can be exported to plain JSON and rebuilt later — no database
+built in, you choose the store:
+
+```ts
+const task = new TaskLifecycle("task-042");
+task.dispatch("PUBLISH", { actor: "researcher" });
+task.setSlaDeadline("2026-12-01T00:00:00.000Z"); // advisory SLA deadline
+
+// snapshot: { id, state, history, slaDeadlines } — plain JSON, no Maps,
+// no class instances. Also what JSON.stringify(task) produces.
+const snapshot = task.toJSON();
+await db.save(snapshot);
+
+// restore later, in another process:
+const restored = TaskLifecycle.fromJSON(await db.load("task-042"));
+restored.dispatch("ACCEPT"); // history continues at seq 3, no gaps
+```
+
+`TaskLifecycle.fromJSON()` is defensive by design: it validates the
+untrusted snapshot against the same audit invariants the tests enforce —
+seq restarts at 1 with no gaps, the from/to chain is continuous and starts
+at `DRAFT`, every `(from, event) → to` edge is a legal transition, and
+timestamps are canonical ISO-8601 and non-decreasing. SLA deadline strings
+are normalized exactly like `setSlaDeadline` does. Malformed or
+inconsistent input throws a specific `invalid snapshot: …` error instead
+of producing a task with a broken audit trail. See
+`test/serialization.test.ts` for the full checklist.
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
-  this models the *rules* of the lifecycle, not a production backend. No
-  persistence, no auth/RBAC, no deadline scheduler (expiry is an explicit
-  event, not a timer), no notification fan-out.
+  this models the *rules* of the lifecycle, not a production backend.
+  `toJSON()` / `fromJSON()` export and rehydrate in-memory snapshots (see
+  "Persistence") — there is still no built-in store, no auth/RBAC, no
+  deadline scheduler (expiry is an explicit event, not a timer), no
+  notification fan-out.
 - **Simplified arbitration.** One appeal round is modeled; production would
   bound appeals and add per-state retry budgets. (Per-state SLA deadlines
   exist since v0.1.0 — see "SLA deadlines" above; expiry remains explicit.)
@@ -112,9 +144,11 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 
 ## Reproducibility
 
-`npm test` runs 34 tests covering the happy path, reject→resubmit,
+`npm test` runs 43 tests covering the happy path, reject→resubmit,
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
-deadlines and overdue checks, invalid transitions, terminal-state
+deadlines and overdue checks, JSON snapshot persistence
+(round-trip, detached copies, and rejection of 18 malformed-snapshot
+shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
 canonical ISO timestamps, no partial entry on failed dispatch), and per-edge agreement between the rendered diagram and

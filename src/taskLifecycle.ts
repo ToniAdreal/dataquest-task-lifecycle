@@ -123,6 +123,15 @@ export function transition(state: TaskState, event: TaskEvent): TaskState {
   return next;
 }
 
+const STATES: ReadonlySet<TaskState> = new Set(
+  Object.keys(TRANSITIONS) as TaskState[],
+);
+const EVENTS: ReadonlySet<TaskEvent> = new Set(
+  (Object.values(TRANSITIONS) as Partial<Record<TaskEvent, TaskState>>[]).flatMap(
+    (edges) => Object.keys(edges) as TaskEvent[],
+  ),
+);
+
 /** Events allowed from a state (for UI gating). */
 export function allowedEvents(state: TaskState): TaskEvent[] {
   return Object.keys(TRANSITIONS[state]) as TaskEvent[];
@@ -156,6 +165,162 @@ export interface TaskHistoryEntry {
   at: string; // ISO timestamp
   actor?: string; // contributor | reviewer | moderator | system
   note?: string;
+}
+
+/**
+ * Serializable snapshot of a task: live state + append-only history +
+ * per-state SLA deadlines. Plain JSON (no class instances, no Maps), safe
+ * to store in any document store and feed back into fromJSON().
+ */
+export interface TaskSnapshot {
+  id: string;
+  state: TaskState;
+  history: TaskHistoryEntry[];
+  slaDeadlines: Partial<Record<TaskState, string>>;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isCanonicalIso(s: unknown): s is string {
+  if (typeof s !== "string") return false;
+  const ms = Date.parse(s);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === s;
+}
+
+/**
+ * Parse and strictly validate an untrusted value into a TaskSnapshot.
+ *
+ * Throws with a specific message on the first problem found:
+ *  - not an object / missing id / unknown state
+ *  - history entry shape violations (seq, event, from, to, at)
+ *  - seq must restart at 1 and increment by 1 with no gaps
+ *  - the from/to chain must be continuous, start at DRAFT, and land on
+ *    the snapshot's state
+ *  - every (from, event) -> to edge must be a legal transition edge
+ *  - timestamps must be canonical ISO-8601 and non-decreasing
+ *  - SLA deadlines must name real states with parseable dates (values
+ *    are normalized to canonical ISO, exactly like setSlaDeadline does)
+ *
+ * Anything produced by toJSON() passes; anything else must earn its way.
+ */
+function parseSnapshot(snapshot: unknown): {
+  id: string;
+  state: TaskState;
+  history: TaskHistoryEntry[];
+  slaDeadlines: Partial<Record<TaskState, string>>;
+} {
+  if (!isRecord(snapshot)) {
+    throw new Error("invalid snapshot: expected a JSON object");
+  }
+  if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
+    throw new Error("invalid snapshot: id must be a non-empty string");
+  }
+  if (!STATES.has(snapshot.state as TaskState)) {
+    throw new Error(`invalid snapshot: unknown state ${String(snapshot.state)}`);
+  }
+  const state = snapshot.state as TaskState;
+
+  if (!Array.isArray(snapshot.history)) {
+    throw new Error("invalid snapshot: history must be an array");
+  }
+  const history: TaskHistoryEntry[] = [];
+  for (let i = 0; i < snapshot.history.length; i++) {
+    const raw = snapshot.history[i];
+    const tag = `invalid snapshot: history[${i}]`;
+    if (!isRecord(raw)) throw new Error(`${tag}: entry must be an object`);
+    if (raw.seq !== i + 1) {
+      throw new Error(`${tag}: seq must be ${i + 1}, got ${String(raw.seq)}`);
+    }
+    if (!EVENTS.has(raw.event as TaskEvent)) {
+      throw new Error(`${tag}: unknown event ${String(raw.event)}`);
+    }
+    if (!STATES.has(raw.from as TaskState)) {
+      throw new Error(`${tag}: unknown from-state ${String(raw.from)}`);
+    }
+    if (!STATES.has(raw.to as TaskState)) {
+      throw new Error(`${tag}: unknown to-state ${String(raw.to)}`);
+    }
+    if (!isCanonicalIso(raw.at)) {
+      throw new Error(`${tag}: at must be canonical ISO-8601, got ${String(raw.at)}`);
+    }
+    const event = raw.event as TaskEvent;
+    const from = raw.from as TaskState;
+    const to = raw.to as TaskState;
+    if (i === 0 && from !== "DRAFT") {
+      throw new Error(`${tag}: chain must start at DRAFT, got ${from}`);
+    }
+    if (i > 0) {
+      const prev = history[i - 1];
+      if (from !== prev.to) {
+        throw new Error(
+          `${tag}: from ${from} does not continue previous to ${prev.to}`,
+        );
+      }
+      if (Date.parse(raw.at) < Date.parse(prev.at)) {
+        throw new Error(`${tag}: timestamps must be non-decreasing`);
+      }
+    }
+    const legal = (TRANSITIONS[from] as Partial<Record<TaskEvent, TaskState>>)[
+      event
+    ];
+    if (legal !== to) {
+      throw new Error(`${tag}: ${event} from ${from} cannot lead to ${to}`);
+    }
+    const entry: TaskHistoryEntry = {
+      seq: i + 1,
+      event,
+      from,
+      to,
+      at: raw.at,
+    };
+    if (raw.actor !== undefined) {
+      if (typeof raw.actor !== "string") {
+        throw new Error(`${tag}: actor must be a string`);
+      }
+      entry.actor = raw.actor;
+    }
+    if (raw.note !== undefined) {
+      if (typeof raw.note !== "string") {
+        throw new Error(`${tag}: note must be a string`);
+      }
+      entry.note = raw.note;
+    }
+    history.push(entry);
+  }
+
+  if (history.length > 0) {
+    const last = history[history.length - 1];
+    if (last.to !== state) {
+      throw new Error(
+        `invalid snapshot: history ends at ${last.to} but state is ${state}`,
+      );
+    }
+  } else if (state !== "DRAFT") {
+    throw new Error(
+      `invalid snapshot: empty history but state is ${state} (expected DRAFT)`,
+    );
+  }
+
+  const slaDeadlines: Partial<Record<TaskState, string>> = {};
+  if (snapshot.slaDeadlines !== undefined) {
+    if (!isRecord(snapshot.slaDeadlines)) {
+      throw new Error("invalid snapshot: slaDeadlines must be an object");
+    }
+    for (const [key, value] of Object.entries(snapshot.slaDeadlines)) {
+      if (!STATES.has(key as TaskState)) {
+        throw new Error(`invalid snapshot: unknown SLA state ${key}`);
+      }
+      const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+      if (Number.isNaN(ms)) {
+        throw new Error(`invalid snapshot: unparseable SLA deadline for ${key}`);
+      }
+      slaDeadlines[key as TaskState] = new Date(ms).toISOString();
+    }
+  }
+
+  return { id: snapshot.id, state, history, slaDeadlines };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -223,15 +388,59 @@ export class TaskLifecycle {
     const from = this._state;
     const to = transition(from, event); // throws on invalid transition
     this._state = to;
-    this._history.push({
+    const entry: TaskHistoryEntry = {
       seq: this._history.length + 1,
       event,
       from,
       to,
       at: new Date().toISOString(),
-      actor: opts?.actor,
-      note: opts?.note,
-    });
+    };
+    if (opts?.actor !== undefined) entry.actor = opts.actor;
+    if (opts?.note !== undefined) entry.note = opts.note;
+    this._history.push(entry);
     return to;
+  }
+
+  // ------------------------------------------------------------------
+  // JSON persistence — snapshot export / import.
+  //
+  // The history is the audit trail, so a snapshot carries the live state,
+  // the full append-only history, and the advisory SLA deadlines — all as
+  // plain JSON, safe for any document store. Rehydrating runs the same
+  // integrity checks the audit tests enforce: seq continuity, from/to
+  // chain, legal transition edges, canonical ISO timestamps.
+  // ------------------------------------------------------------------
+
+  /**
+   * Export this task as a plain-JSON snapshot. The returned object is
+   * detached: mutating it never affects the live task.
+   */
+  toJSON(): TaskSnapshot {
+    const deadlines: Partial<Record<TaskState, string>> = {};
+    for (const [state, deadline] of this._slaDeadlines) {
+      deadlines[state] = deadline;
+    }
+    return {
+      id: this.id,
+      state: this._state,
+      history: this._history.map((e) => ({ ...e })),
+      slaDeadlines: deadlines,
+    };
+  }
+
+  /**
+   * Rebuild a TaskLifecycle from an untrusted snapshot (e.g. one read
+   * back from a store). Throws a specific error on any malformed or
+   * inconsistent input — see parseSnapshot for the full checklist.
+   */
+  static fromJSON(snapshot: unknown): TaskLifecycle {
+    const parsed = parseSnapshot(snapshot);
+    const task = new TaskLifecycle(parsed.id);
+    task._state = parsed.state;
+    task._history = parsed.history;
+    for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
+      task.setSlaDeadline(deadline, state as TaskState);
+    }
+    return task;
   }
 }
