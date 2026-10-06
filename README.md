@@ -246,6 +246,36 @@ library records the actor string it is given but cannot verify who
 "senior-moderator" really is. It guarantees policy violations never
 dispatch and every allowed dispatch is audited with its actor string.
 
+## Dispatch subscriptions
+
+`dispatch()` has an in-process notification seam — the starting point
+for notification fan-out (emails, Slack pings, queue messages), which
+callers build on top:
+
+```ts
+const task = new TaskLifecycle("task-042");
+const unsub = task.subscribe((event, from, to, entry) => {
+  // fire-and-forget: hand off to your notifier here
+  console.log(`${event}: ${from} -> ${to} (seq ${entry.seq})`);
+});
+task.dispatch("PUBLISH", { actor: "researcher" }); // listener runs here
+unsub();
+```
+
+Rules: listeners run **after** the audit entry is appended, in
+subscription order, and receive the exact entry (a frozen, detached
+copy — listeners cannot rewrite the audit trail). Failed dispatches
+notify nobody. A listener that throws is **isolated**: the error is
+swallowed, the remaining listeners still run, and dispatch returns
+normally — a bad fan-out consumer can never break the state machine or
+corrupt the history. That silence is deliberate; wrap your listener if
+you need failure visibility.
+
+Honest caveat: subscriptions are in-memory only — they do not survive
+`toJSON()`/`fromJSON()`/`fromHistory()` (rehydrated tasks start with
+zero listeners), and the library provides no durable fan-out (queues,
+webhooks, retries). That remains the caller's infrastructure.
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
@@ -254,8 +284,10 @@ dispatch and every allowed dispatch is audited with its actor string.
   "Persistence") — there is still no built-in store, no identity layer
   (event-level RBAC is a caller-supplied actor allowlist, not
   authentication — see "Event-level RBAC"), no
-  deadline scheduler (expiry is an explicit event, not a timer), no
-  notification fan-out.
+  deadline scheduler (expiry is an explicit event, not a timer). In-process
+  dispatch subscriptions exist (`task.subscribe` — fire-and-forget,
+  listener errors swallowed, not persisted); there is still no durable
+  notification fan-out (queues, webhooks, retries).
 - **Simplified arbitration.** One appeal round is modeled; production would
   bound appeals and add per-state retry budgets. (Task-level RESUBMIT retry
   budgets exist since v0.1.0 — see "Retry budgets" above; per-state SLA
@@ -270,7 +302,7 @@ dispatch and every allowed dispatch is audited with its actor string.
 
 ## Reproducibility
 
-`npm test` runs 129 tests covering the happy path, reject→resubmit
+`npm test` runs 137 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),
@@ -285,8 +317,10 @@ locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
 canonical ISO timestamps, no partial entry on failed dispatch,
 dispatch actor/note input validation, runtime
-freeze of the returned history), and per-edge agreement between the rendered diagram and
-`transition()`. No network, no randomness in
+freeze of the returned history), dispatch subscription hooks (order,
+unsubscribe, listener-error isolation, frozen detached entries,
+in-memory-only semantics), and per-edge agreement between the rendered
+diagram and `transition()`. No network, no randomness in
 assertions.
 
 ## License

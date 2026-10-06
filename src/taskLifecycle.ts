@@ -283,6 +283,20 @@ function assertRolePolicy(
 }
 
 /**
+ * Listener for dispatch notifications: called with the event, the from/to
+ * states, and the exact audit entry that was appended.
+ *
+ * The entry is a frozen, detached copy — mutating it never affects the
+ * task's audit trail.
+ */
+export type TaskEventListener = (
+  event: TaskEvent,
+  from: TaskState,
+  to: TaskState,
+  entry: TaskHistoryEntry,
+) => void;
+
+/**
  * Serializable snapshot of a task: live state + append-only history +
  * per-state SLA deadlines. Plain JSON (no class instances, no Maps), safe
  * to store in any document store and feed back into fromJSON().
@@ -606,6 +620,11 @@ export class TaskLifecycle {
    * (checked after the transition legality check, before the retry budget).
    * Events the policy does not cover are unrestricted, and a task built
    * without a policy skips the check entirely.
+   *
+   * After the audit entry is appended, registered `subscribe()` listeners
+   * are notified (event, from, to, entry) in subscription order; a listener
+   * that throws is isolated — the dispatch still returns normally and the
+   * history stays intact.
    */
   dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
@@ -651,7 +670,78 @@ export class TaskLifecycle {
     if (opts?.actor !== undefined) entry.actor = opts.actor;
     if (opts?.note !== undefined) entry.note = opts.note;
     this._history.push(entry);
+    this._notifyListeners(event, from, to, entry);
     return to;
+  }
+
+  // ------------------------------------------------------------------
+  // Dispatch subscriptions — the notification fan-out seam.
+  //
+  // `dispatch` currently has no external notification point beyond the
+  // audit history. subscribe() fills that seam with in-process hooks:
+  // listeners run AFTER the audit entry is appended, in subscription
+  // order, and can never roll it back.
+  //
+  // Error isolation is a deliberate, documented tradeoff: each listener's
+  // throw is caught and swallowed so a bad fan-out consumer can never
+  // break dispatch, corrupt the audit trail, or starve later listeners.
+  // This means listener failures are silent by design — if you need
+  // visibility, wrap your listener in try/catch and report to your own
+  // error sink. The entry handed to listeners is a frozen, detached copy,
+  // so a listener cannot rewrite the audit trail either.
+  //
+  // Honest limits: subscriptions are in-memory only. They are NOT part of
+  // the JSON snapshot (toJSON()/fromJSON()/fromHistory() rehydrate with
+  // zero listeners), and there is no durable fan-out (queues, webhooks,
+  // retries) — that stays the caller's infrastructure.
+  // ------------------------------------------------------------------
+
+  private _listeners: TaskEventListener[] = [];
+
+  /**
+   * Register a listener called with (event, from, to, entry) after every
+   * successful dispatch. Returns an unsubscribe function (idempotent:
+   * calling it twice is a no-op).
+   *
+   * Listeners are called in subscription order over a snapshot of the
+   * listener list, so a listener that subscribes/unsubscribes during
+   * notification affects only later dispatches. A listener that throws is
+   * isolated: the error is swallowed, the remaining listeners still run,
+   * and dispatch returns normally with the audit entry intact.
+   */
+  subscribe(listener: TaskEventListener): () => void {
+    if (typeof listener !== "function") {
+      throw new Error(
+        `invalid subscribe: listener must be a function, got ${typeof listener}`,
+      );
+    }
+    this._listeners.push(listener);
+    return () => {
+      const i = this._listeners.indexOf(listener);
+      if (i >= 0) this._listeners.splice(i, 1);
+    };
+  }
+
+  /** How many listeners are currently subscribed (debug/observability aid). */
+  get listenerCount(): number {
+    return this._listeners.length;
+  }
+
+  private _notifyListeners(
+    event: TaskEvent,
+    from: TaskState,
+    to: TaskState,
+    entry: TaskHistoryEntry,
+  ): void {
+    if (this._listeners.length === 0) return;
+    const notification = Object.freeze({ ...entry });
+    for (const listener of [...this._listeners]) {
+      try {
+        listener(event, from, to, notification);
+      } catch {
+        // Swallowed on purpose: isolation is the contract (see subscribe).
+      }
+    }
   }
 
   // ------------------------------------------------------------------

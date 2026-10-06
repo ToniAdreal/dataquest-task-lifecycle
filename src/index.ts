@@ -15,6 +15,7 @@ export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
   RolePolicy,
   TaskEvent,
+  TaskEventListener,
   TaskHistoryEntry,
   TaskLifecycleOptions,
   TaskSnapshot,
