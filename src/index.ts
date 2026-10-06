@@ -1,6 +1,7 @@
 export {
   TaskLifecycle,
   allowedEvents,
+  expiredTasks,
   isOverdue,
   isTerminal,
   replay,

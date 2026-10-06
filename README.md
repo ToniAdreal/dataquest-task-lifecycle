@@ -98,6 +98,19 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 `isOverdue()` and dispatches `EXPIRE` itself, which is exactly what
 `test/sla.test.ts` demonstrates in its last case.
 
+For batch polling there is a dedicated helper — `expiredTasks(tasks, now)`
+returns the "non-terminal and past deadline" subset of a task list, so a
+watchdog does it in one line (pure function: it never mutates or dispatches):
+
+```ts
+import { expiredTasks, TaskLifecycle } from "./src/index.js";
+
+const tasks: TaskLifecycle[] = loadTasks(); // your store
+for (const task of expiredTasks(tasks)) {
+  task.dispatch("EXPIRE", { actor: "system" });
+}
+```
+
 ## Persistence
 
 A task can be exported to plain JSON and rebuilt later — no database

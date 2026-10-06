@@ -157,6 +157,25 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
   return now.getTime() >= Date.parse(deadline);
 }
 
+/**
+ * Watchdog helper: from a batch of tasks, return the ones a watchdog
+ * should expire right now — non-terminal AND past their SLA deadline.
+ *
+ * This is just `isOverdue()` over a list, but it captures the documented
+ * watchdog pattern so callers do it in one line:
+ *
+ *   for (const task of expiredTasks(allTasks)) task.dispatch("EXPIRE", { actor: "system" });
+ *
+ * Pure: reads the tasks, never mutates or dispatches. The `now` default
+ * is the real clock, so unit tests pin it to a fixed date.
+ */
+export function expiredTasks(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): TaskLifecycle[] {
+  return tasks.filter((task) => isOverdue(task, now));
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
