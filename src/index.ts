@@ -13,6 +13,7 @@ export {
 export type {
   TaskEvent,
   TaskHistoryEntry,
+  TaskLifecycleOptions,
   TaskSnapshot,
   TaskState,
   TransitionEdge,

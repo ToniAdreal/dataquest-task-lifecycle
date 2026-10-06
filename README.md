@@ -166,6 +166,28 @@ recoverable from the log (entries carry no id), so it is passed
 explicitly, and advisory SLA deadlines are not part of the audit log, so
 they are not restored (use `fromJSON()` for the full snapshot).
 
+## Retry budgets
+
+A task can cap how many times it may be resubmitted — the production
+"bound appeals" habit, as a task-level policy:
+
+```ts
+const task = new TaskLifecycle("task-042", { maxResubmits: 2 });
+// …REJECTED → RESUBMIT → CAPTURING → … → REJECTED → RESUBMIT → …
+// the third dispatch("RESUBMIT") throws:
+//   resubmit budget exhausted: 2 of 2 RESUBMITs already used
+```
+
+`maxResubmits` defaults to unlimited (the pre-budget behavior is
+unchanged) and must be a non-negative integer or `Infinity`. The used
+count is derived from the append-only history — the audit entries are the
+source of truth — so it survives persistence with the budget: `toJSON()`
+stores the finite budget in the snapshot envelope, and `fromJSON()` /
+`TaskLifecycle.fromHistory(id, log, { maxResubmits })` rehydrate it
+without resetting either. The check runs after the transition legality
+check and before anything is appended, so a rejected dispatch leaves no
+trace in the history.
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
@@ -175,8 +197,9 @@ they are not restored (use `fromJSON()` for the full snapshot).
   deadline scheduler (expiry is an explicit event, not a timer), no
   notification fan-out.
 - **Simplified arbitration.** One appeal round is modeled; production would
-  bound appeals and add per-state retry budgets. (Per-state SLA deadlines
-  exist since v0.1.0 — see "SLA deadlines" above; expiry remains explicit.)
+  bound appeals and add per-state retry budgets. (Task-level RESUBMIT retry
+  budgets exist since v0.1.0 — see "Retry budgets" above; per-state SLA
+  deadlines also exist — see "SLA deadlines"; expiry remains explicit.)
 - **No reputation/quality scoring.** The case study's contributor tiers and
   earnings wallet are out of scope here.
 - **Append-only history is runtime-frozen.** `task.history` returns a frozen
@@ -187,7 +210,10 @@ they are not restored (use `fromJSON()` for the full snapshot).
 
 ## Reproducibility
 
-`npm test` runs 84 tests covering the happy path, reject→resubmit,
+`npm test` runs 97 tests covering the happy path, reject→resubmit
+(including the RESUBMIT retry budget: budget enforcement, invalid
+budgets, and snapshot round-trips that preserve the budget and used
+count),
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, and rejection of 18 malformed-snapshot

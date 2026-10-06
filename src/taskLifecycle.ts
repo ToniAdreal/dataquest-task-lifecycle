@@ -187,15 +187,52 @@ export interface TaskHistoryEntry {
 }
 
 /**
+ * Constructor options for TaskLifecycle.
+ *
+ * `maxResubmits` caps how many times `dispatch("RESUBMIT")` may run on
+ * this task — a retry budget, defaulting to `Infinity` (unlimited, exactly
+ * the pre-budget behavior). Must be a non-negative integer or `Infinity`;
+ * anything else throws `invalid option: …` at construction. The count of
+ * used resubmits is derived from the append-only history (the entries are
+ * the audit truth), so it survives `toJSON()`/`fromJSON()` round-trips
+ * automatically: only the budget itself is stored in the snapshot
+ * envelope.
+ */
+export interface TaskLifecycleOptions {
+  maxResubmits?: number;
+}
+
+function assertMaxResubmits(value: unknown, tag: string): number {
+  if (value === undefined) return Infinity;
+  if (
+    typeof value !== "number" ||
+    Number.isNaN(value) ||
+    !(value === Infinity || (Number.isInteger(value) && value >= 0))
+  ) {
+    throw new Error(
+      `${tag}: maxResubmits must be a non-negative integer or Infinity, got ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+/**
  * Serializable snapshot of a task: live state + append-only history +
  * per-state SLA deadlines. Plain JSON (no class instances, no Maps), safe
  * to store in any document store and feed back into fromJSON().
+ *
+ * `maxResubmits` is present only when the budget is finite (JSON cannot
+ * represent `Infinity`; an absent field rehydrates to the unlimited
+ * default). The count of already-used resubmits is NOT stored separately —
+ * it is derived from the history on rehydration, so it can never drift
+ * from the audit trail.
  */
 export interface TaskSnapshot {
   id: string;
   state: TaskState;
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
+  maxResubmits?: number;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -315,6 +352,10 @@ export function replay(history: unknown): TaskState {
  *  - the history's replayed state must land on the snapshot's state
  *  - SLA deadlines must name real states with parseable dates (values
  *    are normalized to canonical ISO, exactly like setSlaDeadline does)
+ *  - maxResubmits, when present, must be a non-negative integer or
+ *    Infinity (absent means the unlimited default; a history that already
+ *    exceeds the budget does NOT fail rehydration — the budget only
+ *    governs future dispatches)
  *
  * Anything produced by toJSON() passes; anything else must earn its way.
  */
@@ -323,6 +364,7 @@ function parseSnapshot(snapshot: unknown): {
   state: TaskState;
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
+  maxResubmits: number;
 } {
   if (!isRecord(snapshot)) {
     throw new Error("invalid snapshot: expected a JSON object");
@@ -367,7 +409,17 @@ function parseSnapshot(snapshot: unknown): {
     }
   }
 
-  return { id: snapshot.id, state, history, slaDeadlines };
+  // The budget is policy for FUTURE dispatches, not part of the audit
+  // truth, so a snapshot whose history already exceeds its budget is
+  // still a valid record — rehydration does not throw; the next
+  // dispatch("RESUBMIT") will. (assertMaxResubmits rejects null/NaN/
+  // negatives/strings; absent means unlimited, exactly the default.)
+  const maxResubmits = assertMaxResubmits(
+    snapshot.maxResubmits,
+    "invalid snapshot",
+  );
+
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -375,9 +427,11 @@ export class TaskLifecycle {
   readonly id: string;
   private _state: TaskState = "DRAFT";
   private _history: TaskHistoryEntry[] = [];
+  private _maxResubmits: number;
 
-  constructor(id: string) {
+  constructor(id: string, opts?: TaskLifecycleOptions) {
     this.id = id;
+    this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
   }
 
   get state(): TaskState {
@@ -439,6 +493,19 @@ export class TaskLifecycle {
   }
 
   /**
+   * How many RESUBMITs have been used so far (derived from the
+   * append-only history — the audit entries are the source of truth,
+   * so the count can never drift from what actually happened).
+   */
+  private get _resubmitCount(): number {
+    let n = 0;
+    for (const e of this._history) {
+      if (e.event === "RESUBMIT") n++;
+    }
+    return n;
+  }
+
+  /**
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they
@@ -448,6 +515,12 @@ export class TaskLifecycle {
    * untrusted snapshots — the audit trail must stay string-typed on both
    * the live and the rehydrated path. Invalid events still throw
    * `invalid transition: …` (checked after the options).
+   *
+   * Retry budget: when this task was constructed with a finite
+   * `maxResubmits` and the history already holds that many RESUBMIT
+   * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
+   * (checked after the transition legality check). This is checked before
+   * appending, so a rejected dispatch leaves no trace in the history.
    */
   dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
@@ -462,6 +535,11 @@ export class TaskLifecycle {
     }
     const from = this._state;
     const to = transition(from, event); // throws on invalid transition
+    if (event === "RESUBMIT" && this._resubmitCount >= this._maxResubmits) {
+      throw new Error(
+        `resubmit budget exhausted: ${this._resubmitCount} of ${this._maxResubmits} RESUBMITs already used`,
+      );
+    }
     this._state = to;
     const entry: TaskHistoryEntry = {
       seq: this._history.length + 1,
@@ -489,18 +567,28 @@ export class TaskLifecycle {
   /**
    * Export this task as a plain-JSON snapshot. The returned object is
    * detached: mutating it never affects the live task.
+   *
+   * When the retry budget is finite, `maxResubmits` is included in the
+   * envelope (the unlimited default is omitted — JSON cannot represent
+   * `Infinity`). The used count is not stored; it is derived from the
+   * history on rehydration, so a round-trip keeps the budget AND the
+   * used count without either being able to drift from the audit trail.
    */
   toJSON(): TaskSnapshot {
     const deadlines: Partial<Record<TaskState, string>> = {};
     for (const [state, deadline] of this._slaDeadlines) {
       deadlines[state] = deadline;
     }
-    return {
+    const snapshot: TaskSnapshot = {
       id: this.id,
       state: this._state,
       history: this._history.map((e) => ({ ...e })),
       slaDeadlines: deadlines,
     };
+    if (Number.isFinite(this._maxResubmits)) {
+      snapshot.maxResubmits = this._maxResubmits;
+    }
+    return snapshot;
   }
 
   /**
@@ -510,7 +598,7 @@ export class TaskLifecycle {
    */
   static fromJSON(snapshot: unknown): TaskLifecycle {
     const parsed = parseSnapshot(snapshot);
-    const task = new TaskLifecycle(parsed.id);
+    const task = new TaskLifecycle(parsed.id, { maxResubmits: parsed.maxResubmits });
     task._state = parsed.state;
     task._history = parsed.history;
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
@@ -530,12 +618,20 @@ export class TaskLifecycle {
    * restored — use fromJSON() when the snapshot envelope is available.
    * Throws a specific `invalid history: …` error on any malformed or
    * inconsistent input — see parseHistory for the full checklist.
+   *
+   * `opts.maxResubmits` re-attaches a retry budget to the rehydrated
+   * task; the used count is derived from the replayed history (the same
+   * rule as fromJSON()). Omit it for the unlimited default.
    */
-  static fromHistory(id: string, history: unknown): TaskLifecycle {
+  static fromHistory(
+    id: string,
+    history: unknown,
+    opts?: TaskLifecycleOptions,
+  ): TaskLifecycle {
     if (typeof id !== "string" || id.length === 0) {
       throw new Error("invalid history: id must be a non-empty string");
     }
-    const task = new TaskLifecycle(id);
+    const task = new TaskLifecycle(id, opts);
     task._state = replay(history);
     task._history = parseHistory(history);
     return task;
