@@ -176,6 +176,91 @@ export function expiredTasks(
   return tasks.filter((task) => isOverdue(task, now));
 }
 
+/**
+ * Fail-fast validation for `staleTasks()` configuration.
+ *
+ * Every key must be a known `TaskState`, every value a non-negative finite
+ * number of milliseconds (0 is legal: "stale the instant it entered").
+ */
+function assertMaxAgeByState(
+  value: unknown,
+): asserts value is Partial<Record<TaskState, number>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(
+      "invalid maxAgeByState: expected an object mapping TaskState to a non-negative millisecond budget",
+    );
+  }
+  for (const [state, maxAge] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!STATES.has(state as TaskState)) {
+      throw new Error(`invalid maxAgeByState: unknown state "${state}"`);
+    }
+    if (
+      typeof maxAge !== "number" ||
+      !Number.isFinite(maxAge) ||
+      maxAge < 0
+    ) {
+      throw new Error(
+        `invalid maxAgeByState: budget for "${state}" must be a non-negative finite number of milliseconds`,
+      );
+    }
+  }
+}
+
+/**
+ * Watchdog helper: from a batch of tasks, return the ones that have been
+ * sitting in their CURRENT non-terminal state longer than the per-state
+ * budget — "stale" tasks a watchdog might want to nudge, page, or expire
+ * explicitly.
+ *
+ * The dwell clock starts at the `at` timestamp of the task's most recent
+ * history entry (the moment it entered its current state). A task is stale
+ * when `now - enteredAt > maxAgeByState[state]` (strictly past the budget).
+ * Terminal states are never selected — a completed task cannot be "stale";
+ * states absent from the map are ignored (no budget = no staleness). A
+ * task with no history yet has no measurable dwell time and is never
+ * selected.
+ *
+ * This is the `expiredTasks()` companion: `expiredTasks()` answers
+ * "past an absolute SLA deadline", `staleTasks()` answers "stuck in this
+ * state too long" (e.g. nobody picked up an OPEN task, a review has been
+ * pending for a week). Pure: reads the tasks, never mutates or dispatches.
+ * The `now` default is the real clock, so unit tests pin it to a fixed
+ * date.
+ *
+ *   const stale = staleTasks(allTasks, {
+ *     IN_REVIEW: 7 * 24 * 3600_000, // a week
+ *     OPEN: 30 * 24 * 3600_000,    // a month
+ *   });
+ *   for (const task of stale) {
+ *     task.dispatch("ABANDON", { actor: "system" }); // or notify, not expire
+ *   }
+ */
+export function staleTasks(
+  tasks: readonly TaskLifecycle[],
+  maxAgeByState: Partial<Record<TaskState, number>>,
+  now: Date = new Date(),
+): TaskLifecycle[] {
+  assertMaxAgeByState(maxAgeByState);
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  return tasks.filter((task) => {
+    if (task.isTerminal) return false;
+    const maxAgeMs = maxAgeByState[task.state];
+    if (maxAgeMs === undefined) return false;
+    const history = task.history;
+    if (history.length === 0) return false;
+    // parseHistory() validates canonical ISO on every append, so this
+    // parse cannot fail on entries produced by dispatch()/fromJSON().
+    const enteredAt = Date.parse(history[history.length - 1].at);
+    if (!Number.isFinite(enteredAt)) return false;
+    return nowMs - enteredAt > maxAgeMs;
+  });
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;

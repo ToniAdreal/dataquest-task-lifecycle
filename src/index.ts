@@ -6,6 +6,7 @@ export {
   isTerminal,
   parseHistory,
   replay,
+  staleTasks,
   stateDiagram,
   transition,
   transitionTable,

@@ -111,6 +111,28 @@ for (const task of expiredTasks(tasks)) {
 }
 ```
 
+A related but distinct screening is `staleTasks(tasks, maxAgeByState, now)`
+— it finds tasks stuck in their *current* non-terminal state longer than a
+per-state budget, measured from the last history entry's timestamp. That is
+the watchdog for "nobody picked up this OPEN task in a month" or "this
+review has been pending a week", as opposed to "this task passed an absolute
+deadline". Terminal states and states with no configured budget are never
+selected; the helper is pure (never mutates or dispatches), and invalid
+budget configuration fails fast with `invalid maxAgeByState: …`:
+
+```ts
+import { staleTasks, TaskLifecycle } from "./src/index.js";
+
+const tasks: TaskLifecycle[] = loadTasks(); // your store
+const stale = staleTasks(tasks, {
+  IN_REVIEW: 7 * 24 * 3600_000, // a week
+  OPEN: 30 * 24 * 3600_000,    // a month
+});
+for (const task of stale) {
+  task.dispatch("ABANDON", { actor: "system" }); // or page a human, not expire
+}
+```
+
 ## Persistence
 
 A task can be exported to plain JSON and rebuilt later — no database
@@ -302,7 +324,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 137 tests covering the happy path, reject→resubmit
+`npm test` runs 146 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),
@@ -319,7 +341,9 @@ canonical ISO timestamps, no partial entry on failed dispatch,
 dispatch actor/note input validation, runtime
 freeze of the returned history), dispatch subscription hooks (order,
 unsubscribe, listener-error isolation, frozen detached entries,
-in-memory-only semantics), and per-edge agreement between the rendered
+in-memory-only semantics), stale-task watchdog screening (`staleTasks`:
+dwell budgets per state, terminal/history-less exclusion, invalid-budget
+fail-fast, purity), and per-edge agreement between the rendered
 diagram and `transition()`. No network, no randomness in
 assertions.
 
