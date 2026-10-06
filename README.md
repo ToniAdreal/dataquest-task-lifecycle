@@ -187,7 +187,7 @@ they are not restored (use `fromJSON()` for the full snapshot).
 
 ## Reproducibility
 
-`npm test` runs 67 tests covering the happy path, reject→resubmit,
+`npm test` runs 84 tests covering the happy path, reject→resubmit,
 dispute→arbitration (both outcomes), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, and rejection of 18 malformed-snapshot
@@ -195,7 +195,8 @@ shapes), event-sourced replay (golden paths, input detachment, and 10
 malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
-canonical ISO timestamps, no partial entry on failed dispatch, runtime
+canonical ISO timestamps, no partial entry on failed dispatch,
+dispatch actor/note input validation, runtime
 freeze of the returned history), and per-edge agreement between the rendered diagram and
 `transition()`. No network, no randomness in
 assertions.

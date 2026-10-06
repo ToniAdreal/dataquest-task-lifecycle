@@ -438,7 +438,28 @@ export class TaskLifecycle {
     else this._slaDeadlines.delete(state);
   }
 
+  /**
+   * Move the task to the next state via an event, appending the audit entry.
+   *
+   * `opts.actor` / `opts.note` are written into the entry verbatim, so they
+   * are validated up front: any non-string value throws
+   * `invalid dispatch options: …` before anything mutates. This mirrors the
+   * strict actor/note checks `fromJSON()` / `fromHistory()` apply to
+   * untrusted snapshots — the audit trail must stay string-typed on both
+   * the live and the rehydrated path. Invalid events still throw
+   * `invalid transition: …` (checked after the options).
+   */
   dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {
+    if (opts?.actor !== undefined && typeof opts.actor !== "string") {
+      throw new Error(
+        `invalid dispatch options: actor must be a string, got ${typeof opts.actor}`,
+      );
+    }
+    if (opts?.note !== undefined && typeof opts.note !== "string") {
+      throw new Error(
+        `invalid dispatch options: note must be a string, got ${typeof opts.note}`,
+      );
+    }
     const from = this._state;
     const to = transition(from, event); // throws on invalid transition
     this._state = to;
