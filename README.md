@@ -324,7 +324,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 146 tests covering the happy path, reject→resubmit
+`npm test` runs 154 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),
@@ -338,7 +338,9 @@ malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,
 canonical ISO timestamps, no partial entry on failed dispatch,
-dispatch actor/note input validation, runtime
+dispatch actor/note input validation, injected dispatch timestamp (`at`:
+canonical ISO-8601, non-decreasing vs. the previous entry, fail-fast
+before the transition check), runtime
 freeze of the returned history), dispatch subscription hooks (order,
 unsubscribe, listener-error isolation, frozen detached entries,
 in-memory-only semantics), stale-task watchdog screening (`staleTasks`:

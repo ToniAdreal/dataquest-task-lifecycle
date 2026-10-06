@@ -693,6 +693,15 @@ export class TaskLifecycle {
    * the live and the rehydrated path. Invalid events still throw
    * `invalid transition: …` (checked after the options).
    *
+   * `opts.at` is optional and exists for deterministic audit tests: when
+   * given it must be a canonical ISO-8601 timestamp (exactly what
+   * `new Date(ms).toISOString()` produces) and must not be earlier than
+   * the previous entry's `at` (non-decreasing — the same rule
+   * `parseHistory()` enforces), so an injected timestamp always lands
+   * verbatim and stays replay-safe. Invalid values throw
+   * `invalid dispatch options: …` up front, like actor/note. When
+   * omitted, the wall clock is used as before.
+   *
    * Retry budget: when this task was constructed with a finite
    * `maxResubmits` and the history already holds that many RESUBMIT
    * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
@@ -711,7 +720,10 @@ export class TaskLifecycle {
    * that throws is isolated — the dispatch still returns normally and the
    * history stays intact.
    */
-  dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {
+  dispatch(
+    event: TaskEvent,
+    opts?: { actor?: string; note?: string; at?: string },
+  ): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
       throw new Error(
         `invalid dispatch options: actor must be a string, got ${typeof opts.actor}`,
@@ -721,6 +733,19 @@ export class TaskLifecycle {
       throw new Error(
         `invalid dispatch options: note must be a string, got ${typeof opts.note}`,
       );
+    }
+    if (opts?.at !== undefined) {
+      if (typeof opts.at !== "string" || !isCanonicalIso(opts.at)) {
+        throw new Error(
+          `invalid dispatch options: at must be canonical ISO-8601, got ${String(opts.at)}`,
+        );
+      }
+      const prev = this._history[this._history.length - 1];
+      if (prev !== undefined && Date.parse(opts.at) < Date.parse(prev.at)) {
+        throw new Error(
+          `invalid dispatch options: at ${opts.at} is earlier than the previous entry's at ${prev.at}`,
+        );
+      }
     }
     const from = this._state;
     const to = transition(from, event); // throws on invalid transition
@@ -750,7 +775,7 @@ export class TaskLifecycle {
       event,
       from,
       to,
-      at: new Date().toISOString(),
+      at: opts?.at ?? new Date().toISOString(),
     };
     if (opts?.actor !== undefined) entry.actor = opts.actor;
     if (opts?.note !== undefined) entry.note = opts.note;
