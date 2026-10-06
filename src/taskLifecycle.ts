@@ -187,6 +187,24 @@ export interface TaskHistoryEntry {
 }
 
 /**
+ * Event-level RBAC policy: which actor names may dispatch which events.
+ *
+ * The map is partial — an event absent from the policy is unrestricted
+ * (any caller, with or without an actor). An event present in the policy
+ * requires `dispatch` to carry an `actor` that exactly matches one of the
+ * listed names (exact string equality, case-sensitive); anything else
+ * throws `actor not authorized for …`.
+ *
+ * This is a caller-supplied allowlist, not identity: the library cannot
+ * verify who "senior-moderator" really is. It only guarantees the audit
+ * trail records the actor string it was given, and that dispatches
+ * violating the declared policy never happen. Like `maxResubmits`, the
+ * policy is task configuration: it survives `toJSON()`/`fromJSON()`
+ * round-trips and can be re-attached on `fromHistory()`.
+ */
+export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
+
+/**
  * Constructor options for TaskLifecycle.
  *
  * `maxResubmits` caps how many times `dispatch("RESUBMIT")` may run on
@@ -197,9 +215,15 @@ export interface TaskHistoryEntry {
  * the audit truth), so it survives `toJSON()`/`fromJSON()` round-trips
  * automatically: only the budget itself is stored in the snapshot
  * envelope.
+ *
+ * `rolePolicy` is an optional {@link RolePolicy}: event → allowed actor
+ * names. Events not listed are unrestricted; omitting the policy disables
+ * the check entirely (the pre-policy behavior). Invalid policies throw
+ * `invalid option: …` at construction.
  */
 export interface TaskLifecycleOptions {
   maxResubmits?: number;
+  rolePolicy?: RolePolicy;
 }
 
 function assertMaxResubmits(value: unknown, tag: string): number {
@@ -217,6 +241,48 @@ function assertMaxResubmits(value: unknown, tag: string): number {
 }
 
 /**
+ * Validate an event-level RBAC policy into a normalized lookup map.
+ *
+ * `undefined` means "no policy" (the default: every event unrestricted).
+ * Otherwise the value must be a plain record whose keys are known events
+ * and whose values are non-empty arrays of non-empty role/actor strings.
+ * Anything else throws `<tag>: rolePolicy …`. Duplicate role names are
+ * harmless (deduped). The check order mirrors assertMaxResubmits — config
+ * errors are fail-fast, never silent.
+ */
+function assertRolePolicy(
+  value: unknown,
+  tag: string,
+): Map<TaskEvent, string[]> {
+  const policy = new Map<TaskEvent, string[]>();
+  if (value === undefined) return policy;
+  if (!isRecord(value)) {
+    throw new Error(`${tag}: rolePolicy must be an object, got ${typeof value}`);
+  }
+  for (const [event, roles] of Object.entries(value)) {
+    if (!EVENTS.has(event as TaskEvent)) {
+      throw new Error(`${tag}: rolePolicy has unknown event ${event}`);
+    }
+    if (!Array.isArray(roles) || roles.length === 0) {
+      throw new Error(
+        `${tag}: rolePolicy[${event}] must be a non-empty array of role names`,
+      );
+    }
+    const seen: string[] = [];
+    for (const role of roles) {
+      if (typeof role !== "string" || role.length === 0) {
+        throw new Error(
+          `${tag}: rolePolicy[${event}] roles must be non-empty strings, got ${JSON.stringify(role)}`,
+        );
+      }
+      if (!seen.includes(role)) seen.push(role);
+    }
+    policy.set(event as TaskEvent, seen);
+  }
+  return policy;
+}
+
+/**
  * Serializable snapshot of a task: live state + append-only history +
  * per-state SLA deadlines. Plain JSON (no class instances, no Maps), safe
  * to store in any document store and feed back into fromJSON().
@@ -226,6 +292,10 @@ function assertMaxResubmits(value: unknown, tag: string): number {
  * default). The count of already-used resubmits is NOT stored separately —
  * it is derived from the history on rehydration, so it can never drift
  * from the audit trail.
+ *
+ * `rolePolicy` is present only when the task carries an RBAC policy; it
+ * rehydrates through the same strict validation as the constructor, so a
+ * tampered policy in a stored snapshot is rejected, not silently applied.
  */
 export interface TaskSnapshot {
   id: string;
@@ -233,6 +303,7 @@ export interface TaskSnapshot {
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits?: number;
+  rolePolicy?: RolePolicy;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -365,6 +436,7 @@ function parseSnapshot(snapshot: unknown): {
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits: number;
+  rolePolicy: Map<TaskEvent, string[]>;
 } {
   if (!isRecord(snapshot)) {
     throw new Error("invalid snapshot: expected a JSON object");
@@ -419,7 +491,11 @@ function parseSnapshot(snapshot: unknown): {
     "invalid snapshot",
   );
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits };
+  // Same for the RBAC policy: configuration for future dispatches, so it
+  // is validated strictly but never consulted against the stored history.
+  const rolePolicy = assertRolePolicy(snapshot.rolePolicy, "invalid snapshot");
+
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, rolePolicy };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -428,10 +504,12 @@ export class TaskLifecycle {
   private _state: TaskState = "DRAFT";
   private _history: TaskHistoryEntry[] = [];
   private _maxResubmits: number;
+  private _rolePolicy: Map<TaskEvent, string[]>;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
     this.id = id;
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
+    this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
   }
 
   get state(): TaskState {
@@ -521,6 +599,13 @@ export class TaskLifecycle {
    * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
    * (checked after the transition legality check). This is checked before
    * appending, so a rejected dispatch leaves no trace in the history.
+   *
+   * Event-level RBAC: when the task carries a `rolePolicy` that lists this
+   * event, `opts.actor` must be present and exactly match one of the
+   * allowed role names, or dispatch throws `actor not authorized for …`
+   * (checked after the transition legality check, before the retry budget).
+   * Events the policy does not cover are unrestricted, and a task built
+   * without a policy skips the check entirely.
    */
   dispatch(event: TaskEvent, opts?: { actor?: string; note?: string }): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
@@ -535,6 +620,21 @@ export class TaskLifecycle {
     }
     const from = this._state;
     const to = transition(from, event); // throws on invalid transition
+    const allowedRoles = this._rolePolicy.get(event);
+    if (allowedRoles !== undefined) {
+      const actor = opts?.actor;
+      const list = allowedRoles.join(", ");
+      if (actor === undefined) {
+        throw new Error(
+          `actor not authorized for ${event}: policy requires an actor in [${list}]`,
+        );
+      }
+      if (!allowedRoles.includes(actor)) {
+        throw new Error(
+          `actor not authorized for ${event}: "${actor}" is not in [${list}]`,
+        );
+      }
+    }
     if (event === "RESUBMIT" && this._resubmitCount >= this._maxResubmits) {
       throw new Error(
         `resubmit budget exhausted: ${this._resubmitCount} of ${this._maxResubmits} RESUBMITs already used`,
@@ -573,6 +673,9 @@ export class TaskLifecycle {
    * `Infinity`). The used count is not stored; it is derived from the
    * history on rehydration, so a round-trip keeps the budget AND the
    * used count without either being able to drift from the audit trail.
+   *
+   * A task-level RBAC policy is included as a plain record when set
+   * (absent means unrestricted, exactly the constructor default).
    */
   toJSON(): TaskSnapshot {
     const deadlines: Partial<Record<TaskState, string>> = {};
@@ -588,6 +691,9 @@ export class TaskLifecycle {
     if (Number.isFinite(this._maxResubmits)) {
       snapshot.maxResubmits = this._maxResubmits;
     }
+    if (this._rolePolicy.size > 0) {
+      snapshot.rolePolicy = Object.fromEntries(this._rolePolicy);
+    }
     return snapshot;
   }
 
@@ -601,6 +707,7 @@ export class TaskLifecycle {
     const task = new TaskLifecycle(parsed.id, { maxResubmits: parsed.maxResubmits });
     task._state = parsed.state;
     task._history = parsed.history;
+    task._rolePolicy = parsed.rolePolicy;
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
       task.setSlaDeadline(deadline, state as TaskState);
     }
@@ -621,7 +728,10 @@ export class TaskLifecycle {
    *
    * `opts.maxResubmits` re-attaches a retry budget to the rehydrated
    * task; the used count is derived from the replayed history (the same
-   * rule as fromJSON()). Omit it for the unlimited default.
+   * rule as fromJSON()). Omit it for the unlimited default. `opts.rolePolicy`
+   * re-attaches an event-level RBAC policy the same way; omit it and the
+   * rehydrated task is unrestricted (policy is caller configuration, not
+   * audit data, so the log cannot restore it on its own).
    */
   static fromHistory(
     id: string,

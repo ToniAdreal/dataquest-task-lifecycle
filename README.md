@@ -188,12 +188,48 @@ without resetting either. The check runs after the transition legality
 check and before anything is appended, so a rejected dispatch leaves no
 trace in the history.
 
+## Event-level RBAC
+
+Tasks can gate individual events on named actors — the "only a senior
+moderator may arbitrate" rule from the case study, as task configuration:
+
+```ts
+const task = new TaskLifecycle("task-042", {
+  rolePolicy: {
+    ARBITRATE_APPROVE: ["senior-moderator"],
+    ARBITRATE_REJECT: ["senior-moderator"],
+    PUBLISH: ["researcher", "admin"],
+  },
+});
+task.dispatch("ARBITRATE_APPROVE", { actor: "contributor" });
+// throws: actor not authorized for ARBITRATE_APPROVE: "contributor" is not in [senior-moderator]
+```
+
+Rules: the policy is `Partial<Record<TaskEvent, string[]>>` — events it
+does not list are unrestricted (no actor needed), and a task built
+without a policy behaves exactly as before. A listed event requires an
+`actor` that exactly matches one of the allowed names (case-sensitive);
+missing or non-matching actors throw `actor not authorized for …`, after
+the transition legality check and before anything is appended, so rejected
+dispatches leave no history trace. Invalid policies (unknown events,
+empty or non-string role lists) throw `invalid option: rolePolicy …` at
+construction. The policy survives `toJSON()`/`fromJSON()` (tampered
+policies in stored snapshots are rejected) and re-attaches via
+`TaskLifecycle.fromHistory(id, log, { rolePolicy })`.
+
+Honest caveat: this is a caller-supplied allowlist, not identity — the
+library records the actor string it is given but cannot verify who
+"senior-moderator" really is. It guarantees policy violations never
+dispatch and every allowed dispatch is audited with its actor string.
+
 ## Limitations (honest)
 
 - **Off-chain reproduction.** The case study is a product-design artifact;
   this models the *rules* of the lifecycle, not a production backend.
   `toJSON()` / `fromJSON()` export and rehydrate in-memory snapshots (see
-  "Persistence") — there is still no built-in store, no auth/RBAC, no
+  "Persistence") — there is still no built-in store, no identity layer
+  (event-level RBAC is a caller-supplied actor allowlist, not
+  authentication — see "Event-level RBAC"), no
   deadline scheduler (expiry is an explicit event, not a timer), no
   notification fan-out.
 - **Simplified arbitration.** One appeal round is modeled; production would
@@ -210,11 +246,13 @@ trace in the history.
 
 ## Reproducibility
 
-`npm test` runs 97 tests covering the happy path, reject→resubmit
+`npm test` runs 115 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),
-dispute→arbitration (both outcomes), abandonment, expiration, SLA
+dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
+arbitration, partial policies, exact actor matching, and policy
+persistence round-trips), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, and rejection of 18 malformed-snapshot
 shapes), event-sourced replay (golden paths, input detachment, and 10

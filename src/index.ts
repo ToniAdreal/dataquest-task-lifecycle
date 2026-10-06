@@ -11,6 +11,7 @@ export {
   transitionTableJson,
 } from "./taskLifecycle.js";
 export type {
+  RolePolicy,
   TaskEvent,
   TaskHistoryEntry,
   TaskLifecycleOptions,
