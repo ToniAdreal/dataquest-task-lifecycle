@@ -212,6 +212,34 @@ recoverable from the log (entries carry no id), so it is passed
 explicitly, and advisory SLA deadlines are not part of the audit log, so
 they are not restored (use `fromJSON()` for the full snapshot).
 
+## Settlement payout references
+
+`dispatch(event, { payoutRef })` records an external payment reference
+(payout batch id, transfer id, …) verbatim into the audit entry — a
+typed, queryable field for settlement reconciliation, instead of
+free-text `note`:
+
+```ts
+const task = new TaskLifecycle("task-042");
+/* … DRAFT → APPROVED … */
+task.dispatch("REQUEST_PAYOUT", { actor: "contributor", payoutRef: "batch-2026-1006" });
+task.dispatch("PAYOUT_COMPLETE", { actor: "system", payoutRef: "xfer-88f2" });
+task.history[7].payoutRef; // => "xfer-88f2"
+```
+
+`payoutRef` must be a non-empty string; anything else throws
+`invalid dispatch options: …` before the entry is appended, like
+actor/note. The reference survives `toJSON()` / `fromJSON()` and
+`fromHistory()` round-trips (an empty or non-string `payoutRef` in an
+untrusted snapshot is rejected as `invalid history`), and it is
+preserved by the NDJSON export.
+
+Honest limit: a `PAYOUT_COMPLETE` without a `payoutRef` is legal —
+advisory only, not enforced. The library cannot verify whether an
+external payment actually happened, so requiring the field would be a
+guess, not a guarantee. Reconciliation tooling can flag `PAID` tasks
+whose `PAYOUT_COMPLETE` entry lacks one.
+
 ## Retry budgets
 
 A task can cap how many times it may be resubmitted — the production
@@ -324,7 +352,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 154 tests covering the happy path, reject→resubmit
+`npm test` runs 165 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),
@@ -346,7 +374,11 @@ unsubscribe, listener-error isolation, frozen detached entries,
 in-memory-only semantics), stale-task watchdog screening (`staleTasks`:
 dwell budgets per state, terminal/history-less exclusion, invalid-budget
 fail-fast, purity), and per-edge agreement between the rendered
-diagram and `transition()`. No network, no randomness in
+diagram and `transition()`. Settlement payout references are covered too
+(`payoutRef` verbatim recording, empty/non-string rejection fail-fast
+before any mutation, `toJSON`/`fromJSON`/`fromHistory` round-trip
+preservation, malformed-ref snapshot rejection, and the no-ref
+PAYOUT_COMPLETE advisory path). No network, no randomness in
 assertions.
 
 ## License

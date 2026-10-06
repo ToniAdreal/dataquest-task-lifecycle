@@ -269,6 +269,16 @@ export interface TaskHistoryEntry {
   at: string; // ISO timestamp
   actor?: string; // contributor | reviewer | moderator | system
   note?: string;
+  /**
+   * External payment reference (payout batch id, transfer id, …) for
+   * settlement reconciliation. Conventionally attached to
+   * `REQUEST_PAYOUT` / `PAYOUT_COMPLETE` entries via
+   * `dispatch(event, { payoutRef })`; unlike `note`, it is a typed,
+   * queryable field instead of free text. A `PAYOUT_COMPLETE` entry
+   * without one is allowed but discouraged (see dispatch) — the library
+   * cannot know whether an external payment really happened.
+   */
+  payoutRef?: string;
 }
 
 /**
@@ -496,6 +506,16 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
       }
       entry.note = raw.note;
     }
+    if (raw.payoutRef !== undefined) {
+      // dispatch() only ever writes non-empty strings, so an empty or
+      // non-string payoutRef in an untrusted log is malformed.
+      if (typeof raw.payoutRef !== "string" || raw.payoutRef.length === 0) {
+        throw new Error(
+          `${tag}: payoutRef must be a non-empty string, got ${JSON.stringify(raw.payoutRef)}`,
+        );
+      }
+      entry.payoutRef = raw.payoutRef;
+    }
     entries.push(entry);
   }
   return entries;
@@ -702,6 +722,21 @@ export class TaskLifecycle {
    * `invalid dispatch options: …` up front, like actor/note. When
    * omitted, the wall clock is used as before.
    *
+   * `opts.payoutRef` is an optional external payment reference (payout
+   * batch id, bank/ledger transfer id, …) recorded verbatim into the
+   * audit entry for settlement reconciliation. It is intended for
+   * `REQUEST_PAYOUT` / `PAYOUT_COMPLETE` entries, but it is accepted on
+   * any event — like actor/note, it is generic audit metadata. It must be
+   * a non-empty string; an empty or non-string value throws
+   * `invalid dispatch options: …` up front, before anything mutates.
+   *
+   * Advisory (deliberately not enforced): a `PAYOUT_COMPLETE` dispatch
+   * with no `payoutRef` is legal. The library cannot verify whether an
+   * external payment actually happened — requiring the field would be a
+   * guess, not a guarantee. If your payout flow always produces a
+   * reference, pass it; reconciliation tooling can warn on `PAID` tasks
+   * whose `PAYOUT_COMPLETE` entry lacks one.
+   *
    * Retry budget: when this task was constructed with a finite
    * `maxResubmits` and the history already holds that many RESUBMIT
    * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
@@ -722,7 +757,7 @@ export class TaskLifecycle {
    */
   dispatch(
     event: TaskEvent,
-    opts?: { actor?: string; note?: string; at?: string },
+    opts?: { actor?: string; note?: string; at?: string; payoutRef?: string },
   ): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
       throw new Error(
@@ -733,6 +768,13 @@ export class TaskLifecycle {
       throw new Error(
         `invalid dispatch options: note must be a string, got ${typeof opts.note}`,
       );
+    }
+    if (opts?.payoutRef !== undefined) {
+      if (typeof opts.payoutRef !== "string" || opts.payoutRef.length === 0) {
+        throw new Error(
+          `invalid dispatch options: payoutRef must be a non-empty string, got ${JSON.stringify(opts.payoutRef)}`,
+        );
+      }
     }
     if (opts?.at !== undefined) {
       if (typeof opts.at !== "string" || !isCanonicalIso(opts.at)) {
@@ -779,6 +821,7 @@ export class TaskLifecycle {
     };
     if (opts?.actor !== undefined) entry.actor = opts.actor;
     if (opts?.note !== undefined) entry.note = opts.note;
+    if (opts?.payoutRef !== undefined) entry.payoutRef = opts.payoutRef;
     this._history.push(entry);
     this._notifyListeners(event, from, to, entry);
     return to;
