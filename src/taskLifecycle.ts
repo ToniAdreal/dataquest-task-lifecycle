@@ -331,7 +331,7 @@ function isCanonicalIso(s: unknown): s is string {
  * The returned entries are fresh, sanitized copies: mutating the input
  * afterwards never affects them.
  */
-function parseHistory(history: unknown): TaskHistoryEntry[] {
+export function parseHistory(history: unknown): TaskHistoryEntry[] {
   if (!Array.isArray(history)) {
     throw new Error("invalid history: history must be an array");
   }

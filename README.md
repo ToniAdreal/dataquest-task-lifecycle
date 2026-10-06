@@ -158,6 +158,30 @@ const task = TaskLifecycle.fromHistory("task-042", log);
 task.dispatch("ACCEPT"); // history continues at the next seq, no gaps
 ```
 
+### NDJSON history export
+
+When the audit log must travel as a line-delimited stream (log
+shippers, batch forwarders, one event per line in a store), export and
+re-import it without losing the integrity checks:
+
+```ts
+import { historyFromNdjson, historyToNdjson, replay } from "dataquest-task-lifecycle";
+
+const lines = historyToNdjson(task); // "…\n…\n…\n" — canonical key order per line
+await stream.write(lines);
+
+const entries = historyFromNdjson(await stream.readAll());
+replay(entries); // => "PAID"
+```
+
+`historyToNdjson` validates the entries with the same
+`parseHistory` checklist before serializing, so a broken history
+refuses to export instead of producing a file that could never be
+re-imported. `historyFromNdjson` skips blank lines, accepts `\r\n`,
+and attributes every failure to its 1-based line number
+(`invalid ndjson: line 7: …` — the entry index shifts when blank
+lines are present, the line number does not).
+
 Every entry is validated with the same audit invariants as `fromJSON()`
 (seq continuity, from/to chain, legal edges, canonical ISO timestamps) —
 a broken log throws a specific `invalid history: …` error instead of a
@@ -246,7 +270,7 @@ dispatch and every allowed dispatch is audited with its actor string.
 
 ## Reproducibility
 
-`npm test` runs 115 tests covering the happy path, reject→resubmit
+`npm test` runs 129 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count),

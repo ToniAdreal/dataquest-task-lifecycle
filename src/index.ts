@@ -4,12 +4,14 @@ export {
   expiredTasks,
   isOverdue,
   isTerminal,
+  parseHistory,
   replay,
   stateDiagram,
   transition,
   transitionTable,
   transitionTableJson,
 } from "./taskLifecycle.js";
+export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
   RolePolicy,
   TaskEvent,
