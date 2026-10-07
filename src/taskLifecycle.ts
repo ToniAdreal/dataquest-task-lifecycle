@@ -690,6 +690,9 @@ export class TaskLifecycle {
   private _rolePolicy: Map<TaskEvent, string[]>;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error("invalid task: id must be a non-empty string");
+    }
     this.id = id;
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
     this._maxDisputes = assertMaxDisputes(opts?.maxDisputes, "invalid option");
