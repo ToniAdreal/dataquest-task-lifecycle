@@ -444,6 +444,41 @@ function assertRolePolicy(
 }
 
 /**
+ * Options for {@link TaskLifecycle.dispatch}.
+ *
+ * `idempotencyKey` is a retry-safety valve for payment-flavored flows:
+ * the task remembers every key it has successfully consumed, and a
+ * dispatch that repeats a known key returns the current state as a
+ * no-op — no audit entry is appended, no listeners are notified, and the
+ * transition is not even validated (a retried webhook that arrives after
+ * the task already moved on is safe to replay: it will not throw
+ * `invalid transition`). Keys are global to the task, not per-event:
+ * reusing the same key for a different event still dedupes.
+ *
+ * Fail-fast ordering: the key's own shape (non-empty string) is
+ * validated up front, like actor/note/at/payoutRef. The dedupe check
+ * runs after option validation but BEFORE the transition, RBAC, and
+ * budget checks. A dispatch that fails any check consumes nothing — the
+ * key is recorded only when the dispatch actually succeeds, so fixing a
+ * bad call and retrying with the same key works. Omitting the key
+ * preserves the exact pre-idempotency behavior.
+ *
+ * Honest limit: the key set is in-memory only. It is NOT part of
+ * `toJSON()` / `fromJSON()` / `fromHistory()` — a rehydrated task
+ * restarts with an empty set, so a retry with the same key after a
+ * restart would re-execute. Pair this with a durable store (e.g. a
+ * UNIQUE constraint on the key column) when you need cross-restart
+ * exactly-once semantics.
+ */
+export interface DispatchOptions {
+  actor?: string;
+  note?: string;
+  at?: string;
+  payoutRef?: string;
+  idempotencyKey?: string;
+}
+
+/**
  * Listener for dispatch notifications: called with the event, the from/to
  * states, and the exact audit entry that was appended.
  *
@@ -731,6 +766,13 @@ export class TaskLifecycle {
   private _maxResubmits: number;
   private _maxDisputes: number;
   private _rolePolicy: Map<TaskEvent, string[]>;
+  /**
+   * Idempotency keys consumed by successful dispatches. Purely in-memory:
+   * it is never written into the JSON snapshot (see DispatchOptions for
+   * the documented cross-restart semantics), so a rehydrated task always
+   * restarts with an empty set.
+   */
+  private _idempotencyKeys: Set<string> = new Set();
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
     if (typeof id !== "string" || id.length === 0) {
@@ -862,6 +904,14 @@ export class TaskLifecycle {
    * reference, pass it; the `unreconciledPayouts()` reconciliation helper
    * flags `PAID` tasks whose `PAYOUT_COMPLETE` entry lacks one.
    *
+   * Idempotency: when `opts.idempotencyKey` carries a key the task has
+   * already consumed, dispatch returns the current state immediately as a
+   * no-op — no history entry, no listener notification, no transition
+   * validation. Failed dispatches never consume a key (the key is recorded
+   * only alongside a successful append), so a corrected retry with the same
+   * key still executes. The key set is in-memory only and does not survive
+   * `toJSON()`/`fromJSON()`/`fromHistory()` — see {@link DispatchOptions}.
+   *
    * Retry budget: when this task was constructed with a finite
    * `maxResubmits` and the history already holds that many RESUBMIT
    * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
@@ -888,10 +938,7 @@ export class TaskLifecycle {
    * that throws is isolated — the dispatch still returns normally and the
    * history stays intact.
    */
-  dispatch(
-    event: TaskEvent,
-    opts?: { actor?: string; note?: string; at?: string; payoutRef?: string },
-  ): TaskState {
+  dispatch(event: TaskEvent, opts?: DispatchOptions): TaskState {
     if (opts?.actor !== undefined && typeof opts.actor !== "string") {
       throw new Error(
         `invalid dispatch options: actor must be a string, got ${typeof opts.actor}`,
@@ -907,6 +954,24 @@ export class TaskLifecycle {
         throw new Error(
           `invalid dispatch options: payoutRef must be a non-empty string, got ${JSON.stringify(opts.payoutRef)}`,
         );
+      }
+    }
+    if (opts?.idempotencyKey !== undefined) {
+      if (
+        typeof opts.idempotencyKey !== "string" ||
+        opts.idempotencyKey.length === 0
+      ) {
+        throw new Error(
+          `invalid dispatch options: idempotencyKey must be a non-empty string, got ${JSON.stringify(opts.idempotencyKey)}`,
+        );
+      }
+      // Retry: a known key is a complete no-op — no transition validation
+      // (the task may already have moved on), no history append, no
+      // listener notification. Failed dispatches consume nothing, so this
+      // point is only reached when the key was fully consumed by an
+      // earlier successful dispatch.
+      if (this._idempotencyKeys.has(opts.idempotencyKey)) {
+        return this._state;
       }
     }
     if (opts?.at !== undefined) {
@@ -948,6 +1013,12 @@ export class TaskLifecycle {
       throw new Error(
         `dispute budget exhausted: ${this._disputeCount} of ${this._maxDisputes} DISPUTEs already used`,
       );
+    }
+    // All checks passed: consume the idempotency key exactly once, with the
+    // successful append. Keys are never recorded for failed dispatches,
+    // so retrying a bad call with the same key stays possible.
+    if (opts?.idempotencyKey !== undefined) {
+      this._idempotencyKeys.add(opts.idempotencyKey);
     }
     this._state = to;
     const entry: TaskHistoryEntry = {
@@ -1091,6 +1162,10 @@ export class TaskLifecycle {
    *
    * A task-level RBAC policy is included as a plain record when set
    * (absent means unrestricted, exactly the constructor default).
+   *
+   * The idempotency key set is NOT included: it is in-memory only (see
+   * DispatchOptions), so a rehydrated task restarts with an empty set and
+   * a retried key re-executes after a restart.
    */
   toJSON(): TaskSnapshot {
     const deadlines: Partial<Record<TaskState, string>> = {};

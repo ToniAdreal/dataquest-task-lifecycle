@@ -15,6 +15,7 @@ export {
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
+  DispatchOptions,
   ListenerErrorContext,
   RolePolicy,
   SubscribeOptions,

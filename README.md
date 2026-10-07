@@ -255,6 +255,33 @@ A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
 check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
 `PAID`), because that is the entry that evidences the settlement itself.
 
+## Dispatch idempotency keys
+
+Payment flows retry webhooks, and a retried dispatch used to mean a
+duplicate audit entry. `dispatch(event, { idempotencyKey })` fixes that:
+the task remembers every key consumed by a successful dispatch, and a
+repeat with a known key is a full no-op — it returns the current state,
+appends nothing, notifies no listeners, and does not even validate the
+transition (safe to replay after the task has moved on):
+
+```ts
+task.dispatch("PUBLISH", { idempotencyKey: "webhook-dlv-9f3a" });
+task.dispatch("PUBLISH", { idempotencyKey: "webhook-dlv-9f3a" }); // no-op
+task.history.length; // => 1
+```
+
+Keys are global to the task, not per-event: reusing the same key for a
+different event still dedupes. The key itself must be a non-empty string
+(else `invalid dispatch options: …` up front). Failed dispatches consume
+nothing — fix the bad call and retry with the same key and it executes.
+Omitting the key preserves the exact pre-idempotency behavior.
+
+Honest limit: the key set is in-memory only. It does not survive
+`toJSON()` / `fromJSON()` / `fromHistory()` — a rehydrated task restarts
+with an empty set, so a retry with the same key re-executes after a
+restart. For cross-restart exactly-once semantics, pair this with a
+durable store (e.g. a `UNIQUE` constraint on the key column).
+
 ## Retry budgets
 
 A task can cap how many times it may be resubmitted — the production
@@ -415,7 +442,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 199 tests covering the happy path, reject→resubmit
+`npm test` runs 209 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -448,7 +475,10 @@ before any mutation, `toJSON`/`fromJSON`/`fromHistory` round-trip
 preservation, malformed-ref snapshot rejection, and the no-ref
 PAYOUT_COMPLETE advisory path), and settlement reconciliation screening
 (`unreconciledPayouts`: mixed PAID batches, request-only refs not
-reconciling, empty-input and purity, snapshot-rehydrated tasks). No
+reconciling, empty-input and purity, snapshot-rehydrated tasks), and
+dispatch idempotency keys (duplicate no-op without transition validation,
+per-task global keys, failed-dispatch key non-consumption, shape
+validation, in-memory-only semantics, seq-continuity). No
 network, no randomness in assertions.
 
 ## License
