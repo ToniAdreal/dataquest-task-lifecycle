@@ -415,6 +415,30 @@ export type TaskEventListener = (
 ) => void;
 
 /**
+ * Context handed to a `subscribe()` `onError` hook when a listener throws:
+ * the dispatch that was being notified.
+ */
+export interface ListenerErrorContext {
+  event: TaskEvent;
+  from: TaskState;
+  to: TaskState;
+}
+
+/**
+ * Options for `subscribe()`.
+ */
+export interface SubscribeOptions {
+  /**
+   * Called when the listener throws, with the caught error and the
+   * dispatch context. Isolation semantics are unchanged: the error is
+   * still swallowed after `onError` runs, and a throwing `onError`
+   * itself is swallowed too — no error hook can ever break dispatch
+   * or corrupt the audit trail.
+   */
+  onError?: (err: unknown, context: ListenerErrorContext) => void;
+}
+
+/**
  * Serializable snapshot of a task: live state + append-only history +
  * per-state SLA deadlines. Plain JSON (no class instances, no Maps), safe
  * to store in any document store and feed back into fromJSON().
@@ -906,9 +930,10 @@ export class TaskLifecycle {
   // Error isolation is a deliberate, documented tradeoff: each listener's
   // throw is caught and swallowed so a bad fan-out consumer can never
   // break dispatch, corrupt the audit trail, or starve later listeners.
-  // This means listener failures are silent by design — if you need
-  // visibility, wrap your listener in try/catch and report to your own
-  // error sink. The entry handed to listeners is a frozen, detached copy,
+  // For failure visibility without wrapping every listener in try/catch,
+  // subscribe(listener, { onError }) routes each caught error to onError
+  // with the dispatch context; a throwing onError is swallowed as well.
+  // The entry handed to listeners is a frozen, detached copy,
   // so a listener cannot rewrite the audit trail either.
   //
   // Honest limits: subscriptions are in-memory only. They are NOT part of
@@ -917,7 +942,10 @@ export class TaskLifecycle {
   // retries) — that stays the caller's infrastructure.
   // ------------------------------------------------------------------
 
-  private _listeners: TaskEventListener[] = [];
+  private _listeners: Array<{
+    listener: TaskEventListener;
+    onError?: SubscribeOptions["onError"];
+  }> = [];
 
   /**
    * Register a listener called with (event, from, to, entry) after every
@@ -928,17 +956,36 @@ export class TaskLifecycle {
    * listener list, so a listener that subscribes/unsubscribes during
    * notification affects only later dispatches. A listener that throws is
    * isolated: the error is swallowed, the remaining listeners still run,
-   * and dispatch returns normally with the audit entry intact.
+   * and dispatch returns normally with the audit entry intact. Pass
+   * `{ onError }` to observe those failures instead of losing them to
+   * the documented silence.
    */
-  subscribe(listener: TaskEventListener): () => void {
+  subscribe(
+    listener: TaskEventListener,
+    opts?: SubscribeOptions,
+  ): () => void {
     if (typeof listener !== "function") {
       throw new Error(
         `invalid subscribe: listener must be a function, got ${typeof listener}`,
       );
     }
-    this._listeners.push(listener);
+    if (
+      opts !== undefined &&
+      (typeof opts !== "object" || opts === null || Array.isArray(opts))
+    ) {
+      throw new Error(
+        `invalid subscribe: options must be an object, got ${Array.isArray(opts) ? "array" : typeof opts}`,
+      );
+    }
+    const onError = opts?.onError;
+    if (onError !== undefined && typeof onError !== "function") {
+      throw new Error(
+        `invalid subscribe: onError must be a function, got ${typeof onError}`,
+      );
+    }
+    this._listeners.push({ listener, onError });
     return () => {
-      const i = this._listeners.indexOf(listener);
+      const i = this._listeners.findIndex((e) => e.listener === listener);
       if (i >= 0) this._listeners.splice(i, 1);
     };
   }
@@ -956,11 +1003,18 @@ export class TaskLifecycle {
   ): void {
     if (this._listeners.length === 0) return;
     const notification = Object.freeze({ ...entry });
-    for (const listener of [...this._listeners]) {
+    for (const { listener, onError } of [...this._listeners]) {
       try {
         listener(event, from, to, notification);
-      } catch {
+      } catch (err) {
         // Swallowed on purpose: isolation is the contract (see subscribe).
+        if (onError !== undefined) {
+          try {
+            onError(err, { event, from, to });
+          } catch {
+            // A broken error hook is isolated the same way.
+          }
+        }
       }
     }
   }

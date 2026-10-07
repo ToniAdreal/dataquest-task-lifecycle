@@ -343,8 +343,26 @@ copy — listeners cannot rewrite the audit trail). Failed dispatches
 notify nobody. A listener that throws is **isolated**: the error is
 swallowed, the remaining listeners still run, and dispatch returns
 normally — a bad fan-out consumer can never break the state machine or
-corrupt the history. That silence is deliberate; wrap your listener if
-you need failure visibility.
+corrupt the history. That silence is deliberate by default, but you can
+opt into visibility without wrapping every listener yourself:
+
+```ts
+const unsub = task.subscribe(
+  (event, from, to, entry) => notifier.send(`${event}: ${from} -> ${to}`),
+  {
+    onError: (err, { event, from, to }) => {
+      // called with the exact thrown error and the dispatch context
+      logger.error("fan-out consumer failed", { err, event, from, to });
+    },
+  },
+);
+```
+
+Isolation semantics are unchanged by `onError`: the error is still
+swallowed after the hook runs, and a throwing `onError` is swallowed
+too — no error hook can ever break dispatch or starve peers.
+Invalid options (non-object `opts`, non-function `onError`) fail fast
+with a clear `invalid subscribe: …` error.
 
 Honest caveat: subscriptions are in-memory only — they do not survive
 `toJSON()`/`fromJSON()`/`fromHistory()` (rehydrated tasks start with
@@ -382,7 +400,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 178 tests covering the happy path, reject→resubmit
+`npm test` runs 187 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -404,7 +422,9 @@ canonical ISO-8601, non-decreasing vs. the previous entry, fail-fast
 before the transition check), runtime
 freeze of the returned history), dispatch subscription hooks (order,
 unsubscribe, listener-error isolation, frozen detached entries,
-in-memory-only semantics), stale-task watchdog screening (`staleTasks`:
+in-memory-only semantics, plus the optional `onError` observability hook:
+context delivery, peer isolation preserved, throwing `onError`
+containment, unsubscribe semantics, invalid-option fail-fast), stale-task watchdog screening (`staleTasks`:
 dwell budgets per state, terminal/history-less exclusion, invalid-budget
 fail-fast, purity), and per-edge agreement between the rendered
 diagram and `transition()`. Settlement payout references are covered too
