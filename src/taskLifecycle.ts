@@ -311,6 +311,14 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * automatically: only the budget itself is stored in the snapshot
  * envelope.
  *
+ * `maxDisputes` caps how many appeal rounds — `dispatch("DISPUTE")`
+ * (REJECTED → DISPUTED → arbitration → back to REJECTED or on to
+ * APPROVED) — a task may run. Same rules as `maxResubmits`: non-negative
+ * integer or `Infinity` (default unlimited, exactly the pre-budget
+ * behavior), used count derived from the history, only the finite budget
+ * stored in the snapshot envelope. This is the task-level answer to the
+ * "bound appeals" production habit.
+ *
  * `rolePolicy` is an optional {@link RolePolicy}: event → allowed actor
  * names. Events not listed are unrestricted; omitting the policy disables
  * the check entirely (the pre-policy behavior). Invalid policies throw
@@ -318,6 +326,7 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  */
 export interface TaskLifecycleOptions {
   maxResubmits?: number;
+  maxDisputes?: number;
   rolePolicy?: RolePolicy;
 }
 
@@ -330,6 +339,20 @@ function assertMaxResubmits(value: unknown, tag: string): number {
   ) {
     throw new Error(
       `${tag}: maxResubmits must be a non-negative integer or Infinity, got ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+function assertMaxDisputes(value: unknown, tag: string): number {
+  if (value === undefined) return Infinity;
+  if (
+    typeof value !== "number" ||
+    Number.isNaN(value) ||
+    !(value === Infinity || (Number.isInteger(value) && value >= 0))
+  ) {
+    throw new Error(
+      `${tag}: maxDisputes must be a non-negative integer or Infinity, got ${String(value)}`,
     );
   }
   return value;
@@ -402,6 +425,9 @@ export type TaskEventListener = (
  * it is derived from the history on rehydration, so it can never drift
  * from the audit trail.
  *
+ * `maxDisputes` follows the same convention for the DISPUTE appeal
+ * budget (finite budgets only; used appeal rounds derived from history).
+ *
  * `rolePolicy` is present only when the task carries an RBAC policy; it
  * rehydrates through the same strict validation as the constructor, so a
  * tampered policy in a stored snapshot is rejected, not silently applied.
@@ -412,6 +438,7 @@ export interface TaskSnapshot {
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits?: number;
+  maxDisputes?: number;
   rolePolicy?: RolePolicy;
 }
 
@@ -546,6 +573,8 @@ export function replay(history: unknown): TaskState {
  *    Infinity (absent means the unlimited default; a history that already
  *    exceeds the budget does NOT fail rehydration — the budget only
  *    governs future dispatches)
+ *  - maxDisputes, when present, follows the exact same rule for the
+ *    DISPUTE appeal budget
  *
  * Anything produced by toJSON() passes; anything else must earn its way.
  */
@@ -555,6 +584,7 @@ function parseSnapshot(snapshot: unknown): {
   history: TaskHistoryEntry[];
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits: number;
+  maxDisputes: number;
   rolePolicy: Map<TaskEvent, string[]>;
 } {
   if (!isRecord(snapshot)) {
@@ -610,11 +640,20 @@ function parseSnapshot(snapshot: unknown): {
     "invalid snapshot",
   );
 
+  // The DISPUTE appeal budget is configuration for future dispatches,
+  // exactly like the RESUBMIT retry budget: a snapshot whose history
+  // already exceeds it is still a valid record — rehydration does not
+  // throw; the next dispatch("DISPUTE") will.
+  const maxDisputes = assertMaxDisputes(
+    snapshot.maxDisputes,
+    "invalid snapshot",
+  );
+
   // Same for the RBAC policy: configuration for future dispatches, so it
   // is validated strictly but never consulted against the stored history.
   const rolePolicy = assertRolePolicy(snapshot.rolePolicy, "invalid snapshot");
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, rolePolicy };
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, rolePolicy };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -623,11 +662,13 @@ export class TaskLifecycle {
   private _state: TaskState = "DRAFT";
   private _history: TaskHistoryEntry[] = [];
   private _maxResubmits: number;
+  private _maxDisputes: number;
   private _rolePolicy: Map<TaskEvent, string[]>;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
     this.id = id;
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
+    this._maxDisputes = assertMaxDisputes(opts?.maxDisputes, "invalid option");
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
   }
 
@@ -703,6 +744,20 @@ export class TaskLifecycle {
   }
 
   /**
+   * How many DISPUTE appeal rounds have been used so far (derived from
+   * the append-only history, exactly like `_resubmitCount` — the audit
+   * entries are the source of truth, so the count survives persistence
+   * and can never drift from what actually happened).
+   */
+  private get _disputeCount(): number {
+    let n = 0;
+    for (const e of this._history) {
+      if (e.event === "DISPUTE") n++;
+    }
+    return n;
+  }
+
+  /**
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they
@@ -742,6 +797,14 @@ export class TaskLifecycle {
    * entries, `dispatch("RESUBMIT")` throws `resubmit budget exhausted: …`
    * (checked after the transition legality check). This is checked before
    * appending, so a rejected dispatch leaves no trace in the history.
+   *
+   * Dispute budget: the same rule for appeal rounds — when this task was
+   * constructed with a finite `maxDisputes` and the history already holds
+   * that many DISPUTE entries, `dispatch("DISPUTE")` throws
+   * `dispute budget exhausted: …` (checked after the RESUBMIT budget
+   * check; the two budgets govern disjoint events, so the order is
+   * unobservable). This is checked before appending, so a rejected
+   * dispatch leaves no trace in the history.
    *
    * Event-level RBAC: when the task carries a `rolePolicy` that lists this
    * event, `opts.actor` must be present and exactly match one of the
@@ -809,6 +872,11 @@ export class TaskLifecycle {
     if (event === "RESUBMIT" && this._resubmitCount >= this._maxResubmits) {
       throw new Error(
         `resubmit budget exhausted: ${this._resubmitCount} of ${this._maxResubmits} RESUBMITs already used`,
+      );
+    }
+    if (event === "DISPUTE" && this._disputeCount >= this._maxDisputes) {
+      throw new Error(
+        `dispute budget exhausted: ${this._disputeCount} of ${this._maxDisputes} DISPUTEs already used`,
       );
     }
     this._state = to;
@@ -917,6 +985,10 @@ export class TaskLifecycle {
    * history on rehydration, so a round-trip keeps the budget AND the
    * used count without either being able to drift from the audit trail.
    *
+   * The same convention applies to the DISPUTE appeal budget:
+   * `maxDisputes` is stored only when finite, and the used appeal count
+   * is derived from the history on rehydration.
+   *
    * A task-level RBAC policy is included as a plain record when set
    * (absent means unrestricted, exactly the constructor default).
    */
@@ -934,6 +1006,9 @@ export class TaskLifecycle {
     if (Number.isFinite(this._maxResubmits)) {
       snapshot.maxResubmits = this._maxResubmits;
     }
+    if (Number.isFinite(this._maxDisputes)) {
+      snapshot.maxDisputes = this._maxDisputes;
+    }
     if (this._rolePolicy.size > 0) {
       snapshot.rolePolicy = Object.fromEntries(this._rolePolicy);
     }
@@ -947,7 +1022,10 @@ export class TaskLifecycle {
    */
   static fromJSON(snapshot: unknown): TaskLifecycle {
     const parsed = parseSnapshot(snapshot);
-    const task = new TaskLifecycle(parsed.id, { maxResubmits: parsed.maxResubmits });
+    const task = new TaskLifecycle(parsed.id, {
+      maxResubmits: parsed.maxResubmits,
+      maxDisputes: parsed.maxDisputes,
+    });
     task._state = parsed.state;
     task._history = parsed.history;
     task._rolePolicy = parsed.rolePolicy;
@@ -971,7 +1049,10 @@ export class TaskLifecycle {
    *
    * `opts.maxResubmits` re-attaches a retry budget to the rehydrated
    * task; the used count is derived from the replayed history (the same
-   * rule as fromJSON()). Omit it for the unlimited default. `opts.rolePolicy`
+   * rule as fromJSON()). Omit it for the unlimited default.
+   * `opts.maxDisputes` re-attaches a DISPUTE appeal budget the same way;
+   * omit it and the rehydrated task disputes without limit.
+   * `opts.rolePolicy`
    * re-attaches an event-level RBAC policy the same way; omit it and the
    * rehydrated task is unrestricted (policy is caller configuration, not
    * audit data, so the log cannot restore it on its own).

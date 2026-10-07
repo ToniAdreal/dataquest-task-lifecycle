@@ -262,6 +262,31 @@ without resetting either. The check runs after the transition legality
 check and before anything is appended, so a rejected dispatch leaves no
 trace in the history.
 
+## Dispute budgets
+
+The transition table lets the appeal path (REJECTED → DISPUTED →
+ARBITRATE_REJECT → REJECTED) loop without limit; a task can cap how many
+appeal rounds it may run — the production "bound appeals" habit, as a
+task-level policy:
+
+```ts
+const task = new TaskLifecycle("task-042", { maxDisputes: 1 });
+// …REJECTED → DISPUTE → DISPUTED → ARBITRATE_REJECT → REJECTED…
+// the second dispatch("DISPUTE") throws:
+//   dispute budget exhausted: 1 of 1 DISPUTEs already used
+```
+
+`maxDisputes` defaults to unlimited (the pre-budget behavior is
+unchanged) and must be a non-negative integer or `Infinity`. The used
+count is derived from the append-only history — the audit entries are the
+source of truth — so it survives persistence with the budget: `toJSON()`
+stores the finite budget in the snapshot envelope, and `fromJSON()` /
+`TaskLifecycle.fromHistory(id, log, { maxDisputes })` rehydrate it
+without resetting either. The check runs after the transition legality
+and RBAC checks and before anything is appended, so a rejected dispatch
+leaves no trace in the history. It is independent of `maxResubmits`: the
+two budgets govern disjoint events on the same task.
+
 ## Event-level RBAC
 
 Tasks can gate individual events on named actors — the "only a senior
@@ -338,10 +363,15 @@ webhooks, retries). That remains the caller's infrastructure.
   dispatch subscriptions exist (`task.subscribe` — fire-and-forget,
   listener errors swallowed, not persisted); there is still no durable
   notification fan-out (queues, webhooks, retries).
-- **Simplified arbitration.** One appeal round is modeled; production would
-  bound appeals and add per-state retry budgets. (Task-level RESUBMIT retry
-  budgets exist since v0.1.0 — see "Retry budgets" above; per-state SLA
-  deadlines also exist — see "SLA deadlines"; expiry remains explicit.)
+- **Simplified arbitration.** Appeal rounds (REJECTED → DISPUTED →
+  arbitration → REJECTED) can be capped per task with `maxDisputes`
+  (default unlimited; used-round count derived from the append-only
+  history so it survives persistence) — see "Dispute budgets" above.
+  Production would additionally add per-state retry budgets and keep the
+  bound in a durable policy store rather than task configuration. (Task-level
+  RESUBMIT retry budgets exist since v0.1.0 — see "Retry budgets" above;
+  per-state SLA deadlines also exist — see "SLA deadlines"; expiry remains
+  explicit.)
 - **No reputation/quality scoring.** The case study's contributor tiers and
   earnings wallet are out of scope here.
 - **Append-only history is runtime-frozen.** `task.history` returns a frozen
@@ -352,10 +382,13 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 165 tests covering the happy path, reject→resubmit
+`npm test` runs 178 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
-count),
+count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
+exhaustion-before-append semantics, invalid-budget rejection, snapshot
+round-trips that preserve the budget and used count, `fromHistory`
+re-attachment, and independence from the RESUBMIT budget),
 dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
