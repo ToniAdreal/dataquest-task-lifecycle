@@ -237,8 +237,23 @@ preserved by the NDJSON export.
 Honest limit: a `PAYOUT_COMPLETE` without a `payoutRef` is legal —
 advisory only, not enforced. The library cannot verify whether an
 external payment actually happened, so requiring the field would be a
-guess, not a guarantee. Reconciliation tooling can flag `PAID` tasks
-whose `PAYOUT_COMPLETE` entry lacks one.
+guess, not a guarantee. For the other half of the loop, the
+`unreconciledPayouts()` reconciliation helper flags `PAID` tasks whose
+`PAYOUT_COMPLETE` entry lacks one:
+
+```ts
+import { unreconciledPayouts } from "dataquest-task-lifecycle";
+
+// PAID tasks whose PAYOUT_COMPLETE entry has no payoutRef — settlements
+// that still need chasing. Pure: reads the tasks, never mutates them.
+for (const task of unreconciledPayouts(allTasks)) {
+  alertFinance(task.id, "paid without a recorded payout reference");
+}
+```
+
+A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
+check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
+`PAID`), because that is the entry that evidences the settlement itself.
 
 ## Retry budgets
 
@@ -400,7 +415,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 193 tests covering the happy path, reject→resubmit
+`npm test` runs 199 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -431,8 +446,10 @@ diagram and `transition()`. Settlement payout references are covered too
 (`payoutRef` verbatim recording, empty/non-string rejection fail-fast
 before any mutation, `toJSON`/`fromJSON`/`fromHistory` round-trip
 preservation, malformed-ref snapshot rejection, and the no-ref
-PAYOUT_COMPLETE advisory path). No network, no randomness in
-assertions.
+PAYOUT_COMPLETE advisory path), and settlement reconciliation screening
+(`unreconciledPayouts`: mixed PAID batches, request-only refs not
+reconciling, empty-input and purity, snapshot-rehydrated tasks). No
+network, no randomness in assertions.
 
 ## License
 

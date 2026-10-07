@@ -261,6 +261,49 @@ export function staleTasks(
   });
 }
 
+/**
+ * Reconciliation helper: from a batch of tasks, return the ones whose
+ * settlement lacks external payment evidence — currently PAID, but the
+ * `PAYOUT_COMPLETE` audit entry carries no `payoutRef`.
+ *
+ * This is the reconciliation tooling the `dispatch()` docs point at: a
+ * `PAYOUT_COMPLETE` without a `payoutRef` is legal (advisory only — the
+ * library cannot verify whether an external payment really happened),
+ * so finance ops need a one-liner to find the tasks that still need
+ * chasing:
+ *
+ *   for (const task of unreconciledPayouts(allTasks)) {
+ *     alertFinance(task.id, "paid but no payout reference recorded");
+ *   }
+ *
+ * The check looks at the `PAYOUT_COMPLETE` entry (the one that moved the
+ * task to PAID), not the `REQUEST_PAYOUT` entry: a reference on the
+ * request but none on the completion still means the settlement itself
+ * is unevidenced. Defensive: a PAID task with no `PAYOUT_COMPLETE` entry
+ * at all is also returned — it cannot arise through the validated
+ * construction paths (dispatch/fromJSON/fromHistory all guarantee the
+ * entry), but if it ever did, missing completion evidence is exactly
+ * what reconciliation should flag, not silently pass.
+ *
+ * Pure: reads the tasks, never mutates or dispatches. An empty input
+ * returns an empty array.
+ */
+export function unreconciledPayouts(
+  tasks: readonly TaskLifecycle[],
+): TaskLifecycle[] {
+  return tasks.filter((task) => {
+    if (task.state !== "PAID") return false;
+    let complete: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+    }
+    // Defensive: unreachable through dispatch/fromJSON/fromHistory, but
+    // a PAID task with no completion entry is reconciliation-worthy too.
+    if (complete === undefined) return true;
+    return complete.payoutRef === undefined;
+  });
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
@@ -816,8 +859,8 @@ export class TaskLifecycle {
    * with no `payoutRef` is legal. The library cannot verify whether an
    * external payment actually happened — requiring the field would be a
    * guess, not a guarantee. If your payout flow always produces a
-   * reference, pass it; reconciliation tooling can warn on `PAID` tasks
-   * whose `PAYOUT_COMPLETE` entry lacks one.
+   * reference, pass it; the `unreconciledPayouts()` reconciliation helper
+   * flags `PAID` tasks whose `PAYOUT_COMPLETE` entry lacks one.
    *
    * Retry budget: when this task was constructed with a finite
    * `maxResubmits` and the history already holds that many RESUBMIT

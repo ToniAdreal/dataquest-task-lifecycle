@@ -11,6 +11,7 @@ export {
   transition,
   transitionTable,
   transitionTableJson,
+  unreconciledPayouts,
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
