@@ -388,11 +388,34 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * names. Events not listed are unrestricted; omitting the policy disables
  * the check entirely (the pre-policy behavior). Invalid policies throw
  * `invalid option: …` at construction.
+ *
+ * `requirePayoutRef` is an optional boolean (default `false`): when
+ * `true`, `dispatch("PAYOUT_COMPLETE")` without a `payoutRef` throws
+ * `payout reference required: …` and appends nothing. This is the
+ * opt-in up-front counterpart to the advisory default and the
+ * `unreconciledPayouts()` post-hoc reconciliation helper — for payout
+ * flows where an external transfer reference always exists. The switch
+ * is task configuration, not audit data: it is never written into the
+ * `toJSON()` snapshot envelope (unlike `maxDisputes`/`maxResubmits`,
+ * whose finite budgets are stored), so a rehydrated task must re-enable
+ * it via `fromHistory(id, history, { requirePayoutRef: true })`. Invalid
+ * values throw `invalid option: …` at construction.
  */
 export interface TaskLifecycleOptions {
   maxResubmits?: number;
   maxDisputes?: number;
   rolePolicy?: RolePolicy;
+  requirePayoutRef?: boolean;
+}
+
+function assertRequirePayoutRef(value: unknown, tag: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${tag}: requirePayoutRef must be a boolean, got ${String(value)}`,
+    );
+  }
+  return value;
 }
 
 function assertMaxResubmits(value: unknown, tag: string): number {
@@ -944,6 +967,12 @@ export class TaskLifecycle {
   private _maxDisputes: number;
   private _rolePolicy: Map<TaskEvent, string[]>;
   /**
+   * Up-front enforcement for PAYOUT_COMPLETE evidence. Task configuration:
+   * never written into the JSON snapshot (see toJSON), so a rehydrated
+   * task re-enables it via fromHistory(id, history, { requirePayoutRef }).
+   */
+  private _requirePayoutRef: boolean;
+  /**
    * Idempotency keys consumed by successful dispatches. Purely in-memory:
    * it is never written into the JSON snapshot (see DispatchOptions for
    * the documented cross-restart semantics), so a rehydrated task always
@@ -959,6 +988,10 @@ export class TaskLifecycle {
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
     this._maxDisputes = assertMaxDisputes(opts?.maxDisputes, "invalid option");
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
+    this._requirePayoutRef = assertRequirePayoutRef(
+      opts?.requirePayoutRef,
+      "invalid option",
+    );
   }
 
   get state(): TaskState {
@@ -1074,12 +1107,17 @@ export class TaskLifecycle {
    * a non-empty string; an empty or non-string value throws
    * `invalid dispatch options: …` up front, before anything mutates.
    *
-   * Advisory (deliberately not enforced): a `PAYOUT_COMPLETE` dispatch
-   * with no `payoutRef` is legal. The library cannot verify whether an
-   * external payment actually happened — requiring the field would be a
-   * guess, not a guarantee. If your payout flow always produces a
-   * reference, pass it; the `unreconciledPayouts()` reconciliation helper
-   * flags `PAID` tasks whose `PAYOUT_COMPLETE` entry lacks one.
+   * Advisory (deliberately not enforced by default): a `PAYOUT_COMPLETE`
+   * dispatch with no `payoutRef` is legal. The library cannot verify
+   * whether an external payment actually happened — requiring the field
+   * would be a guess, not a guarantee. If your payout flow always
+   * produces a reference, either pass it or opt in to up-front
+   * enforcement: a task constructed with `requirePayoutRef: true` rejects
+   * `dispatch("PAYOUT_COMPLETE")` without a `payoutRef` with
+   * `payout reference required: …` (checked after the transition/budget
+   * checks, before anything is appended — a rejected dispatch leaves no
+   * trace). The `unreconciledPayouts()` reconciliation helper flags `PAID`
+   * tasks whose `PAYOUT_COMPLETE` entry lacks one.
    *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
    * already consumed, dispatch returns the current state immediately as a
@@ -1189,6 +1227,20 @@ export class TaskLifecycle {
     if (event === "DISPUTE" && this._disputeCount >= this._maxDisputes) {
       throw new Error(
         `dispute budget exhausted: ${this._disputeCount} of ${this._maxDisputes} DISPUTEs already used`,
+      );
+    }
+    if (
+      event === "PAYOUT_COMPLETE" &&
+      this._requirePayoutRef &&
+      opts?.payoutRef === undefined
+    ) {
+      // Up-front enforcement is opt-in configuration: the advisory default
+      // stays legal, and requiring the reference cannot guarantee the
+      // external payment happened — it only guarantees the audit trail
+      // says which transfer it was. Checked before the idempotency key is
+      // consumed, so a rejected dispatch consumes nothing.
+      throw new Error(
+        "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled",
       );
     }
     // All checks passed: consume the idempotency key exactly once, with the
@@ -1354,6 +1406,14 @@ export class TaskLifecycle {
    * The idempotency key set is NOT included: it is in-memory only (see
    * DispatchOptions), so a rehydrated task restarts with an empty set and
    * a retried key re-executes after a restart.
+   *
+   * `requirePayoutRef` is likewise NOT included: it is caller
+   * configuration, not audit data (same class as the idempotency set,
+   * deliberately different from `maxDisputes`/`maxResubmits`/`rolePolicy`,
+   * which are task-level rules the audit trail must keep). A rehydrated
+   * task re-enables up-front payout-reference enforcement via
+   * `fromHistory(id, history, { requirePayoutRef: true })`; until then
+   * `PAYOUT_COMPLETE` without a `payoutRef` is legal again.
    */
   toJSON(): TaskSnapshot {
     const deadlines: Partial<Record<TaskState, string>> = {};
@@ -1423,6 +1483,10 @@ export class TaskLifecycle {
    * re-attaches an event-level RBAC policy the same way; omit it and the
    * rehydrated task is unrestricted (policy is caller configuration, not
    * audit data, so the log cannot restore it on its own).
+   * `opts.requirePayoutRef` re-attaches up-front payout-reference
+   * enforcement the same way; omit it and the rehydrated task falls back
+   * to the advisory default (the switch is not part of the audit log, so
+   * it cannot be restored on its own).
    */
   static fromHistory(
     id: string,

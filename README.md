@@ -267,7 +267,16 @@ preserved by the NDJSON export.
 Honest limit: a `PAYOUT_COMPLETE` without a `payoutRef` is legal —
 advisory only, not enforced. The library cannot verify whether an
 external payment actually happened, so requiring the field would be a
-guess, not a guarantee. For the other half of the loop, the
+guess, not a guarantee. Deployments whose payout flow always produces a
+reference can opt in to up-front enforcement instead: constructing the
+task with `new TaskLifecycle(id, { requirePayoutRef: true })` makes a
+`PAYOUT_COMPLETE` dispatch without a `payoutRef` throw
+`payout reference required: …` (checked after the transition/budget
+checks, before anything is appended — a rejected dispatch leaves no
+trace). The switch is task configuration, not audit data: it is never
+written into the `toJSON()` snapshot, so a restored task re-enables it
+via `fromHistory(id, history, { requirePayoutRef: true })`. For the other
+half of the loop, the
 `unreconciledPayouts()` reconciliation helper flags `PAID` tasks whose
 `PAYOUT_COMPLETE` entry lacks one:
 
@@ -477,7 +486,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 237 tests covering the happy path, reject→resubmit
+`npm test` runs 246 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -507,8 +516,11 @@ fail-fast, purity), and per-edge agreement between the rendered
 diagram and `transition()`. Settlement payout references are covered too
 (`payoutRef` verbatim recording, empty/non-string rejection fail-fast
 before any mutation, `toJSON`/`fromJSON`/`fromHistory` round-trip
-preservation, malformed-ref snapshot rejection, and the no-ref
-PAYOUT_COMPLETE advisory path), and settlement reconciliation screening
+preservation, malformed-ref snapshot rejection, the no-ref
+PAYOUT_COMPLETE advisory path, and the `requirePayoutRef` opt-in
+enforcement: gate-on-PAYOUT_COMPLETE-only, non-boolean rejection at
+construction, failed-dispatch key non-consumption, in-memory-only
+switch semantics with `fromHistory` re-attachment), and settlement reconciliation screening
 (`unreconciledPayouts`: mixed PAID batches, request-only refs not
 reconciling, empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,
