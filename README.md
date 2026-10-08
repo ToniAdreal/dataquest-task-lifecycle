@@ -347,6 +347,38 @@ is rounded to cents (`Math.round(x * 100) / 100`, the same money
 convention as the sibling escrow-state-machine-ts) while per-entry
 amounts are stored verbatim.
 
+### Payout webhooks
+
+The in-process `subscribe()` hook cannot notify anything outside the
+process. `buildPayoutWebhook(task, secret)` closes that gap for the
+payout path: it derives a compact signed notification from a `PAID`
+task's audit history — the dataquest-side peer of escrow's
+`src/webhooks.ts`:
+
+```ts
+import { buildPayoutWebhook, verifyPayoutWebhook } from "dataquest-task-lifecycle";
+
+const { payload, signature } = buildPayoutWebhook(paidTask, webhookSecret);
+// payload: { event: "PAYOUT_COMPLETE", taskId, payoutRef?, payoutAmount?, at, eventId }
+// signature: "sha256=<hex>"
+```
+
+`eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
+on it, because a retried delivery would otherwise look like a second
+payout. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
+HMAC-SHA256 in constant time and returns a boolean; malformed signatures
+return `false` instead of throwing. Verify over the raw request body
+bytes — the object overload re-stringifies for in-process convenience,
+but bytes are the transport-safe path.
+
+Honest limits: the payload carries only what the audit history records —
+`payoutRef`/`payoutAmount` are omitted when the entry lacks them (a `PAID`
+task with no ref still builds; a missing reference is unevidenced, not a
+build failure). Secret distribution is the caller's responsibility, and
+this module does not POST anything: delivery and retries stay the
+caller's job (escrow has `deliverSettlementWebhook`; this repo does not
+yet).
+
 ## Dispatch idempotency keys
 
 Payment flows retry webhooks, and a retried dispatch used to mean a
@@ -514,7 +546,11 @@ webhooks, retries). That remains the caller's infrastructure.
   deadline scheduler (expiry is an explicit event, not a timer). In-process
   dispatch subscriptions exist (`task.subscribe` — fire-and-forget,
   listener errors swallowed, not persisted); there is still no durable
-  notification fan-out (queues, webhooks, retries).
+  notification fan-out (queues, retries, delivery). Webhook-shaped
+  payout *signing* does exist — `buildPayoutWebhook`/
+  `verifyPayoutWebhook` derive and HMAC-sign a `PAYOUT_COMPLETE`
+  notification from a PAID task's audit history — but actually POSTing it
+  stays the caller's job.
 - **Simplified arbitration.** Appeal rounds (REJECTED → DISPUTED →
   arbitration → REJECTED) can be capped per task with `maxDisputes`
   (default unlimited; used-round count derived from the append-only
@@ -539,7 +575,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 263 tests covering the happy path, reject→resubmit
+`npm test` runs 275 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

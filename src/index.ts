@@ -18,6 +18,12 @@ export {
   verifyHistoryChain,
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
+export { buildPayoutWebhook, verifyPayoutWebhook } from "./settlementWebhook.js";
+export type {
+  BuildPayoutWebhookOptions,
+  PayoutWebhook,
+  PayoutWebhookPayload,
+} from "./settlementWebhook.js";
 export type {
   DispatchOptions,
   ExpireOverdueResult,
