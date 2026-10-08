@@ -35,12 +35,25 @@ describe("historyToNdjson", () => {
       ]);
       for (const key of Object.keys(entry)) {
         assert.ok(
-          ["seq", "event", "from", "to", "at", "actor", "note"].includes(key),
+          [
+            "seq",
+            "event",
+            "from",
+            "to",
+            "at",
+            "actor",
+            "note",
+            "payoutRef",
+            "prevHash",
+            "hash",
+          ].includes(key),
           `unexpected key ${key}`,
         );
       }
     }
     const first = JSON.parse(lines[0]);
+    // hash-chain fields ride along on every exported line (the chain is
+    // part of the entry, so a tampered NDJSON line fails re-import)
     assert.deepEqual(Object.keys(first), [
       "seq",
       "event",
@@ -49,7 +62,10 @@ describe("historyToNdjson", () => {
       "at",
       "actor",
       "note",
+      "prevHash",
+      "hash",
     ]);
+    assert.equal(first.prevHash, "GENESIS");
     assert.equal(first.seq, 1);
     assert.equal(first.event, "PUBLISH");
     assert.equal(first.from, "DRAFT");

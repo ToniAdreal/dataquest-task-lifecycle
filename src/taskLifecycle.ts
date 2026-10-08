@@ -11,6 +11,8 @@
  * Researcher/Admin (publishes tasks).
  */
 
+import { createHash } from "node:crypto";
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -322,6 +324,26 @@ export interface TaskHistoryEntry {
    * cannot know whether an external payment really happened.
    */
   payoutRef?: string;
+  /**
+   * Hash-chain link to the previous audit entry (see the "Audit-history
+   * hash chain" section). `dispatch()` writes both fields on every
+   * entry: `prevHash` is the previous entry's `hash` (the genesis
+   * entry's `prevHash` is the {@link GENESIS_PREV_HASH} constant), and
+   * `hash = sha256(canonical(entry sans hash) + prevHash)`.
+   *
+   * Entries produced before this feature existed carry neither field —
+   * they are legacy and still accepted everywhere (see
+   * {@link parseHistory} and {@link verifyHistoryChain}); the two fields
+   * are all-or-nothing per entry and per history.
+   */
+  prevHash?: string;
+  /**
+   * Content hash of this entry within the audit-history hash chain.
+   * Recomputed by {@link verifyHistoryChain} (and enforced by
+   * {@link parseHistory}); rewriting any field of a chained entry
+   * invalidates it. See `prevHash` for the chaining rule.
+   */
+  hash?: string;
 }
 
 /**
@@ -554,17 +576,140 @@ function isCanonicalIso(s: unknown): s is string {
   return !Number.isNaN(ms) && new Date(ms).toISOString() === s;
 }
 
+// ------------------------------------------------------------------
+// Audit-history hash chain (tamper evidence for persisted logs).
+//
+// The runtime-frozen `history` getter stops in-process tampering, but a
+// persisted snapshot (toJSON) or NDJSON export (historyToNdjson) could be
+// rewritten on disk / in transit and rehydrated without anyone noticing.
+// Every chained entry commits to the full content of its predecessor:
+// `hash = sha256(canonical(entry sans hash) + prevHash)`, with the
+// genesis entry's `prevHash` set to GENESIS_PREV_HASH. Rewriting any field
+// of any entry (or deleting / reordering entries) breaks the chain, and
+// parseHistory / verifyHistoryChain report it. The same convention is
+// used by the sibling escrow-state-machine-ts repo (cross-repo
+// consistency).
+//
+// Honest limits: this is an UNKEYED chain. It detects edits by anyone
+// who rewrites entries without recomputing the chain (manual edits,
+// log-shipper corruption, partial restores). It does NOT stop an
+// attacker who rewrites the whole JSON and recomputes the hashes —
+// that needs a keyed MAC or signatures, which is out of scope here.
+// ------------------------------------------------------------------
+
+/** `prevHash` of the first (genesis) audit entry. */
+export const GENESIS_PREV_HASH = "GENESIS";
+
+/**
+ * Canonical serialization of a history entry for hashing: fixed key order
+ * (seq, event, from, to, at, then the optional fields in declaration
+ * order: actor, note, payoutRef, prevHash), `undefined` values omitted.
+ * `hash` itself is never part of the hashed content (it is what we are
+ * computing). Deterministic: the same entry always serializes to the
+ * same string, regardless of the key order the entry object was built
+ * with.
+ */
+function canonicalHistoryEntry(
+  entry: Omit<TaskHistoryEntry, "hash">,
+): string {
+  const obj: Record<string, unknown> = {
+    seq: entry.seq,
+    event: entry.event,
+    from: entry.from,
+    to: entry.to,
+    at: entry.at,
+  };
+  if (entry.actor !== undefined) obj.actor = entry.actor;
+  if (entry.note !== undefined) obj.note = entry.note;
+  if (entry.payoutRef !== undefined) obj.payoutRef = entry.payoutRef;
+  if (entry.prevHash !== undefined) obj.prevHash = entry.prevHash;
+  return JSON.stringify(obj);
+}
+
+function hashHistoryEntry(canonical: string, prevHash: string): string {
+  return createHash("sha256").update(canonical + prevHash, "utf8").digest("hex");
+}
+
+/**
+ * Verify the hash chain of an audit history. Returns `true` when the
+ * chain is intact: every entry's `prevHash` matches the previous entry's
+ * `hash` (genesis links to {@link GENESIS_PREV_HASH}) and every `hash`
+ * recomputes from the entry content.
+ *
+ * Semantics for histories without a chain:
+ *  - empty history -> `true` (vacuous);
+ *  - no entry carries hash fields (legacy histories, e.g. produced
+ *    before this feature) -> `true`: there is no chain to verify,
+ *    mirroring parseHistory's legacy pass-through;
+ *  - a mix of chained and hashless entries -> `false` (fail closed).
+ *
+ * Note: this checks integrity only, not structure. A re-sequenced or
+ * structurally invalid history still needs parseHistory (via
+ * {@link TaskLifecycle.fromJSON} / {@link replay}) for the seq/edge/
+ * timestamp rules.
+ */
+export function verifyHistoryChain(
+  history: readonly TaskHistoryEntry[],
+): boolean {
+  if (history.length === 0) return true;
+  const carried = history.map(
+    (e) => e.hash !== undefined || e.prevHash !== undefined,
+  );
+  if (carried.every((c) => !c)) return true; // legacy: nothing to verify
+  if (carried.some((c) => !c)) return false; // mixed: fail closed
+  let expectedPrev = GENESIS_PREV_HASH;
+  for (const entry of history) {
+    if (entry.prevHash !== expectedPrev) return false;
+    const canonical = canonicalHistoryEntry(entry);
+    if (hashHistoryEntry(canonical, entry.prevHash!) !== entry.hash) {
+      return false;
+    }
+    expectedPrev = entry.hash!;
+  }
+  return true;
+}
+
+/**
+ * Chain a parsed history: entries that already carry a chain pass
+ * through untouched (the parser verified them); a fully hashless legacy
+ * history gets its chain computed deterministically from the genesis
+ * constant. Mixed input never reaches here — parseHistory rejects it.
+ * The audit content is never altered: the hash is a pure function of
+ * the entry fields.
+ */
+function chainHistoryEntries(
+  history: TaskHistoryEntry[],
+): TaskHistoryEntry[] {
+  if (history.length === 0) return history;
+  if (history[0].hash !== undefined) return history; // already chained
+  let prevHash = GENESIS_PREV_HASH;
+  return history.map((entry) => {
+    const chained: TaskHistoryEntry = { ...entry, prevHash };
+    chained.hash = hashHistoryEntry(
+      canonicalHistoryEntry(chained),
+      prevHash,
+    );
+    prevHash = chained.hash;
+    return chained;
+  });
+}
+
 /**
  * Parse and strictly validate an untrusted value into a sanitized audit
  * history — the append-only event log every TaskLifecycle carries.
  *
  * Throws `invalid history: …` on the first problem found:
  *  - history is not an array, or an entry is not an object
- *  - entry shape violations (seq, event, from, to, at, actor, note)
+ *  - entry shape violations (seq, event, from, to, at, actor, note,
+ *    payoutRef, prevHash, hash)
  *  - seq must restart at 1 and increment by 1 with no gaps
  *  - the from/to chain must be continuous and start at DRAFT
  *  - every (from, event) -> to edge must be a legal transition edge
  *  - timestamps must be canonical ISO-8601 and non-decreasing
+ *  - hash-chain rule: entries carrying hash fields must carry both
+ *    (prevHash and hash); a history mixing chained and hashless entries
+ *    is rejected; a fully chained history must re-verify end to end
+ *    (a fully hashless history is legacy and passes through)
  *
  * The returned entries are fresh, sanitized copies: mutating the input
  * afterwards never affects them.
@@ -645,7 +790,39 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
       }
       entry.payoutRef = raw.payoutRef;
     }
+    // Hash-chain fields are all-or-nothing per entry: one without the
+    // other is malformed. Chain CONTENT verification happens after the
+    // structural loop, once every entry is known to be chained or not.
+    if (raw.prevHash !== undefined || raw.hash !== undefined) {
+      if (typeof raw.prevHash !== "string" || raw.prevHash.length === 0) {
+        throw new Error(`${tag}: prevHash must be a non-empty string`);
+      }
+      if (typeof raw.hash !== "string" || raw.hash.length === 0) {
+        throw new Error(`${tag}: hash must be a non-empty string`);
+      }
+      entry.prevHash = raw.prevHash;
+      entry.hash = raw.hash;
+    }
     entries.push(entry);
+  }
+  // Hash-chain rule (tamper evidence for persisted logs): a history that
+  // mixes chained and hashless entries is rejected — a partially chained
+  // log is the classic signature of a rewritten-middle attack. A fully
+  // chained history must re-verify end to end; a fully hashless history
+  // is legacy and passes through (fromJSON()/fromHistory() chain it
+  // deterministically on rehydration).
+  const chainedFlags = entries.map((e) => e.hash !== undefined);
+  if (chainedFlags.some(Boolean) && chainedFlags.some((c) => !c)) {
+    throw new Error(
+      "invalid history: hash-chain entries must not be mixed with hashless entries",
+    );
+  }
+  if (chainedFlags.length > 0 && chainedFlags.every(Boolean)) {
+    if (!verifyHistoryChain(entries)) {
+      throw new Error(
+        "invalid history: history hash chain is broken (an entry was tampered with, deleted, or reordered)",
+      );
+    }
   }
   return entries;
 }
@@ -1021,16 +1198,27 @@ export class TaskLifecycle {
       this._idempotencyKeys.add(opts.idempotencyKey);
     }
     this._state = to;
+    // Hash-chain the audit trail: the new entry commits to the previous
+    // entry's hash (genesis links to GENESIS_PREV_HASH), so any later
+    // rewrite of a persisted entry — or of a persisted NDJSON line — is
+    // detectable via verifyHistoryChain / parseHistory. The live history
+    // is always fully chained (fromJSON()/fromHistory() chain legacy
+    // hashless histories on rehydration), so the fallback is defensive
+    // only.
+    const prevHash: string =
+      this._history[this._history.length - 1]?.hash ?? GENESIS_PREV_HASH;
     const entry: TaskHistoryEntry = {
       seq: this._history.length + 1,
       event,
       from,
       to,
       at: opts?.at ?? new Date().toISOString(),
+      prevHash,
     };
     if (opts?.actor !== undefined) entry.actor = opts.actor;
     if (opts?.note !== undefined) entry.note = opts.note;
     if (opts?.payoutRef !== undefined) entry.payoutRef = opts.payoutRef;
+    entry.hash = hashHistoryEntry(canonicalHistoryEntry(entry), prevHash);
     this._history.push(entry);
     this._notifyListeners(event, from, to, entry);
     return to;
@@ -1202,7 +1390,11 @@ export class TaskLifecycle {
       maxDisputes: parsed.maxDisputes,
     });
     task._state = parsed.state;
-    task._history = parsed.history;
+    // A fully hashless legacy history is chained deterministically here
+    // (the audit content is unchanged — the hash is a pure function of
+    // the entry fields), so the live history is always fully chained and
+    // later dispatches keep linking to it.
+    task._history = chainHistoryEntries(parsed.history);
     task._rolePolicy = parsed.rolePolicy;
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
       task.setSlaDeadline(deadline, state as TaskState);
@@ -1242,7 +1434,9 @@ export class TaskLifecycle {
     }
     const task = new TaskLifecycle(id, opts);
     task._state = replay(history);
-    task._history = parseHistory(history);
+    // See fromJSON(): a legacy hashless log is chained deterministically
+    // on rehydration, so the live history is always fully chained.
+    task._history = chainHistoryEntries(parseHistory(history));
     return task;
   }
 }

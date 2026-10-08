@@ -163,6 +163,36 @@ inconsistent input throws a specific `invalid snapshot: …` error instead
 of producing a task with a broken audit trail. See
 `test/serialization.test.ts` for the full checklist.
 
+### Hash-chained audit history
+
+Every entry `dispatch()` appends carries `prevHash` and `hash`:
+`prevHash` is the previous entry's `hash` (the genesis entry's is the
+exported `GENESIS_PREV_HASH` constant, `"GENESIS"`), and
+`hash = sha256(canonical(entry sans hash) + prevHash)` via `node:crypto`
+— the same convention the sibling `escrow-state-machine-ts` repo uses.
+`parseHistory()` re-verifies the chain whenever entries carry it, so a
+persisted snapshot or NDJSON line that was rewritten, deleted from the
+middle, or reordered fails rehydration (`invalid history: history hash
+chain is broken`) instead of replaying as a clean log; a history mixing
+chained and hashless entries is rejected outright. Histories produced
+before this feature (no hash fields) still parse — `fromJSON()` /
+`fromHistory()` chain them deterministically on rehydration, so the live
+history is always fully chained.
+
+Verify a log without rehydrating:
+
+```ts
+import { verifyHistoryChain } from "dataquest-task-lifecycle";
+
+verifyHistoryChain(log); // true when intact; false on tampering, deletion, or reordering
+```
+
+Honest limit: this is an *unkeyed* chain. It detects edits by anyone who
+rewrites entries without recomputing the chain (manual edits,
+log-shipper corruption, partial restores). It does not stop an attacker
+who rewrites the whole log and recomputes the hashes — that needs a
+keyed MAC or signatures.
+
 ### Event-sourced replay
 
 When only the raw audit log survives (e.g. an event stream, a forwarded
@@ -437,12 +467,17 @@ webhooks, retries). That remains the caller's infrastructure.
 - **Append-only history is runtime-frozen.** `task.history` returns a frozen
   copy (array and entries), so consumers cannot rewrite the audit log at
   runtime, even by accident — `dispatch()` is the only append path. This is
-  in-memory integrity, not tamper-proofing: persisted snapshots must still
-  be validated on rehydration (`fromJSON()` rejects broken logs).
+  in-memory integrity, not tamper-proofing: persisted snapshots and NDJSON
+  exports additionally carry a SHA-256 hash chain (`prevHash`/`hash` on
+  every entry, genesis links to `"GENESIS"`), which `parseHistory()`
+  re-verifies on rehydration — a rewritten, truncated, or reordered
+  persisted log fails loudly. The chain is unkeyed: it catches edits made
+  without recomputing the hashes, not a full-log rewrite by someone who
+  recomputes them (that needs a keyed MAC or signatures).
 
 ## Reproducibility
 
-`npm test` runs 209 tests covering the happy path, reject→resubmit
+`npm test` runs 237 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -478,7 +513,11 @@ PAYOUT_COMPLETE advisory path), and settlement reconciliation screening
 reconciling, empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,
 per-task global keys, failed-dispatch key non-consumption, shape
-validation, in-memory-only semantics, seq-continuity). No
+validation, in-memory-only semantics, seq-continuity), and the audit-history
+SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
+reorder/forgery detection, legacy pass-through, mixed-history rejection,
+parseHistory/replay enforcement, NDJSON round-trip chain preservation,
+legacy snapshot re-chaining on rehydration). No
 network, no randomness in assertions.
 
 ## License

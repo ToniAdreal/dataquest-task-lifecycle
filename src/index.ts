@@ -2,6 +2,7 @@ export {
   TaskLifecycle,
   allowedEvents,
   expiredTasks,
+  GENESIS_PREV_HASH,
   isOverdue,
   isTerminal,
   parseHistory,
@@ -12,6 +13,7 @@ export {
   transitionTable,
   transitionTableJson,
   unreconciledPayouts,
+  verifyHistoryChain,
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
