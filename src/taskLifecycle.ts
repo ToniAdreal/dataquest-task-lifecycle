@@ -306,6 +306,42 @@ export function unreconciledPayouts(
   });
 }
 
+/**
+ * Reconciliation helper: sum the actual settled payout amounts across a
+ * batch of `PAID` tasks. For each task it reads the `payoutAmount`
+ * recorded on its `PAYOUT_COMPLETE` entry (see {@link DispatchOptions})
+ * and returns the total rounded to cents (same `Math.round(x * 100) / 100`
+ * convention as the sibling escrow-state-machine-ts money math).
+ *
+ * Honest accounting rules, all deliberate:
+ *  - only `PAID` tasks contribute; in-flight or otherwise-terminated
+ *    tasks are ignored;
+ *  - a `PAID` task whose `PAYOUT_COMPLETE` entry carries no `payoutAmount`
+ *    contributes 0 — the library cannot observe the external payment, so
+ *    this sums only what was recorded, not what was owed;
+ *  - per-entry amounts are stored verbatim; only the returned total is
+ *    cent-rounded (a per-entry amount with more than 2 decimals is the
+ *    caller's representation choice, see
+ *    {@link TaskHistoryEntry.payoutAmount});
+ *  - empty input returns 0.
+ *
+ * Pure: reads the tasks, never mutates or dispatches.
+ */
+export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
+  let total = 0;
+  for (const task of tasks) {
+    if (task.state !== "PAID") continue;
+    let complete: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+    }
+    if (complete?.payoutAmount !== undefined) {
+      total += complete.payoutAmount;
+    }
+  }
+  return Math.round(total * 100) / 100;
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
@@ -324,6 +360,19 @@ export interface TaskHistoryEntry {
    * cannot know whether an external payment really happened.
    */
   payoutRef?: string;
+  /**
+   * Actual settled payout amount (in the currency the external payment
+   * used) for settlement reconciliation. Conventionally attached to the
+   * `PAYOUT_COMPLETE` entry via `dispatch(event, { payoutAmount })`:
+   * `payoutRef` says *which transfer*, this says *how much*. A
+   * `PAYOUT_COMPLETE` entry without one is legal — the library cannot
+   * observe the external payment — and counts as 0 in
+   * {@link totalPaidOut} (documented as "sums only what was recorded").
+   *
+   * Stored verbatim on the audit entry (no rounding at write time); the
+   * {@link totalPaidOut} helper rounds the summed total to cents.
+   */
+  payoutAmount?: number;
   /**
    * Hash-chain link to the previous audit entry (see the "Audit-history
    * hash chain" section). `dispatch()` writes both fields on every
@@ -520,6 +569,13 @@ export interface DispatchOptions {
   note?: string;
   at?: string;
   payoutRef?: string;
+  /**
+   * Actual settled amount recorded on the audit entry
+   * ({@link TaskHistoryEntry.payoutAmount}). Must be a finite number ≥ 0
+   * when provided; an invalid value throws
+   * `invalid dispatch options: …` up front, before anything mutates.
+   */
+  payoutAmount?: number;
   idempotencyKey?: string;
 }
 
@@ -626,7 +682,8 @@ export const GENESIS_PREV_HASH = "GENESIS";
 /**
  * Canonical serialization of a history entry for hashing: fixed key order
  * (seq, event, from, to, at, then the optional fields in declaration
- * order: actor, note, payoutRef, prevHash), `undefined` values omitted.
+ * order: actor, note, payoutRef, payoutAmount, prevHash), `undefined`
+ * values omitted.
  * `hash` itself is never part of the hashed content (it is what we are
  * computing). Deterministic: the same entry always serializes to the
  * same string, regardless of the key order the entry object was built
@@ -645,6 +702,7 @@ function canonicalHistoryEntry(
   if (entry.actor !== undefined) obj.actor = entry.actor;
   if (entry.note !== undefined) obj.note = entry.note;
   if (entry.payoutRef !== undefined) obj.payoutRef = entry.payoutRef;
+  if (entry.payoutAmount !== undefined) obj.payoutAmount = entry.payoutAmount;
   if (entry.prevHash !== undefined) obj.prevHash = entry.prevHash;
   return JSON.stringify(obj);
 }
@@ -812,6 +870,21 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
         );
       }
       entry.payoutRef = raw.payoutRef;
+    }
+    if (raw.payoutAmount !== undefined) {
+      // dispatch() only ever writes finite, non-negative amounts, so a
+      // negative, NaN/Infinity, or non-number payoutAmount in an untrusted
+      // log is malformed (an unrecorded amount simply omits the field).
+      if (
+        typeof raw.payoutAmount !== "number" ||
+        !Number.isFinite(raw.payoutAmount) ||
+        raw.payoutAmount < 0
+      ) {
+        throw new Error(
+          `${tag}: payoutAmount must be a non-negative finite number, got ${String(raw.payoutAmount)}`,
+        );
+      }
+      entry.payoutAmount = raw.payoutAmount;
     }
     // Hash-chain fields are all-or-nothing per entry: one without the
     // other is malformed. Chain CONTENT verification happens after the
@@ -1119,6 +1192,15 @@ export class TaskLifecycle {
    * trace). The `unreconciledPayouts()` reconciliation helper flags `PAID`
    * tasks whose `PAYOUT_COMPLETE` entry lacks one.
    *
+   * `opts.payoutAmount` is the actual settled amount (in the currency the
+   * external payment used), recorded verbatim into the audit entry — the
+   * `payoutRef` companion for money. It must be a finite number ≥ 0; an
+   * invalid value throws `invalid dispatch options: …` up front, before
+   * anything mutates. The {@link totalPaidOut} reconciliation helper sums
+   * it across `PAID` tasks; a task without one contributes 0 (sums only
+   * what was recorded, not what was owed). Like `payoutRef`, it is accepted
+   * on any event but intended for `PAYOUT_COMPLETE`.
+   *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
    * already consumed, dispatch returns the current state immediately as a
    * no-op — no history entry, no listener notification, no transition
@@ -1168,6 +1250,22 @@ export class TaskLifecycle {
       if (typeof opts.payoutRef !== "string" || opts.payoutRef.length === 0) {
         throw new Error(
           `invalid dispatch options: payoutRef must be a non-empty string, got ${JSON.stringify(opts.payoutRef)}`,
+        );
+      }
+    }
+    if (opts?.payoutAmount !== undefined) {
+      // A payout amount must be a real, non-negative number: NaN, ±Infinity
+      // and negatives are caller errors (a bad amount in the audit trail
+      // would poison totalPaidOut), so fail fast up front, before
+      // anything mutates. Rounding is deliberately not applied here — the
+      // entry stores the verbatim amount; totalPaidOut rounds the total.
+      if (
+        typeof opts.payoutAmount !== "number" ||
+        !Number.isFinite(opts.payoutAmount) ||
+        opts.payoutAmount < 0
+      ) {
+        throw new Error(
+          `invalid dispatch options: payoutAmount must be a non-negative finite number, got ${String(opts.payoutAmount)}`,
         );
       }
     }
@@ -1270,6 +1368,7 @@ export class TaskLifecycle {
     if (opts?.actor !== undefined) entry.actor = opts.actor;
     if (opts?.note !== undefined) entry.note = opts.note;
     if (opts?.payoutRef !== undefined) entry.payoutRef = opts.payoutRef;
+    if (opts?.payoutAmount !== undefined) entry.payoutAmount = opts.payoutAmount;
     entry.hash = hashHistoryEntry(canonicalHistoryEntry(entry), prevHash);
     this._history.push(entry);
     this._notifyListeners(event, from, to, entry);

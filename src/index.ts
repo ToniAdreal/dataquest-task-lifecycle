@@ -9,6 +9,7 @@ export {
   replay,
   staleTasks,
   stateDiagram,
+  totalPaidOut,
   transition,
   transitionTable,
   transitionTableJson,

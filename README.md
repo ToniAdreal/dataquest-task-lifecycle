@@ -294,6 +294,44 @@ A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
 check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
 `PAID`), because that is the entry that evidences the settlement itself.
 
+### Payout amounts
+
+A `payoutRef` answers "was there a transfer id"; finance reconciliation
+also needs "how much actually settled". `dispatch(event, { payoutAmount })`
+records the settled amount verbatim on the audit entry — the `payoutRef`
+companion for money:
+
+```ts
+task.dispatch("PAYOUT_COMPLETE", {
+  actor: "system",
+  payoutRef: "xfer-88f2",
+  payoutAmount: 10098.5,
+});
+task.history[8].payoutAmount; // => 10098.5
+```
+
+`payoutAmount` must be a finite number ≥ 0; anything else throws
+`invalid dispatch options: …` before the entry is appended, like
+payoutRef. It is generic audit metadata (accepted on any event), but
+intended for `PAYOUT_COMPLETE`; it survives `toJSON()` / `fromJSON()` and
+NDJSON round-trips, is committed into the audit-history hash chain, and
+an untrusted snapshot carrying a malformed value is rejected as
+`invalid history`. The `totalPaidOut()` helper sums it across `PAID`
+tasks:
+
+```ts
+import { totalPaidOut } from "dataquest-task-lifecycle";
+
+totalPaidOut(allTasks); // => 20630.0 — sum of recorded PAYOUT_COMPLETE amounts
+```
+
+Honest accounting rules: only `PAID` tasks contribute; a `PAID` task
+whose `PAYOUT_COMPLETE` entry carries no `payoutAmount` contributes 0 —
+this sums only what was recorded, not what was owed; the returned total
+is rounded to cents (`Math.round(x * 100) / 100`, the same money
+convention as the sibling escrow-state-machine-ts) while per-entry
+amounts are stored verbatim.
+
 ## Dispatch idempotency keys
 
 Payment flows retry webhooks, and a retried dispatch used to mean a
@@ -486,7 +524,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 246 tests covering the happy path, reject→resubmit
+`npm test` runs 255 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -525,7 +563,12 @@ switch semantics with `fromHistory` re-attachment), and settlement reconciliatio
 reconciling, empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,
 per-task global keys, failed-dispatch key non-consumption, shape
-validation, in-memory-only semantics, seq-continuity), and the audit-history
+validation, in-memory-only semantics, seq-continuity), payout amounts
+(dispatch-time finite/≥0 validation with fail-fast semantics, verbatim
+recording on the entry, toJSON/fromJSON round-trips, malformed-amount
+snapshot rejection, hash-chain commitment, `totalPaidOut`: per-PAID-task
+sums, unrecorded amounts as 0, non-PAID exclusion, cent-rounded totals,
+purity), and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,
