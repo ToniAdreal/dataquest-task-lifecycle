@@ -75,8 +75,9 @@ stateDiagram-v2
 ```
 
 - `transition(state, event)` is a pure function; invalid transitions throw.
-- `TaskLifecycle` wraps it with an append-only history (seq, event,
-  from → to, ISO timestamp, actor, note).
+- `TaskLifecycle` wraps it with an append-only history: each entry has
+  (seq, event, from → to, ISO timestamp), optional (actor, note,
+  payoutRef, payoutAmount), and a `prevHash`/`hash` SHA-256 audit chain.
 - `allowedEvents(state)` / `isTerminal(state)` helpers for UI gating.
 - Terminal states: `PAID`, `ABANDONED`, `EXPIRED`.
 - `transitionTableJson()` exports the whole transition table as canonical
@@ -158,8 +159,11 @@ const task = new TaskLifecycle("task-042");
 task.dispatch("PUBLISH", { actor: "researcher" });
 task.setSlaDeadline("2026-12-01T00:00:00.000Z"); // advisory SLA deadline
 
-// snapshot: { id, state, history, slaDeadlines } — plain JSON, no Maps,
-// no class instances. Also what JSON.stringify(task) produces.
+// snapshot: { id, state, history, slaDeadlines, [maxResubmits],
+//   [maxDisputes], [rolePolicy] } — plain JSON, no Maps, no class
+//   instances. The bracketed fields appear only when the corresponding
+//   option is configured (see TaskSnapshot). Also what
+//   JSON.stringify(task) produces.
 const snapshot = task.toJSON();
 await db.save(snapshot);
 
@@ -628,7 +632,11 @@ parseHistory/replay enforcement, NDJSON round-trip chain preservation,
 legacy snapshot re-chaining on rehydration), and the overdue-expiry
 watchdog executor (`expireOverdueTasks`: mixed-batch per-task outcomes,
 unexpirable tasks never blocking the batch, failed tasks untouched,
-auditable dispatch appends with an unbroken hash chain). No
+auditable dispatch appends with an unbroken hash chain), and
+documentation-shape coverage (the README claims about history-entry
+fields and the snapshot shape are verified against `TaskHistoryEntry`
+and `TaskSnapshot` in `src/taskLifecycle.ts`; no behavior changed in
+this release). No
 network, no randomness in assertions.
 
 ## License
