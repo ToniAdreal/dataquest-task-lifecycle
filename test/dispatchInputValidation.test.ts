@@ -11,7 +11,7 @@ test("dispatch: non-string actor throws and leaves state/history untouched", () 
   const t = new TaskLifecycle("t1");
   assert.throws(
     () => t.dispatch("PUBLISH", { actor: 42 as unknown as string }),
-    /invalid dispatch options: actor must be a string/,
+    /invalid dispatch options: actor must be a non-empty string/,
   );
   assert.equal(t.state, "DRAFT");
   assert.equal(t.history.length, 0);
@@ -22,7 +22,7 @@ test("dispatch: every non-string actor shape is rejected", () => {
     const t = new TaskLifecycle("t2");
     assert.throws(
       () => t.dispatch("PUBLISH", { actor: bad }),
-      /invalid dispatch options: actor must be a string, got /,
+      /invalid dispatch options: actor must be a non-empty string, got /,
       `actor=${String(bad)}`,
     );
     assert.equal(t.state, "DRAFT");
@@ -49,7 +49,7 @@ test("dispatch: options validation runs before the transition check", () => {
   // ABANDON is invalid from DRAFT, but the bad actor must win (fail fast).
   assert.throws(
     () => t.dispatch("ABANDON", { actor: 7 as unknown as string }),
-    /invalid dispatch options: actor must be a string/,
+    /invalid dispatch options: actor must be a non-empty string/,
   );
   assert.equal(t.state, "DRAFT");
 });
@@ -61,11 +61,12 @@ test("dispatch: valid actor/note still recorded, normal path unaffected", () => 
   const entry = t.history[0];
   assert.equal(entry.actor, "researcher");
   assert.equal(entry.note, "meets rubric");
-  // empty strings are legal (parity with fromJSON's snapshot checks)
-  t.dispatch("ACCEPT", { actor: "", note: "" });
-  assert.equal(t.history[1].actor, "");
+  // empty actor is rejected (zero audit value), but an empty note is
+  // still legal; omitting options / passing undefined is legal
+  assert.throws(() => t.dispatch("ACCEPT", { actor: "" }), /actor must be a non-empty string/);
+  t.dispatch("ACCEPT", { actor: "contributor", note: "" });
+  assert.equal(t.history[1].actor, "contributor");
   assert.equal(t.history[1].note, "");
-  // omitting options / passing undefined is legal
   t.dispatch("START_CAPTURE");
   t.dispatch("SUBMIT", { actor: undefined, note: undefined });
   assert.equal(t.history[3].actor, undefined);

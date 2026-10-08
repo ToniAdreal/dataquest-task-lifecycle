@@ -6,6 +6,7 @@ export {
   GENESIS_PREV_HASH,
   isOverdue,
   isTerminal,
+  MAX_NOTE_LENGTH,
   parseHistory,
   replay,
   staleTasks,

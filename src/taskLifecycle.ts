@@ -13,6 +13,20 @@
 
 import { createHash } from "node:crypto";
 
+/**
+ * Maximum note length accepted by dispatch() and parseHistory().
+ *
+ * Rationale: the audit history is append-only and unbounded, and every
+ * entry is serialized verbatim by toJSON() / historyToNdjson() when
+ * snapshots and NDJSON logs are written to disk. A multi-megabyte note
+ * would permanently inflate the persisted log on every export (and its
+ * hash chain entry); a 32_768-character ceiling keeps a single note
+ * well under ~128 KiB worst case while remaining generous for any
+ * honest human annotation. Callers that need larger payloads should
+ * store them out-of-band and reference them with a payoutRef/note.
+ */
+export const MAX_NOTE_LENGTH = 32_768;
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -905,14 +919,25 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
       at: raw.at,
     };
     if (raw.actor !== undefined) {
-      if (typeof raw.actor !== "string") {
-        throw new Error(`${tag}: actor must be a string`);
+      // Same bar as dispatch(): an empty actor in an untrusted log is
+      // malformed — audit entries must say WHO or omit the field.
+      if (typeof raw.actor !== "string" || raw.actor.length === 0) {
+        throw new Error(
+          `${tag}: actor must be a non-empty string, got ${JSON.stringify(raw.actor)}`,
+        );
       }
       entry.actor = raw.actor;
     }
     if (raw.note !== undefined) {
+      // Same bar as dispatch(): oversized notes in an untrusted log are
+      // malformed, so a corrupted snapshot cannot blow up rehydration.
       if (typeof raw.note !== "string") {
         throw new Error(`${tag}: note must be a string`);
+      }
+      if (raw.note.length > MAX_NOTE_LENGTH) {
+        throw new Error(
+          `${tag}: note must be at most ${MAX_NOTE_LENGTH} characters, got ${raw.note.length}`,
+        );
       }
       entry.note = raw.note;
     }
@@ -1211,11 +1236,14 @@ export class TaskLifecycle {
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they
-   * are validated up front: any non-string value throws
-   * `invalid dispatch options: …` before anything mutates. This mirrors the
-   * strict actor/note checks `fromJSON()` / `fromHistory()` apply to
-   * untrusted snapshots — the audit trail must stay string-typed on both
-   * the live and the rehydrated path. Invalid events still throw
+   * are validated up front: a non-string actor/note, an empty-string
+   * actor (zero audit value — `undefined` is the anonymous form), or a
+   * note longer than {@link MAX_NOTE_LENGTH} (append-only history is
+   * serialized verbatim by every export) throws
+   * `invalid dispatch options: …` before anything mutates. This mirrors
+   * the strict actor/note checks `fromJSON()` / `fromHistory()` apply to
+   * untrusted snapshots — the audit trail stays well-formed on both the
+   * live and the rehydrated path. Invalid events still throw
    * `invalid transition: …` (checked after the options).
    *
    * `opts.at` is optional and exists for deterministic audit tests: when
@@ -1291,15 +1319,31 @@ export class TaskLifecycle {
    * history stays intact.
    */
   dispatch(event: TaskEvent, opts?: DispatchOptions): TaskState {
-    if (opts?.actor !== undefined && typeof opts.actor !== "string") {
-      throw new Error(
-        `invalid dispatch options: actor must be a string, got ${typeof opts.actor}`,
-      );
+    // An empty actor has zero audit value: the field exists to say WHO
+    // did the dispatch, and "" says nothing (assertRolePolicy already
+    // rejects empty role names — the producer side matches that bar).
+    // undefined remains legal = anonymous, and the field is omitted.
+    if (opts?.actor !== undefined) {
+      if (typeof opts.actor !== "string" || opts.actor.length === 0) {
+        throw new Error(
+          `invalid dispatch options: actor must be a non-empty string, got ${JSON.stringify(opts.actor)}`,
+        );
+      }
     }
-    if (opts?.note !== undefined && typeof opts.note !== "string") {
-      throw new Error(
-        `invalid dispatch options: note must be a string, got ${typeof opts.note}`,
-      );
+    // Notes are written verbatim into the append-only audit history and
+    // serialized on every toJSON()/historyToNdjson() export, so an
+    // oversized note permanently inflates the persisted log — cap it.
+    if (opts?.note !== undefined) {
+      if (typeof opts.note !== "string") {
+        throw new Error(
+          `invalid dispatch options: note must be a string, got ${typeof opts.note}`,
+        );
+      }
+      if (opts.note.length > MAX_NOTE_LENGTH) {
+        throw new Error(
+          `invalid dispatch options: note must be at most ${MAX_NOTE_LENGTH} characters, got ${opts.note.length}`,
+        );
+      }
     }
     if (opts?.payoutRef !== undefined) {
       if (typeof opts.payoutRef !== "string" || opts.payoutRef.length === 0) {

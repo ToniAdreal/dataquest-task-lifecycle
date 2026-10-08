@@ -77,7 +77,7 @@ test("a failed dispatch does not consume the key: corrected retry works", () => 
   // First attempt: bad actor option fails up front (before the key is seen).
   assert.throws(
     () => t.dispatch("PUBLISH", { actor: 123 as unknown as string, idempotencyKey: "k" }),
-    /invalid dispatch options: actor must be a string/,
+    /invalid dispatch options: actor must be a non-empty string/,
   );
   assert.equal(t.history.length, 0);
   // Same key with fixed options executes normally.
