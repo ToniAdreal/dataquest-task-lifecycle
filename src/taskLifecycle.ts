@@ -170,12 +170,67 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
  *
  * Pure: reads the tasks, never mutates or dispatches. The `now` default
  * is the real clock, so unit tests pin it to a fixed date.
+ *
+ * NOTE: this returns every overdue task, including ones `EXPIRE` cannot
+ * legally fire on (see {@link expireOverdueTasks}).
  */
 export function expiredTasks(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): TaskLifecycle[] {
   return tasks.filter((task) => isOverdue(task, now));
+}
+
+/**
+ * Per-task outcome of {@link expireOverdueTasks}.
+ */
+export interface ExpireOverdueResult {
+  /** The task this outcome belongs to. */
+  task: TaskLifecycle;
+  /** True when the EXPIRE dispatch succeeded and the task is now EXPIRED. */
+  expired: boolean;
+  /** Set when the EXPIRE dispatch threw; the message of the caught error. */
+  error?: string;
+}
+
+/**
+ * Watchdog executor: attempt an explicit `dispatch("EXPIRE")` for every
+ * task that {@link isOverdue} reports as overdue, and report the
+ * per-task outcome.
+ *
+ * This exists because a hand-written loop over `expiredTasks()` has a
+ * real trap: `expiredTasks()` only checks the deadline and the terminal
+ * flag, but `EXPIRE` is not a legal event from every non-terminal state.
+ * `EXPIRE` edges exist only on OPEN, ACCEPTED, CAPTURING and SUBMITTED —
+ * an overdue IN_REVIEW task (or any other state without the edge, when a
+ * deadline was set for it) throws `invalid transition: EXPIRE from
+ * IN_REVIEW`, aborting a naive loop on the first such task. This
+ * executor catches the error per task (`expired: false, error:
+ * <message>`) and keeps going, so one unexpirable task never blocks the
+ * rest of the batch.
+ *
+ * Same semantics as the manual pattern: nothing auto-migrates. Expiry
+ * only happens through an explicit, auditable dispatch that lands in the
+ * append-only history. Only overdue (non-terminal, past deadline) tasks
+ * are attempted; the result has one entry per attempted task, in batch
+ * order. The `now` default is the real clock, so unit tests pin it.
+ */
+export function expireOverdueTasks(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): ExpireOverdueResult[] {
+  return expiredTasks(tasks, now).map((task) => {
+    try {
+      task.dispatch("EXPIRE");
+      return { task, expired: true };
+    } catch (err) {
+      return {
+        task,
+        expired: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 }
 
 /**

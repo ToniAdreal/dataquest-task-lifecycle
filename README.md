@@ -99,17 +99,32 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 `test/sla.test.ts` demonstrates in its last case.
 
 For batch polling there is a dedicated helper — `expiredTasks(tasks, now)`
-returns the "non-terminal and past deadline" subset of a task list, so a
-watchdog does it in one line (pure function: it never mutates or dispatches):
+returns the "non-terminal and past deadline" subset of a task list. It is a
+pure filter (it never mutates or dispatches); the watchdog executor
+`expireOverdueTasks(tasks, now)` does the dispatch for you, one line:
 
 ```ts
-import { expiredTasks, TaskLifecycle } from "./src/index.js";
+import { expireOverdueTasks, TaskLifecycle } from "./src/index.js";
 
 const tasks: TaskLifecycle[] = loadTasks(); // your store
-for (const task of expiredTasks(tasks)) {
-  task.dispatch("EXPIRE", { actor: "system" });
-}
+const outcomes = expireOverdueTasks(tasks); // [{ task, expired: true }, …]
+// { task, expired: false, error } — see below
 ```
+
+Why the executor exists instead of a hand-written loop: `expiredTasks()`
+only checks the deadline and the terminal flag, but `EXPIRE` is **not** a
+legal event from every non-terminal state — the transition table only has
+`EXPIRE` edges on OPEN, ACCEPTED, CAPTURING and SUBMITTED. An overdue
+IN_REVIEW task (or a deadline set on any other state without the edge)
+makes `task.dispatch("EXPIRE")` throw
+`invalid transition: EXPIRE from IN_REVIEW`, aborting a naive
+`for (const task of expiredTasks(tasks)) task.dispatch("EXPIRE")` loop on
+the first such task. `expireOverdueTasks` catches that error per task —
+`{ task, expired: false, error: <message> }` — and keeps going, so one
+unexpirable task never blocks the rest of the batch. Only overdue
+(non-terminal, past deadline) tasks are attempted; nothing auto-migrates,
+every expiry is an explicit dispatch that lands in the append-only
+history.
 
 A related but distinct screening is `staleTasks(tasks, maxAgeByState, now)`
 — it finds tasks stuck in their *current* non-terminal state longer than a
@@ -524,7 +539,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 255 tests covering the happy path, reject→resubmit
+`npm test` runs 263 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -572,7 +587,10 @@ purity), and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,
-legacy snapshot re-chaining on rehydration). No
+legacy snapshot re-chaining on rehydration), and the overdue-expiry
+watchdog executor (`expireOverdueTasks`: mixed-batch per-task outcomes,
+unexpirable tasks never blocking the batch, failed tasks untouched,
+auditable dispatch appends with an unbroken hash chain). No
 network, no randomness in assertions.
 
 ## License

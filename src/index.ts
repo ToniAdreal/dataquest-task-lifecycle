@@ -2,6 +2,7 @@ export {
   TaskLifecycle,
   allowedEvents,
   expiredTasks,
+  expireOverdueTasks,
   GENESIS_PREV_HASH,
   isOverdue,
   isTerminal,
@@ -19,6 +20,7 @@ export {
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export type {
   DispatchOptions,
+  ExpireOverdueResult,
   ListenerErrorContext,
   RolePolicy,
   SubscribeOptions,
