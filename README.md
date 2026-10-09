@@ -144,6 +144,41 @@ const stale = staleTasks(tasks, {
   IN_REVIEW: 7 * 24 * 3600_000, // a week
   OPEN: 30 * 24 * 3600_000,    // a month
 });
+```
+
+For acting on that list there is a dedicated executor —
+`actOnStaleTasks(tasks, action, maxAgeByState, now)` — which runs an
+action per stale task and reports `{ task, acted, error? }` per task:
+
+```ts
+import { actOnStaleTasks, TaskLifecycle } from "./src/index.js";
+
+const tasks: TaskLifecycle[] = loadTasks(); // your store
+const budgets = {
+  IN_REVIEW: 7 * 24 * 3600_000, // a week
+  OPEN: 30 * 24 * 3600_000,    // a month
+};
+// action omitted (undefined): the default dispatch("ABANDON", { actor: "system" })
+const outcomes = actOnStaleTasks(tasks, undefined, budgets);
+// or a custom action, e.g. notify-only paging that never transitions:
+// const outcomes = actOnStaleTasks(tasks, (t) => pageOnCall(t.id), budgets);
+```
+
+Why the executor exists instead of a hand-written loop: `ABANDON` is
+**not** a legal event from every non-terminal state — the transition
+table only has `ABANDON` edges on ACCEPTED and CAPTURING. A stale
+SUBMITTED, IN_REVIEW or OPEN task makes
+`task.dispatch("ABANDON", …)` throw
+`invalid transition: ABANDON from SUBMITTED`, aborting a naive
+`for (const task of stale) task.dispatch("ABANDON", …)` loop on the
+first such task and leaving the rest of the batch unprocessed.
+`actOnStaleTasks` catches that error per task —
+`{ task, acted: false, error: <message> }` — and keeps going.
+Configuration (`maxAgeByState`, `now`, a non-function `action`) is
+validated fail-fast before any action runs. The hand-written loop
+remains the clearest statement of the semantics:
+
+```ts
 for (const task of stale) {
   task.dispatch("ABANDON", { actor: "system" }); // or page a human, not expire
 }
@@ -622,7 +657,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 307 tests covering the happy path, reject→resubmit
+`npm test` runs 319 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -650,7 +685,13 @@ in-memory-only semantics, plus the optional `onError` observability hook:
 context delivery, peer isolation preserved, throwing `onError`
 containment, unsubscribe semantics, invalid-option fail-fast), stale-task watchdog screening (`staleTasks`:
 dwell budgets per state, terminal/history-less exclusion, invalid-budget
-fail-fast, purity), and per-edge agreement between the rendered
+fail-fast, purity), the stale-task watchdog executor (`actOnStaleTasks`:
+mixed-batch per-task outcomes with the default ABANDON action,
+unactionable stale tasks never blocking the batch, failed tasks
+untouched, custom notify-only and throwing actions isolated per task,
+fail-fast validation of the budget/`now`/action before any action runs,
+injectable `now`, auditable `actor: "system"` dispatch with an intact
+hash chain), and per-edge agreement between the rendered
 diagram and `transition()`. Settlement payout references are covered too
 (`payoutRef` verbatim recording, empty/non-string rejection fail-fast
 before any mutation, `toJSON`/`fromJSON`/`fromHistory` round-trip

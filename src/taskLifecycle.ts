@@ -304,6 +304,14 @@ function assertMaxAgeByState(
  *     IN_REVIEW: 7 * 24 * 3600_000, // a week
  *     OPEN: 30 * 24 * 3600_000,    // a month
  *   });
+ *
+ * Prefer {@link actOnStaleTasks} over acting on this list with a
+ * hand-written loop: `ABANDON` (the usual stale action) is only a legal
+ * event from ACCEPTED and CAPTURING, so a loop that dispatches it on
+ * every stale task aborts on the first stale SUBMITTED / IN_REVIEW /
+ * OPEN task. The hand-written loop is still the clearest way to see the
+ * semantics:
+ *
  *   for (const task of stale) {
  *     task.dispatch("ABANDON", { actor: "system" }); // or notify, not expire
  *   }
@@ -329,6 +337,78 @@ export function staleTasks(
     const enteredAt = Date.parse(history[history.length - 1].at);
     if (!Number.isFinite(enteredAt)) return false;
     return nowMs - enteredAt > maxAgeMs;
+  });
+}
+
+/** Action {@link actOnStaleTasks} runs for each stale task. */
+export type StaleTaskAction = (task: TaskLifecycle) => void;
+
+/**
+ * Per-task outcome of {@link actOnStaleTasks}.
+ */
+export interface StaleActionResult {
+  /** The task this outcome belongs to. */
+  task: TaskLifecycle;
+  /** True when the action ran for this task without throwing. */
+  acted: boolean;
+  /** Set when the action threw; the message of the caught error. */
+  error?: string;
+}
+
+/**
+ * Watchdog executor: run an action for every task {@link staleTasks}
+ * selects, and report the per-task outcome.
+ *
+ * This exists because a hand-written loop over `staleTasks()` has the
+ * same trap {@link expireOverdueTasks} fixed for `expiredTasks()`:
+ * `staleTasks()` only checks dwell time and the terminal flag, but the
+ * usual stale action — `dispatch("ABANDON", { actor: "system" })`, the
+ * default here — is not a legal event from every non-terminal state.
+ * `ABANDON` edges exist only on ACCEPTED and CAPTURING, so a stale
+ * SUBMITTED, IN_REVIEW or OPEN task throws
+ * `invalid transition: ABANDON from SUBMITTED` (etc.), aborting a naive
+ * loop on the first such task and leaving the rest of the batch
+ * unprocessed. This executor catches the error per task
+ * (`acted: false, error: <message>`) and keeps going, so one
+ * unactionable task never blocks the rest of the batch.
+ *
+ * Only stale tasks are attempted; the result has one entry per
+ * attempted task, in batch order. Non-stale and terminal tasks are
+ * untouched and produce no entry. Pass a custom `action` to do
+ * something other than abandon — e.g. notify-only paging that leaves
+ * the task in its current state:
+ *
+ *   actOnStaleTasks(tasks, (t) => pageOnCall(t.id), budgets);
+ *
+ * Configuration is validated fail-fast before any action runs:
+ * an invalid `maxAgeByState` or `now` (via `staleTasks()`) or a
+ * non-function `action` throws and no task is touched. The `now`
+ * default is the real clock, so unit tests pin it.
+ */
+export function actOnStaleTasks(
+  tasks: readonly TaskLifecycle[],
+  action: StaleTaskAction | undefined,
+  maxAgeByState: Partial<Record<TaskState, number>>,
+  now: Date = new Date(),
+): StaleActionResult[] {
+  if (action !== undefined && typeof action !== "function") {
+    throw new Error("invalid action: expected a function (task) => void");
+  }
+  const run: StaleTaskAction =
+    action ?? ((task) => task.dispatch("ABANDON", { actor: "system" }));
+  // staleTasks() validates maxAgeByState and now fail-fast, before any
+  // action runs.
+  return staleTasks(tasks, maxAgeByState, now).map((task) => {
+    try {
+      run(task);
+      return { task, acted: true };
+    } catch (err) {
+      return {
+        task,
+        acted: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   });
 }
 

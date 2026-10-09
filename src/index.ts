@@ -1,5 +1,6 @@
 export {
   TaskLifecycle,
+  actOnStaleTasks,
   allowedEvents,
   expiredTasks,
   expireOverdueTasks,
@@ -39,6 +40,8 @@ export type {
   ExpireOverdueResult,
   ListenerErrorContext,
   RolePolicy,
+  StaleActionResult,
+  StaleTaskAction,
   SubscribeOptions,
   TaskEvent,
   TaskEventListener,
