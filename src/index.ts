@@ -19,10 +19,18 @@ export {
   verifyHistoryChain,
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
-export { buildPayoutWebhook, verifyPayoutWebhook } from "./settlementWebhook.js";
+export {
+  buildPayoutWebhook,
+  deliverPayoutWebhook,
+  parsePayoutRetryAfter,
+  verifyPayoutWebhook,
+} from "./settlementWebhook.js";
 export type {
   BuildPayoutWebhookOptions,
+  DeliverPayoutWebhookOptions,
+  DeliverWebhookResult,
   PayoutWebhook,
+  PayoutWebhookFetchImpl,
   PayoutWebhookPayload,
 } from "./settlementWebhook.js";
 export type {

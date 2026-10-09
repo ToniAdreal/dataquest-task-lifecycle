@@ -375,13 +375,36 @@ return `false` instead of throwing. Verify over the raw request body
 bytes — the object overload re-stringifies for in-process convenience,
 but bytes are the transport-safe path.
 
+Delivery is included: `deliverPayoutWebhook(url, webhook)` POSTs the
+signed payload as JSON with the `X-Hub-Signature-256: <signature>`
+header — the request body is byte-identical to what was signed, so the
+receiver verifies it over the raw bytes:
+
+```ts
+import { deliverPayoutWebhook } from "dataquest-task-lifecycle";
+
+const result = await deliverPayoutWebhook("https://example.com/hooks/payout", webhook);
+// result: { ok: boolean, attempts: number, status?: number, error?: string }
+```
+
+Retry policy and defaults: `maxAttempts: 3` total attempts,
+`timeoutMs: 5000` per attempt (enforced with an `AbortController`),
+exponential backoff starting at `backoffMs: 1000`. Only 429, 5xx, and
+network errors (including timeouts) are retried; other 3xx/4xx fail
+immediately (redirects are never followed with the signed payload). A
+429 `Retry-After` hint (delay-seconds or HTTP-date) wins over backoff
+and is clamped to `maxRetryDelayMs: 60000` by default, so a runaway
+hint can never stall delivery. Delivery outcomes are reported in the
+result object, never thrown; invalid URLs and invalid options are
+caller configuration errors and throw before any request is made.
+`fetchImpl` and `sleepImpl` are injectable so delivery can be tested
+with no network and no real sleeps. Fan-out to multiple endpoints
+stays the caller's job — call it once per endpoint.
+
 Honest limits: the payload carries only what the audit history records —
 `payoutRef`/`payoutAmount` are omitted when the entry lacks them (a `PAID`
 task with no ref still builds; a missing reference is unevidenced, not a
-build failure). Secret distribution is the caller's responsibility, and
-this module does not POST anything: delivery and retries stay the
-caller's job (escrow has `deliverSettlementWebhook`; this repo does not
-yet).
+build failure). Secret distribution is the caller's responsibility.
 
 ## Dispatch idempotency keys
 
@@ -550,11 +573,12 @@ webhooks, retries). That remains the caller's infrastructure.
   deadline scheduler (expiry is an explicit event, not a timer). In-process
   dispatch subscriptions exist (`task.subscribe` — fire-and-forget,
   listener errors swallowed, not persisted); there is still no durable
-  notification fan-out (queues, retries, delivery). Webhook-shaped
+  notification fan-out (queues, multi-endpoint fan-out). Webhook-shaped
   payout *signing* does exist — `buildPayoutWebhook`/
   `verifyPayoutWebhook` derive and HMAC-sign a `PAYOUT_COMPLETE`
-  notification from a PAID task's audit history — but actually POSTing it
-  stays the caller's job.
+  notification from a PAID task's audit history — and single-endpoint
+  delivery with retries exists too (`deliverPayoutWebhook`, see
+  "Payout webhooks" above).
 - **Simplified arbitration.** Appeal rounds (REJECTED → DISPUTED →
   arbitration → REJECTED) can be capped per task with `maxDisputes`
   (default unlimited; used-round count derived from the append-only
@@ -579,7 +603,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 282 tests covering the happy path, reject→resubmit
+`npm test` runs 296 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

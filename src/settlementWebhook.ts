@@ -11,10 +11,12 @@
  * GitHub webhooks use.
  *
  * Scope honesty (what this is NOT):
- * - Delivery is NOT included: this module builds and verifies, it does
- *   not HTTP POST anything. Retries/fan-out to multiple endpoints stay
- *   the caller's job (escrow has `deliverSettlementWebhook`; this repo
- *   does not, yet).
+ * - Delivery IS included via {@link deliverPayoutWebhook}: a single-endpoint
+ *   HTTP POST of the signed payload with the `X-Hub-Signature-256` header, a
+ *   per-attempt timeout, and exponential-backoff retries on 429, 5xx, and
+ *   network errors (a 429 `Retry-After` hint is honored, clamped to
+ *   `maxRetryDelayMs`). Fan-out to multiple endpoints stays the caller's
+ *   job — call it once per endpoint.
  * - Secret distribution is the caller's responsibility. Whoever holds the
  *   secret can forge signatures; store it like any other API credential.
  * - `verifyPayoutWebhook` should run over the raw request body bytes. A
@@ -198,4 +200,307 @@ export function verifyPayoutWebhook(
   // timingSafeEqual throws on length mismatch; a forged 64-hex string that
   // decodes short (never, given the regex) or long is simply a failure.
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+/* ------------------------------------------------------------------ */
+/* Delivery                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Minimal `fetch` shape {@link deliverPayoutWebhook} depends on. The
+ * global `fetch` satisfies it; inject a stub in tests so delivery can be
+ * exercised with no network at all (the same testability seam the sibling
+ * escrow delivery tests use).
+ */
+export type PayoutWebhookFetchImpl = (
+  url: string,
+  init: RequestInit,
+) => Promise<Response>;
+
+/** Options for {@link deliverPayoutWebhook}. All fields optional. */
+export interface DeliverPayoutWebhookOptions {
+  /**
+   * Per-attempt request timeout in milliseconds, enforced with an
+   * `AbortController` whose signal is passed to the fetch
+   * implementation. Default 5000. Must be a finite positive number.
+   */
+  timeoutMs?: number;
+  /**
+   * Total attempts including the initial one. Default 3. Must be a
+   * positive integer; `1` disables retries entirely.
+   */
+  maxAttempts?: number;
+  /**
+   * Base backoff between retries in milliseconds. The wait before retry
+   * n (1-based) is `backoffMs * 2^(n-1)`. Default 1000. May be 0.
+   */
+  backoffMs?: number;
+  /**
+   * Cap, in milliseconds, on the `Retry-After` wait honored on a 429. A
+   * faulty or malicious server can answer `Retry-After: 31536000`;
+   * without a cap the delivery promise would sleep for a year. The hint
+   * is clamped with `Math.min(hinted, maxRetryDelayMs)` before sleeping;
+   * default 60000. Only the 429 hint is clamped — the exponential
+   * backoff used when the hint is absent or unparsable is unaffected.
+   * Must be a finite non-negative number (`0` retries a hinted 429
+   * immediately).
+   */
+  maxRetryDelayMs?: number;
+  /** Fetch implementation. Defaults to the global `fetch`. */
+  fetchImpl?: PayoutWebhookFetchImpl;
+  /**
+   * Sleep implementation used between retries. Defaults to a real
+   * `setTimeout` sleep (unref'd, so a pending backoff never holds the
+   * process open). Inject a recorder in tests to assert the exact delay
+   * schedule instead of really sleeping.
+   */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Outcome of a {@link deliverPayoutWebhook} call. Delivery outcomes are
+ * reported, never thrown: `ok` is `true` only on a 2xx response.
+ * Caller configuration errors (invalid URL, invalid options) still
+ * throw before any request is made — those are bugs, not outcomes.
+ */
+export interface DeliverWebhookResult {
+  ok: boolean;
+  /** Total HTTP attempts made, including the initial one. */
+  attempts: number;
+  /** HTTP status of the last attempt, when a response was received. */
+  status?: number;
+  /** Human-readable last failure cause, present when `ok` is `false`. */
+  error?: string;
+}
+
+/**
+ * Parse a `Retry-After` header value into a wait in milliseconds.
+ * Accepts delay-seconds (a non-negative number) or an HTTP-date.
+ * Returns `undefined` when the value is absent or unparsable, in which
+ * case the caller falls back to exponential backoff. A past HTTP-date
+ * yields 0 (retry immediately) rather than a negative sleep.
+ */
+export function parsePayoutRetryAfter(
+  value: string | null | undefined,
+  nowMs: number = Date.now(),
+): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    return undefined;
+  }
+  // "-5" is neither a legal delay-seconds value nor a date; Date.parse
+  // would happily read it as a year, so reject signed numbers explicitly.
+  if (/^[+-]/.test(trimmed)) return undefined;
+  const when = Date.parse(trimmed);
+  if (Number.isNaN(when)) return undefined;
+  return Math.max(0, when - nowMs);
+}
+
+/**
+ * Wait before the next retry: a 429 `Retry-After` hint wins over
+ * backoff, clamped to `maxRetryDelayMs` so a runaway hint can never
+ * stall delivery longer than the caller allows.
+ */
+function retryDelayMs(
+  response: Response,
+  attemptIndex: number,
+  backoffMs: number,
+  maxRetryDelayMs: number,
+): number {
+  if (response.status === 429) {
+    const hinted = parsePayoutRetryAfter(response.headers.get("retry-after"));
+    if (hinted !== undefined) return Math.min(hinted, maxRetryDelayMs);
+  }
+  return backoffMs * 2 ** attemptIndex;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    // A pending backoff must not hold the process open on its own.
+    timer.unref();
+  });
+}
+
+/**
+ * POST a signed payout webhook to `url` as JSON with the
+ * `X-Hub-Signature-256: <signature>` header. The request body is
+ * byte-identical to what {@link buildPayoutWebhook} signed, so the
+ * receiver can verify it over the raw bytes.
+ *
+ * Retry policy:
+ * - 2xx → `{ ok: true, attempts, status }`.
+ * - 429 and 5xx / network errors (including per-attempt timeouts) →
+ *   retried with exponential backoff, up to `maxAttempts` total
+ *   attempts. A 429 `Retry-After` header (delay-seconds or HTTP-date)
+ *   takes precedence over the computed backoff and is clamped to
+ *   `maxRetryDelayMs` (default 60s).
+ * - Other 3xx/4xx (400, 404, …) → the request itself is at fault; the
+ *   result is `{ ok: false, attempts: 1, status, error }` with no
+ *   retry. Redirects are never followed (`redirect: "manual"`), so the
+ *   signed payload is never re-posted to a redirect target.
+ * - When every attempt fails, the result is
+ *   `{ ok: false, attempts: maxAttempts, status?, error }` — delivery
+ *   failure is reported, not thrown. A per-attempt timeout surfaces in
+ *   `error` as `webhook delivery timed out after <timeoutMs>ms`.
+ *
+ * Invalid URLs (including the empty string), non-http(s) protocols,
+ * and invalid options throw a `cannot deliver payout webhook: …`
+ * configuration error before any request is made (zero fetch calls).
+ */
+export async function deliverPayoutWebhook(
+  url: string,
+  webhook: PayoutWebhook,
+  opts: DeliverPayoutWebhookOptions = {},
+): Promise<DeliverWebhookResult> {
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  const maxAttempts = opts.maxAttempts ?? 3;
+  const backoffMs = opts.backoffMs ?? 1000;
+  const maxRetryDelayMs = opts.maxRetryDelayMs ?? 60_000;
+  const fetchImpl: PayoutWebhookFetchImpl =
+    opts.fetchImpl ?? ((u, init) => fetch(u, init));
+  const sleepImpl = opts.sleepImpl ?? defaultSleep;
+
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(
+      `cannot deliver payout webhook: timeoutMs must be a positive number, got ${String(
+        opts.timeoutMs,
+      )}`,
+    );
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error(
+      `cannot deliver payout webhook: maxAttempts must be a positive integer, got ${String(
+        opts.maxAttempts,
+      )}`,
+    );
+  }
+  if (!Number.isFinite(backoffMs) || backoffMs < 0) {
+    throw new Error(
+      `cannot deliver payout webhook: backoffMs must be a non-negative number, got ${String(
+        opts.backoffMs,
+      )}`,
+    );
+  }
+  if (!Number.isFinite(maxRetryDelayMs) || maxRetryDelayMs < 0) {
+    throw new Error(
+      `cannot deliver payout webhook: maxRetryDelayMs must be a non-negative number, got ${String(
+        opts.maxRetryDelayMs,
+      )}`,
+    );
+  }
+  if (opts.fetchImpl !== undefined && typeof opts.fetchImpl !== "function") {
+    throw new Error(
+      "cannot deliver payout webhook: fetchImpl must be a function",
+    );
+  }
+  if (opts.sleepImpl !== undefined && typeof opts.sleepImpl !== "function") {
+    throw new Error(
+      "cannot deliver payout webhook: sleepImpl must be a function",
+    );
+  }
+
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new Error(
+      `cannot deliver payout webhook: invalid url ${JSON.stringify(url)}`,
+    );
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") {
+    throw new Error(
+      `cannot deliver payout webhook: unsupported protocol ${JSON.stringify(
+        target.protocol,
+      )} (http/https only)`,
+    );
+  }
+
+  const body = canonicalJson(webhook.payload);
+  let lastStatus: number | undefined;
+  let lastError = "unknown error";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const attempts = attempt + 1;
+    let response: Response;
+    try {
+      response = await postOnce(fetchImpl, target, webhook.signature, body, timeoutMs);
+    } catch (err) {
+      lastStatus = undefined;
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt < maxAttempts - 1) {
+        await sleepImpl(backoffMs * 2 ** attempt);
+        continue;
+      }
+      return { ok: false, attempts, error: lastError };
+    }
+    if (response.ok) {
+      return { ok: true, attempts, status: response.status };
+    }
+    lastStatus = response.status;
+    lastError = `server responded with status ${response.status}`;
+    if (response.status === 429 || (response.status >= 500 && response.status <= 599)) {
+      if (attempt < maxAttempts - 1) {
+        await sleepImpl(retryDelayMs(response, attempt, backoffMs, maxRetryDelayMs));
+        continue;
+      }
+      return { ok: false, attempts, status: lastStatus, error: lastError };
+    }
+    // Other 3xx/4xx: retrying the identical signed request changes
+    // nothing, and a redirect must never be followed with the payload.
+    return {
+      ok: false,
+      attempts,
+      status: response.status,
+      error: `webhook delivery failed with status ${response.status} (not retried)`,
+    };
+  }
+  // Unreachable (maxAttempts >= 1 guarantees a return inside the loop),
+  // kept so the function has an explicit terminal result.
+  return { ok: false, attempts: maxAttempts, status: lastStatus, error: lastError };
+}
+
+/**
+ * One POST attempt with a per-attempt timeout. The timeout aborts the
+ * attempt's `AbortController`; a fetch rejection caused by that abort
+ * is translated into a clear timeout error. Network errors propagate
+ * unchanged so the caller's `error` field names the real cause.
+ */
+async function postOnce(
+  fetchImpl: PayoutWebhookFetchImpl,
+  target: URL,
+  signature: string,
+  body: string,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  timer.unref();
+  try {
+    return await fetchImpl(target.toString(), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Hub-Signature-256": signature,
+      },
+      body,
+      signal: controller.signal,
+      // Never follow redirects: the signed payload must not be re-posted
+      // to a redirect target (see the delivery policy above).
+      redirect: "manual",
+    });
+  } catch (err) {
+    if (timedOut) {
+      throw new Error(`webhook delivery timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
