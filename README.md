@@ -241,11 +241,36 @@ import { verifyHistoryChain } from "dataquest-task-lifecycle";
 verifyHistoryChain(log); // true when intact; false on tampering, deletion, or reordering
 ```
 
-Honest limit: this is an *unkeyed* chain. It detects edits by anyone who
-rewrites entries without recomputing the chain (manual edits,
-log-shipper corruption, partial restores). It does not stop an attacker
-who rewrites the whole log and recomputes the hashes — that needs a
-keyed MAC or signatures.
+Honest limit: by default this is an *unkeyed* chain. It detects edits
+by anyone who rewrites entries without recomputing the chain (manual
+edits, log-shipper corruption, partial restores). It does not stop an
+attacker who rewrites the whole log and recomputes the hashes.
+
+Optional keyed mode closes exactly that gap: construct the task with
+an `auditSecret` and every link becomes
+`hash = hmac_sha256(secret, canonical(entry) + prevHash)` instead of
+plain SHA-256 (the canonical byte format is unchanged):
+
+```ts
+const task = new TaskLifecycle("task-042", { auditSecret });
+verifyHistoryChain(log, { auditSecret }); // keyed logs need the secret
+```
+
+Rewriting the log then requires the secret as well as the data, so a
+full-log rewrite recomputed under a wrong (or no) key is detected.
+Verification is fail-closed across modes: a keyed chain does not
+verify without the secret or with the wrong one, and an unkeyed chain
+does not verify when a secret is supplied. The secret is task
+configuration, not audit data — it is never written into the snapshot
+or the NDJSON export — so rehydration re-supplies it:
+`TaskLifecycle.fromJSON(snapshot, { auditSecret })` or
+`TaskLifecycle.fromHistory(id, log, { auditSecret })`, and the NDJSON
+helpers take it as `historyToNdjson(task, { auditSecret })` /
+`historyFromNdjson(text, { auditSecret })`. A legacy hashless snapshot
+restored with a secret is chained in keyed mode on rehydration. Key
+generation, storage, and distribution stay the caller's
+responsibility — a keyed chain is a MAC, not a signature: anyone who
+holds the secret can still rewrite the log undetectably.
 
 ### Event-sourced replay
 
@@ -692,13 +717,16 @@ webhooks, retries). That remains the caller's infrastructure.
   exports additionally carry a SHA-256 hash chain (`prevHash`/`hash` on
   every entry, genesis links to `"GENESIS"`), which `parseHistory()`
   re-verifies on rehydration — a rewritten, truncated, or reordered
-  persisted log fails loudly. The chain is unkeyed: it catches edits made
-  without recomputing the hashes, not a full-log rewrite by someone who
-  recomputes them (that needs a keyed MAC or signatures).
+  persisted log fails loudly. The chain is unkeyed by default: it catches
+  edits made without recomputing the hashes, not a full-log rewrite by
+  someone who recomputes them. The opt-in keyed mode
+  (`auditSecret`, HMAC-SHA256 links) covers that rewrite attacker —
+  anyone without the secret can no longer recompute a valid chain —
+  at the price of key management, which stays the caller's problem.
 
 ## Reproducibility
 
-`npm test` runs 345 tests covering the happy path, reject→resubmit
+`npm test` runs 366 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -762,7 +790,15 @@ exact-settlement and missing-amount and non-PAID undefined, and
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,
-legacy snapshot re-chaining on rehydration), and the overdue-expiry
+legacy snapshot re-chaining on rehydration), and the keyed HMAC audit
+chain (`auditSecret`: correct-secret verification, wrong/missing-secret
+rejection, unkeyed-with-secret rejection — fail-closed both ways,
+identical string/Buffer chains, caller-Buffer mutation defense,
+empty/invalid secret construction errors, wrong-key full-log-rewrite
+forgery detection, snapshot secrecy — the secret never enters
+`toJSON()` — keyed `fromJSON`/`fromHistory` re-attachment and
+continued dispatch, legacy snapshot keyed re-chaining, and keyed NDJSON
+round-trips), and the overdue-expiry
 watchdog executor (`expireOverdueTasks`: mixed-batch per-task outcomes,
 unexpirable tasks never blocking the batch, failed tasks untouched,
 auditable dispatch appends with an unbroken hash chain), and

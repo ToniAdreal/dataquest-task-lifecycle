@@ -11,7 +11,7 @@
  * Researcher/Admin (publishes tasks).
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 /**
  * Maximum note length accepted by dispatch() and parseHistory().
@@ -616,7 +616,11 @@ export interface TaskHistoryEntry {
    * hash chain" section). `dispatch()` writes both fields on every
    * entry: `prevHash` is the previous entry's `hash` (the genesis
    * entry's `prevHash` is the {@link GENESIS_PREV_HASH} constant), and
-   * `hash = sha256(canonical(entry sans hash) + prevHash)`.
+   * `hash = sha256(canonical(entry sans hash) + prevHash)` — or, when
+   * the task was constructed with
+   * {@link TaskLifecycleOptions.auditSecret},
+   * `hash = hmac_sha256(secret, canonical(entry sans hash) + prevHash)`
+   * (keyed mode; the canonical bytes are identical either way).
    *
    * Entries produced before this feature existed carry neither field —
    * they are legacy and still accepted everywhere (see
@@ -696,6 +700,27 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * whose finite budgets are stored), so a rehydrated task must re-enable
  * it via `fromHistory(id, history, { requirePayoutRef: true })`. Invalid
  * values throw `invalid option: …` at construction.
+ *
+ * `auditSecret` is an optional secret (string or Buffer) that upgrades
+ * the audit-history hash chain from plain SHA-256 to HMAC-SHA256
+ * (keyed mode): every entry's `hash` becomes
+ * `hmac_sha256(secret, canonical(entry) + prevHash)`, with the
+ * canonical byte format unchanged. Rewriting a persisted log then
+ * requires the secret as well as the data, so a full-log rewrite with
+ * recomputed hashes is detected without it. Verification is
+ * fail-closed across modes: a keyed chain does not verify without the
+ * secret or with the wrong one, and an unkeyed chain does not verify
+ * when a secret is supplied. Must be non-empty when set (an empty
+ * secret is a construction error — it would silently provide no MAC
+ * security). Default: `undefined` (unkeyed chain, exactly the legacy
+ * behavior). Like `requirePayoutRef`, the secret is task
+ * configuration, not audit data: it is NEVER written into the
+ * `toJSON()` snapshot, so a rehydrated task must be given it again —
+ * `fromJSON(snapshot, { auditSecret })` or
+ * `fromHistory(id, history, { auditSecret })` — and a keyed snapshot
+ * restored without it (or with the wrong secret) is rejected as a
+ * broken hash chain. Key generation, storage, and distribution are
+ * the caller's responsibility.
  */
 export interface TaskLifecycleOptions {
   maxResubmits?: number;
@@ -703,6 +728,7 @@ export interface TaskLifecycleOptions {
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
   idempotencyKeys?: string[];
+  auditSecret?: AuditSecret;
 }
 
 function assertRequirePayoutRef(value: unknown, tag: string): boolean {
@@ -971,15 +997,64 @@ function isCanonicalIso(s: unknown): s is string {
 // used by the sibling escrow-state-machine-ts repo (cross-repo
 // consistency).
 //
-// Honest limits: this is an UNKEYED chain. It detects edits by anyone
-// who rewrites entries without recomputing the chain (manual edits,
-// log-shipper corruption, partial restores). It does NOT stop an
-// attacker who rewrites the whole JSON and recomputes the hashes —
-// that needs a keyed MAC or signatures, which is out of scope here.
+// Honest limits: by default this is an UNKEYED chain. It detects edits
+// by anyone who rewrites entries without recomputing the chain (manual
+// edits, log-shipper corruption, partial restores). It does NOT stop an
+// attacker who rewrites the whole JSON and recomputes the hashes.
+//
+// Optional keyed mode: when the task is constructed with
+// `TaskLifecycleOptions.auditSecret`, each link is HMAC-SHA256 over the
+// same canonical input instead of plain SHA-256 (the canonical byte
+// format is unchanged, so legacy hashless entries serialize exactly as
+// before). Rewriting the log then requires the secret as well as the
+// data, which turns the chain from tamper evidence into a MAC — at the
+// price of key management, which stays the caller's problem: the
+// secret is per-instance configuration, is never written into
+// snapshots, and must be re-supplied to `verifyHistoryChain` /
+// `parseHistory` / `TaskLifecycle.fromJSON` / `fromHistory` to check a
+// keyed chain. The two modes are fail-closed against each other: a
+// keyed chain does not verify without (or with the wrong) secret, and
+// an unkeyed chain does not verify when a secret is supplied. The same
+// convention is used by the sibling escrow-state-machine-ts repo
+// (there the option is named `auditKey`).
 // ------------------------------------------------------------------
 
 /** `prevHash` of the first (genesis) audit entry. */
 export const GENESIS_PREV_HASH = "GENESIS";
+
+/** Secret for the optional keyed (HMAC) audit hash chain. */
+export type AuditSecret = string | Buffer;
+
+/**
+ * Options carrying an {@link AuditSecret} for the hash-chain functions
+ * ({@link verifyHistoryChain}, {@link parseHistory}, {@link replay},
+ * and the NDJSON import/export helpers).
+ */
+export interface AuditChainOptions {
+  auditSecret?: AuditSecret;
+}
+
+/**
+ * Validate an audit secret: it must be a non-empty string or Buffer
+ * (mirrors the settlement-webhook `assertSecret` fail-fast style — an
+ * empty secret would silently provide no MAC security at all, so it is
+ * a caller configuration error, never a verification result).
+ */
+function assertAuditSecret(
+  secret: unknown,
+  tag: string,
+): asserts secret is AuditSecret {
+  if (typeof secret !== "string" && !Buffer.isBuffer(secret)) {
+    throw new Error(
+      `${tag}: auditSecret must be a non-empty string or Buffer, got ${typeof secret}`,
+    );
+  }
+  if (secret.length === 0) {
+    throw new Error(
+      `${tag}: auditSecret must not be empty (an empty secret provides no MAC security)`,
+    );
+  }
+}
 
 /**
  * Canonical serialization of a history entry for hashing: fixed key order
@@ -1010,8 +1085,15 @@ function canonicalHistoryEntry(
   return JSON.stringify(obj);
 }
 
-function hashHistoryEntry(canonical: string, prevHash: string): string {
-  return createHash("sha256").update(canonical + prevHash, "utf8").digest("hex");
+function hashHistoryEntry(
+  canonical: string,
+  prevHash: string,
+  secret?: AuditSecret,
+): string {
+  const input = canonical + prevHash;
+  return secret === undefined
+    ? createHash("sha256").update(input, "utf8").digest("hex")
+    : createHmac("sha256", secret).update(input, "utf8").digest("hex");
 }
 
 /**
@@ -1027,6 +1109,15 @@ function hashHistoryEntry(canonical: string, prevHash: string): string {
  *    mirroring parseHistory's legacy pass-through;
  *  - a mix of chained and hashless entries -> `false` (fail closed).
  *
+ * Keyed chains: when the history was produced by a task constructed
+ * with {@link TaskLifecycleOptions.auditSecret}, pass the same secret
+ * as `opts.auditSecret` — the links are HMAC-SHA256, so verification
+ * without the secret (or with the wrong secret) returns `false`, and
+ * conversely an unkeyed chain returns `false` when a secret is
+ * supplied (fail-closed both ways). An invalid secret value itself
+ * (empty, or not a string/Buffer) is a caller configuration error and
+ * throws, mirroring the constructor.
+ *
  * Note: this checks integrity only, not structure. A re-sequenced or
  * structurally invalid history still needs parseHistory (via
  * {@link TaskLifecycle.fromJSON} / {@link replay}) for the seq/edge/
@@ -1034,7 +1125,10 @@ function hashHistoryEntry(canonical: string, prevHash: string): string {
  */
 export function verifyHistoryChain(
   history: readonly TaskHistoryEntry[],
+  opts?: AuditChainOptions,
 ): boolean {
+  const secret = opts?.auditSecret;
+  if (secret !== undefined) assertAuditSecret(secret, "invalid audit secret");
   if (history.length === 0) return true;
   const carried = history.map(
     (e) => e.hash !== undefined || e.prevHash !== undefined,
@@ -1045,7 +1139,7 @@ export function verifyHistoryChain(
   for (const entry of history) {
     if (entry.prevHash !== expectedPrev) return false;
     const canonical = canonicalHistoryEntry(entry);
-    if (hashHistoryEntry(canonical, entry.prevHash!) !== entry.hash) {
+    if (hashHistoryEntry(canonical, entry.prevHash!, secret) !== entry.hash) {
       return false;
     }
     expectedPrev = entry.hash!;
@@ -1063,6 +1157,7 @@ export function verifyHistoryChain(
  */
 function chainHistoryEntries(
   history: TaskHistoryEntry[],
+  secret?: AuditSecret,
 ): TaskHistoryEntry[] {
   if (history.length === 0) return history;
   if (history[0].hash !== undefined) return history; // already chained
@@ -1072,6 +1167,7 @@ function chainHistoryEntries(
     chained.hash = hashHistoryEntry(
       canonicalHistoryEntry(chained),
       prevHash,
+      secret,
     );
     prevHash = chained.hash;
     return chained;
@@ -1095,10 +1191,21 @@ function chainHistoryEntries(
  *    is rejected; a fully chained history must re-verify end to end
  *    (a fully hashless history is legacy and passes through)
  *
+ * `opts.auditSecret` selects the keyed (HMAC) chain mode for that
+ * re-verification — see {@link verifyHistoryChain}: a keyed history
+ * parsed without the secret (or with the wrong one) is rejected as a
+ * broken chain, and an unkeyed history parsed with a secret is
+ * rejected the same way (fail-closed both ways).
+ *
  * The returned entries are fresh, sanitized copies: mutating the input
  * afterwards never affects them.
  */
-export function parseHistory(history: unknown): TaskHistoryEntry[] {
+export function parseHistory(
+  history: unknown,
+  opts?: AuditChainOptions,
+): TaskHistoryEntry[] {
+  const secret = opts?.auditSecret;
+  if (secret !== undefined) assertAuditSecret(secret, "invalid history");
   if (!Array.isArray(history)) {
     throw new Error("invalid history: history must be an array");
   }
@@ -1244,7 +1351,7 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
     );
   }
   if (chainedFlags.length > 0 && chainedFlags.every(Boolean)) {
-    if (!verifyHistoryChain(entries)) {
+    if (!verifyHistoryChain(entries, { auditSecret: secret })) {
       throw new Error(
         "invalid history: history hash chain is broken (an entry was tampered with, deleted, or reordered)",
       );
@@ -1260,8 +1367,8 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
  * checks as the audit tests enforce (see parseHistory). An empty history
  * replays to DRAFT, the state of a task with no events yet.
  */
-export function replay(history: unknown): TaskState {
-  const entries = parseHistory(history);
+export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
+  const entries = parseHistory(history, opts);
   return entries.length === 0 ? "DRAFT" : entries[entries.length - 1].to;
 }
 
@@ -1285,7 +1392,7 @@ export function replay(history: unknown): TaskState {
  *
  * Anything produced by toJSON() passes; anything else must earn its way.
  */
-function parseSnapshot(snapshot: unknown): {
+function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   id: string;
   state: TaskState;
   history: TaskHistoryEntry[];
@@ -1306,7 +1413,7 @@ function parseSnapshot(snapshot: unknown): {
   }
   const state = snapshot.state as TaskState;
 
-  const history = parseHistory(snapshot.history);
+  const history = parseHistory(snapshot.history, { auditSecret });
 
   if (history.length > 0) {
     const last = history[history.length - 1];
@@ -1394,6 +1501,12 @@ export class TaskLifecycle {
    * `TaskLifecycleOptions.idempotencyKeys`.
    */
   private _idempotencyKeys: Set<string>;
+  /**
+   * Secret for the keyed (HMAC) audit hash chain, or undefined for the
+   * default unkeyed chain. Task configuration: never written into the
+   * JSON snapshot (see {@link TaskLifecycleOptions.auditSecret}).
+   */
+  private readonly _auditSecret: AuditSecret | undefined;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
     if (typeof id !== "string" || id.length === 0) {
@@ -1411,6 +1524,18 @@ export class TaskLifecycle {
       opts?.idempotencyKeys,
       "invalid option",
     );
+    if (opts?.auditSecret !== undefined) {
+      assertAuditSecret(opts.auditSecret, "invalid option");
+    }
+    // Defensive copy for Buffer secrets: the caller must not be able to
+    // mutate the secret material after construction and silently change
+    // what future dispatches MAC with.
+    this._auditSecret =
+      opts?.auditSecret === undefined
+        ? undefined
+        : Buffer.isBuffer(opts.auditSecret)
+          ? Buffer.from(opts.auditSecret)
+          : opts.auditSecret;
   }
 
   get state(): TaskState {
@@ -1761,7 +1886,11 @@ export class TaskLifecycle {
     if (opts?.payoutRef !== undefined) entry.payoutRef = opts.payoutRef;
     if (opts?.payoutAmount !== undefined) entry.payoutAmount = opts.payoutAmount;
     if (opts?.quotedAmount !== undefined) entry.quotedAmount = opts.quotedAmount;
-    entry.hash = hashHistoryEntry(canonicalHistoryEntry(entry), prevHash);
+    entry.hash = hashHistoryEntry(
+      canonicalHistoryEntry(entry),
+      prevHash,
+      this._auditSecret,
+    );
     this._history.push(entry);
     this._notifyListeners(event, from, to, entry);
     return to;
@@ -1906,6 +2035,11 @@ export class TaskLifecycle {
    * task re-enables up-front payout-reference enforcement via
    * `fromHistory(id, history, { requirePayoutRef: true })`; until then
    * `PAYOUT_COMPLETE` without a `payoutRef` is legal again.
+   *
+   * The `auditSecret` is NOT included either — a snapshot must never
+   * carry the secret that MACs its own history. A keyed task's
+   * snapshot therefore only rehydrates when the caller re-supplies
+   * the secret: `fromJSON(snapshot, { auditSecret })`.
    */
   toJSON(): TaskSnapshot {
     const deadlines: Partial<Record<TaskState, string>> = {};
@@ -1937,12 +2071,26 @@ export class TaskLifecycle {
    * Rebuild a TaskLifecycle from an untrusted snapshot (e.g. one read
    * back from a store). Throws a specific error on any malformed or
    * inconsistent input — see parseSnapshot for the full checklist.
+   *
+   * `opts.auditSecret` re-attaches the keyed hash-chain secret (the
+   * snapshot never stores it — see {@link TaskLifecycleOptions}):
+   * a snapshot chained in keyed mode only restores when the same
+   * secret is supplied here — without it, or with the wrong secret,
+   * the chain check fails and the snapshot is rejected as broken
+   * (fail-closed; the same applies in reverse to an unkeyed snapshot
+   * restored with a secret). A legacy hashless snapshot restored with
+   * a secret is chained in keyed mode on rehydration, so its live
+   * history verifies with that secret from then on.
    */
-  static fromJSON(snapshot: unknown): TaskLifecycle {
-    const parsed = parseSnapshot(snapshot);
+  static fromJSON(
+    snapshot: unknown,
+    opts?: TaskLifecycleOptions,
+  ): TaskLifecycle {
+    const parsed = parseSnapshot(snapshot, opts?.auditSecret);
     const task = new TaskLifecycle(parsed.id, {
       maxResubmits: parsed.maxResubmits,
       maxDisputes: parsed.maxDisputes,
+      auditSecret: opts?.auditSecret,
     });
     task._state = parsed.state;
     task._idempotencyKeys = parsed.idempotencyKeys;
@@ -1950,7 +2098,7 @@ export class TaskLifecycle {
     // (the audit content is unchanged — the hash is a pure function of
     // the entry fields), so the live history is always fully chained and
     // later dispatches keep linking to it.
-    task._history = chainHistoryEntries(parsed.history);
+    task._history = chainHistoryEntries(parsed.history, opts?.auditSecret);
     task._rolePolicy = parsed.rolePolicy;
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
       task.setSlaDeadline(deadline, state as TaskState);
@@ -1987,6 +2135,10 @@ export class TaskLifecycle {
    * keys the same way; omit it and the rehydrated task starts with an
    * empty key set, so a retried key would re-execute (the keys are not
    * part of the audit log, so they cannot be restored on their own).
+   * `opts.auditSecret` re-attaches the keyed hash-chain secret the same
+   * way; a keyed log restored without it (or with the wrong secret) is
+   * rejected as a broken hash chain, and a legacy hashless log restored
+   * with a secret is chained in keyed mode on rehydration.
    */
   static fromHistory(
     id: string,
@@ -1997,10 +2149,13 @@ export class TaskLifecycle {
       throw new Error("invalid history: id must be a non-empty string");
     }
     const task = new TaskLifecycle(id, opts);
-    task._state = replay(history);
+    task._state = replay(history, { auditSecret: opts?.auditSecret });
     // See fromJSON(): a legacy hashless log is chained deterministically
     // on rehydration, so the live history is always fully chained.
-    task._history = chainHistoryEntries(parseHistory(history));
+    task._history = chainHistoryEntries(
+      parseHistory(history, { auditSecret: opts?.auditSecret }),
+      opts?.auditSecret,
+    );
     return task;
   }
 }

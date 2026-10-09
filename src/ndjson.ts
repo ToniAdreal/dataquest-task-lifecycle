@@ -1,4 +1,5 @@
 import {
+  AuditChainOptions,
   TaskHistoryEntry,
   TaskLifecycle,
   parseHistory,
@@ -25,6 +26,13 @@ import {
  * snapshot envelope (see toJSON()/fromJSON()), not in the history. An
  * NDJSON round-trip restores the full entry sequence; replay() or
  * fromHistory() derives the state from it.
+ *
+ * Keyed histories (produced by a task constructed with
+ * `auditSecret`) travel as-is — every line carries its `prevHash`/`hash`
+ * HMAC links — but the validation on both export and import is keyed
+ * too: pass the same secret as `opts.auditSecret`, or the chain check
+ * fails closed with a broken-chain error. The secret itself is never
+ * written into the NDJSON text.
  */
 
 /**
@@ -37,11 +45,12 @@ import {
  */
 export function historyToNdjson(
   source: TaskLifecycle | readonly TaskHistoryEntry[],
+  opts?: AuditChainOptions,
 ): string {
   const raw: unknown = source instanceof TaskLifecycle
     ? [...source.history]
     : source;
-  const entries = parseHistory(raw);
+  const entries = parseHistory(raw, opts);
   if (entries.length === 0) return "";
   return entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
 }
@@ -55,7 +64,10 @@ export function historyToNdjson(
  * The returned entries are fresh, sanitized copies — safe to hand to
  * replay() or TaskLifecycle.fromHistory(id, …).
  */
-export function historyFromNdjson(text: string): TaskHistoryEntry[] {
+export function historyFromNdjson(
+  text: string,
+  opts?: AuditChainOptions,
+): TaskHistoryEntry[] {
   if (typeof text !== "string") {
     throw new Error("invalid ndjson: input must be a string");
   }
@@ -73,7 +85,7 @@ export function historyFromNdjson(text: string): TaskHistoryEntry[] {
     lineOf.push(i + 1);
   }
   try {
-    return parseHistory(values);
+    return parseHistory(values, opts);
   } catch (err) {
     throw retagLine(err, lineOf);
   }
