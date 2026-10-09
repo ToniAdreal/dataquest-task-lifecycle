@@ -587,6 +587,15 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * the check entirely (the pre-policy behavior). Invalid policies throw
  * `invalid option: …` at construction.
  *
+ * `idempotencyKeys` is an optional list of already-consumed dispatch
+ * idempotency keys to seed the task with — the re-attachment path for
+ * `fromHistory()`, whose audit log cannot carry the key set (keys are
+ * dispatch configuration, not audit data). Each key must be a non-empty
+ * string; duplicates are deduped. Keys restored this way (or via
+ * `fromJSON()`, which reads them from the snapshot envelope) keep their
+ * exactly-once effect: dispatching with one is a no-op. Invalid values
+ * throw `invalid option: …` at construction.
+ *
  * `requirePayoutRef` is an optional boolean (default `false`): when
  * `true`, `dispatch("PAYOUT_COMPLETE")` without a `payoutRef` throws
  * `payout reference required: …` and appends nothing. This is the
@@ -604,6 +613,7 @@ export interface TaskLifecycleOptions {
   maxDisputes?: number;
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
+  idempotencyKeys?: string[];
 }
 
 function assertRequirePayoutRef(value: unknown, tag: string): boolean {
@@ -614,6 +624,37 @@ function assertRequirePayoutRef(value: unknown, tag: string): boolean {
     );
   }
   return value;
+}
+
+/**
+ * Validate a list of idempotency keys into a deduped set.
+ *
+ * `undefined` means "no keys" (the default). Otherwise the value must be
+ * an array of non-empty strings — the same bar dispatch() applies to a
+ * single key. Duplicates are harmless and deduped (first occurrence
+ * wins, preserving insertion order for snapshot round-trips). Anything
+ * else throws `<tag>: idempotencyKeys …`.
+ */
+function assertIdempotencyKeys(
+  value: unknown,
+  tag: string,
+): Set<string> {
+  const keys = new Set<string>();
+  if (value === undefined) return keys;
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `${tag}: idempotencyKeys must be an array of non-empty strings, got ${typeof value}`,
+    );
+  }
+  for (const key of value) {
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error(
+        `${tag}: idempotencyKeys entries must be non-empty strings, got ${JSON.stringify(key)}`,
+      );
+    }
+    keys.add(key);
+  }
+  return keys;
 }
 
 function assertMaxResubmits(value: unknown, tag: string): number {
@@ -706,12 +747,19 @@ function assertRolePolicy(
  * bad call and retrying with the same key works. Omitting the key
  * preserves the exact pre-idempotency behavior.
  *
- * Honest limit: the key set is in-memory only. It is NOT part of
- * `toJSON()` / `fromJSON()` / `fromHistory()` — a rehydrated task
- * restarts with an empty set, so a retry with the same key after a
- * restart would re-execute. Pair this with a durable store (e.g. a
- * UNIQUE constraint on the key column) when you need cross-restart
- * exactly-once semantics.
+ * Persistence: the consumed-key set IS part of the `toJSON()` snapshot
+ * (written only when non-empty, so keyless tasks keep the legacy
+ * snapshot shape), and `fromJSON()` restores it — a retry with a known
+ * key after a snapshot restore is still a no-op. `fromHistory()` cannot
+ * recover keys from the audit log (they are not audit data), so callers
+ * re-attach them via `fromHistory(id, history, { idempotencyKeys })`.
+ *
+ * Honest limit: this preserves exactly-once across restarts that go
+ * through the snapshot, within one process/store. It is not a
+ * distributed lock: two processes restoring the same snapshot in
+ * parallel can both execute the same key. For cross-process
+ * exactly-once semantics, pair this with a durable store (e.g. a
+ * UNIQUE constraint on the key column).
  */
 export interface DispatchOptions {
   actor?: string;
@@ -783,6 +831,13 @@ export interface SubscribeOptions {
  * `rolePolicy` is present only when the task carries an RBAC policy; it
  * rehydrates through the same strict validation as the constructor, so a
  * tampered policy in a stored snapshot is rejected, not silently applied.
+ *
+ * `idempotencyKeys` is present only when the task has consumed at least
+ * one dispatch idempotency key (an empty set is omitted, keeping legacy
+ * snapshots byte-identical). It rehydrates through strict validation
+ * (non-array / non-string / empty-string entries are rejected) with
+ * duplicates deduped, so a consumed key keeps its no-op effect after a
+ * snapshot restore.
  */
 export interface TaskSnapshot {
   id: string;
@@ -792,6 +847,7 @@ export interface TaskSnapshot {
   maxResubmits?: number;
   maxDisputes?: number;
   rolePolicy?: RolePolicy;
+  idempotencyKeys?: string[];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -1110,6 +1166,8 @@ export function replay(history: unknown): TaskState {
  *    governs future dispatches)
  *  - maxDisputes, when present, follows the exact same rule for the
  *    DISPUTE appeal budget
+ *  - idempotencyKeys, when present, must be an array of non-empty
+ *    strings (duplicates are deduped on rehydration)
  *
  * Anything produced by toJSON() passes; anything else must earn its way.
  */
@@ -1121,6 +1179,7 @@ function parseSnapshot(snapshot: unknown): {
   maxResubmits: number;
   maxDisputes: number;
   rolePolicy: Map<TaskEvent, string[]>;
+  idempotencyKeys: Set<string>;
 } {
   if (!isRecord(snapshot)) {
     throw new Error("invalid snapshot: expected a JSON object");
@@ -1188,7 +1247,16 @@ function parseSnapshot(snapshot: unknown): {
   // is validated strictly but never consulted against the stored history.
   const rolePolicy = assertRolePolicy(snapshot.rolePolicy, "invalid snapshot");
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, rolePolicy };
+  // Same for the consumed idempotency keys: dispatch configuration for
+  // future dispatches, validated strictly (a tampered key list is
+  // rejected, not silently trusted) but never consulted against the
+  // stored history.
+  const idempotencyKeys = assertIdempotencyKeys(
+    snapshot.idempotencyKeys,
+    "invalid snapshot",
+  );
+
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, rolePolicy, idempotencyKeys };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -1206,12 +1274,12 @@ export class TaskLifecycle {
    */
   private _requirePayoutRef: boolean;
   /**
-   * Idempotency keys consumed by successful dispatches. Purely in-memory:
-   * it is never written into the JSON snapshot (see DispatchOptions for
-   * the documented cross-restart semantics), so a rehydrated task always
-   * restarts with an empty set.
+   * Idempotency keys consumed by successful dispatches. Persisted in
+   * the JSON snapshot when non-empty (see DispatchOptions for the
+   * documented semantics), and re-attachable on fromHistory() via
+   * `TaskLifecycleOptions.idempotencyKeys`.
    */
-  private _idempotencyKeys: Set<string> = new Set();
+  private _idempotencyKeys: Set<string>;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
     if (typeof id !== "string" || id.length === 0) {
@@ -1223,6 +1291,10 @@ export class TaskLifecycle {
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
     this._requirePayoutRef = assertRequirePayoutRef(
       opts?.requirePayoutRef,
+      "invalid option",
+    );
+    this._idempotencyKeys = assertIdempotencyKeys(
+      opts?.idempotencyKeys,
       "invalid option",
     );
   }
@@ -1369,8 +1441,9 @@ export class TaskLifecycle {
    * no-op — no history entry, no listener notification, no transition
    * validation. Failed dispatches never consume a key (the key is recorded
    * only alongside a successful append), so a corrected retry with the same
-   * key still executes. The key set is in-memory only and does not survive
-   * `toJSON()`/`fromJSON()`/`fromHistory()` — see {@link DispatchOptions}.
+   * key still executes. The key set survives `toJSON()`/`fromJSON()`
+   * round-trips and is re-attached on `fromHistory()` via options — see
+   * {@link DispatchOptions}.
    *
    * Retry budget: when this task was constructed with a finite
    * `maxResubmits` and the history already holds that many RESUBMIT
@@ -1681,9 +1754,10 @@ export class TaskLifecycle {
    * A task-level RBAC policy is included as a plain record when set
    * (absent means unrestricted, exactly the constructor default).
    *
-   * The idempotency key set is NOT included: it is in-memory only (see
-   * DispatchOptions), so a rehydrated task restarts with an empty set and
-   * a retried key re-executes after a restart.
+   * The consumed idempotency key set IS included, but only when
+   * non-empty: an empty set is omitted so keyless tasks keep the exact
+   * legacy snapshot shape. A rehydrated task therefore keeps the
+   * exactly-once effect of every consumed key (see DispatchOptions).
    *
    * `requirePayoutRef` is likewise NOT included: it is caller
    * configuration, not audit data (same class as the idempotency set,
@@ -1713,6 +1787,9 @@ export class TaskLifecycle {
     if (this._rolePolicy.size > 0) {
       snapshot.rolePolicy = Object.fromEntries(this._rolePolicy);
     }
+    if (this._idempotencyKeys.size > 0) {
+      snapshot.idempotencyKeys = [...this._idempotencyKeys];
+    }
     return snapshot;
   }
 
@@ -1728,6 +1805,7 @@ export class TaskLifecycle {
       maxDisputes: parsed.maxDisputes,
     });
     task._state = parsed.state;
+    task._idempotencyKeys = parsed.idempotencyKeys;
     // A fully hashless legacy history is chained deterministically here
     // (the audit content is unchanged — the hash is a pure function of
     // the entry fields), so the live history is always fully chained and
@@ -1765,6 +1843,10 @@ export class TaskLifecycle {
    * enforcement the same way; omit it and the rehydrated task falls back
    * to the advisory default (the switch is not part of the audit log, so
    * it cannot be restored on its own).
+   * `opts.idempotencyKeys` re-attaches the consumed dispatch idempotency
+   * keys the same way; omit it and the rehydrated task starts with an
+   * empty key set, so a retried key would re-execute (the keys are not
+   * part of the audit log, so they cannot be restored on their own).
    */
   static fromHistory(
     id: string,

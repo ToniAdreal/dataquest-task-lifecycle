@@ -17,8 +17,8 @@ import { TaskLifecycle } from "../src/index.js";
  *  - a failed dispatch consumes nothing: fixing the call and retrying
  *    with the same key still executes
  *  - listeners are not notified by duplicate-key no-ops
- *  - the key set is in-memory only: toJSON()/fromJSON() do not carry it,
- *    so a retried key re-executes after rehydration (documented limit)
+ *  - snapshot persistence of the key set is covered separately in
+ *    test/idempotencyKeySnapshot.test.ts (backlog #130)
  */
 
 test("same idempotencyKey dispatched twice leaves a single history entry", () => {
@@ -112,20 +112,16 @@ test("duplicate-key no-ops do not notify listeners", () => {
   assert.equal(t.listenerCount, 1);
 });
 
-test("key set is in-memory only: not carried by toJSON()/fromJSON()", () => {
+test("key set survives toJSON()/fromJSON(): a retried key stays a no-op", () => {
   const t = new TaskLifecycle("idem-9");
   t.dispatch("PUBLISH", { idempotencyKey: "once" });
   const restored = TaskLifecycle.fromJSON(t.toJSON());
-  // Documented honest limit: rehydrated tasks restart with an empty set,
-  // so a retry with the same key re-executes (here: the next legal event)
-  // instead of silently deduping.
-  restored.dispatch("ACCEPT", { idempotencyKey: "once" });
-  assert.equal(restored.history.length, 2);
-  assert.deepEqual(restored.history.map((e) => e.event), [
-    "PUBLISH",
-    "ACCEPT",
-  ]);
-  assert.equal(restored.state, "ACCEPTED");
+  // Backlog #130: the snapshot now carries consumed keys, so a retry
+  // with the same key after a restore dedupes instead of re-executing.
+  const returned = restored.dispatch("ACCEPT", { idempotencyKey: "once" });
+  assert.equal(returned, "OPEN");
+  assert.equal(restored.history.length, 1);
+  assert.equal(restored.state, "OPEN");
 });
 
 test("seq has no gaps after duplicates and failures", () => {

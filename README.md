@@ -481,11 +481,22 @@ different event still dedupes. The key itself must be a non-empty string
 nothing — fix the bad call and retry with the same key and it executes.
 Omitting the key preserves the exact pre-idempotency behavior.
 
-Honest limit: the key set is in-memory only. It does not survive
-`toJSON()` / `fromJSON()` / `fromHistory()` — a rehydrated task restarts
-with an empty set, so a retry with the same key re-executes after a
-restart. For cross-restart exactly-once semantics, pair this with a
-durable store (e.g. a `UNIQUE` constraint on the key column).
+Snapshot persistence: the consumed-key set is written into the
+`toJSON()` snapshot whenever it is non-empty (an empty set is omitted,
+so keyless tasks keep the legacy snapshot shape), and `fromJSON()`
+restores it through strict validation — a snapshot whose key list is
+not an array of non-empty strings is rejected, and duplicates are
+deduped. A retry with a consumed key after a snapshot restore is
+therefore still a no-op. `fromHistory()` cannot recover keys from the
+audit log (they are not audit data), so re-attach them explicitly:
+`TaskLifecycle.fromHistory(id, history, { idempotencyKeys: [...] })`.
+
+Honest limit: this preserves exactly-once across restarts that go
+through the snapshot, within one process/store. It is not a
+distributed lock — two processes restoring the same snapshot in
+parallel can both execute the same key. For cross-process
+exactly-once semantics, pair this with a durable store (e.g. a
+`UNIQUE` constraint on the key column).
 
 ## Retry budgets
 
@@ -657,7 +668,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 319 tests covering the happy path, reject→resubmit
+`npm test` runs 331 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -704,7 +715,9 @@ switch semantics with `fromHistory` re-attachment), and settlement reconciliatio
 reconciling, empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,
 per-task global keys, failed-dispatch key non-consumption, shape
-validation, in-memory-only semantics, seq-continuity), payout amounts
+validation, snapshot persistence: non-empty-only envelope field,
+strict rehydration validation with dedupe, `fromHistory` re-attachment,
+failed keys never persisted, seq-continuity), payout amounts
 (dispatch-time finite/≥0 validation with fail-fast semantics, verbatim
 recording on the entry, toJSON/fromJSON round-trips, malformed-amount
 snapshot rejection, hash-chain commitment, `totalPaidOut`: per-PAID-task
