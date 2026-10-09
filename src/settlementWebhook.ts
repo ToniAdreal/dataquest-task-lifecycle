@@ -22,7 +22,10 @@
  * - `verifyPayoutWebhook` should run over the raw request body bytes. A
  *   parsed object is re-stringified (byte-identical in-process because the
  *   payload is built with a fixed literal key order), but raw bytes are
- *   the transport-safe path.
+ *   the transport-safe path. Verification is signature-only by default;
+ *   an opt-in `maxAgeMs` freshness window additionally bounds replays of
+ *   legitimately-signed old payloads, but receivers must still
+ *   deduplicate on `eventId`.
  * - Only PAID tasks build a webhook. A PAID task whose PAYOUT_COMPLETE
  *   entry carries no `payoutRef`/`payoutAmount` still builds (the payload
  *   just omits those fields) — consistent with the advisory semantics of
@@ -167,6 +170,30 @@ export function buildPayoutWebhook(
   return { payload, signature };
 }
 
+/** Options for {@link verifyPayoutWebhook}. All fields optional. */
+export interface VerifyPayoutWebhookOptions {
+  /**
+   * Maximum age of the payload in milliseconds, measured from the
+   * payload `at` timestamp to `now`. When set, a payload whose
+   * signature verifies but whose `at` is older than this window returns
+   * `false` (fail-closed): this bounds replays of legitimately-signed
+   * old notifications (a signed payload would otherwise verify forever —
+   * a signature has no expiry on its own). Leave unset (the default)
+   * for signature-only verification (the pre-freshness-check behavior).
+   * Must be a finite non-negative number; illegal values throw a caller
+   * configuration error. The boundary is inclusive: an age exactly
+   * equal to `maxAgeMs` still passes (`now - at > maxAgeMs` fails).
+   * Future timestamps are not bounded (a negative age always passes).
+   */
+  maxAgeMs?: number;
+  /**
+   * "Now" for the freshness check. Defaults to the real clock; inject a
+   * fixed value in tests for determinism. An invalid timestamp throws a
+   * caller configuration error.
+   */
+  now?: Date | string;
+}
+
 /**
  * Verify a payout webhook signature. Returns `true` only when the
  * signature matches the HMAC-SHA256 of the given body under the secret.
@@ -179,16 +206,51 @@ export function buildPayoutWebhook(
  *
  * Note: `eventId` is not validated separately — it is part of the signed
  * body, so any tampering with it breaks the signature check above.
+ *
+ * Freshness (opt-in replay bound): pass `{ maxAgeMs, now? }` as the
+ * fourth argument. The signature is checked FIRST; only when it matches
+ * does the payload `at` timestamp get checked against `now` — a forged
+ * signature still fails on the signature comparison, and unauthenticated
+ * input is never parsed for its timestamp. A legitimately-signed payload
+ * older than the window returns `false` (a signature has no expiry on
+ * its own, so without this check a captured webhook could be replayed
+ * forever). An unparseable `at` — or an unparseable string body — fails
+ * closed as `false`, not an exception. Future timestamps are not bounded
+ * by this check (a negative age always passes), tolerating sender clock
+ * skew; the boundary is inclusive (`now - at > maxAgeMs` fails, exactly
+ * `maxAgeMs` passes). Freshness is defense-in-depth only: receivers MUST
+ * still deduplicate on `eventId`.
  */
 export function verifyPayoutWebhook(
   body: string | PayoutWebhookPayload,
   signature: string,
   secret: string | Buffer,
+  opts: VerifyPayoutWebhookOptions = {},
 ): boolean {
   if (secret.length === 0) {
     throw new Error(
       "cannot verify payout webhook: signing secret must not be empty",
     );
+  }
+  const maxAgeMs = opts.maxAgeMs;
+  if (
+    maxAgeMs !== undefined &&
+    (typeof maxAgeMs !== "number" || !Number.isFinite(maxAgeMs) || maxAgeMs < 0)
+  ) {
+    throw new Error(
+      `cannot verify payout webhook: maxAgeMs must be a finite non-negative number, got ${String(
+        maxAgeMs,
+      )}`,
+    );
+  }
+  let nowMs = Date.now();
+  if (opts.now !== undefined) {
+    nowMs = new Date(opts.now).getTime();
+    if (Number.isNaN(nowMs)) {
+      throw new Error(
+        "cannot verify payout webhook: invalid 'now' timestamp",
+      );
+    }
   }
   const match = /^sha256=([0-9a-f]{64})$/.exec(signature);
   if (!match) return false;
@@ -199,7 +261,45 @@ export function verifyPayoutWebhook(
   );
   // timingSafeEqual throws on length mismatch; a forged 64-hex string that
   // decodes short (never, given the regex) or long is simply a failure.
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  const signatureMatches =
+    expected.length === actual.length && timingSafeEqual(expected, actual);
+  if (!signatureMatches) return false;
+  // Freshness runs only after the signature matched: forgeries fail above,
+  // never here, and unauthenticated bodies are never timestamp-parsed.
+  if (maxAgeMs === undefined) return true;
+  return payloadFreshEnough(body, maxAgeMs, nowMs);
+}
+
+/**
+ * Fail-closed freshness gate over `payload.at`.
+ *
+ * String bodies are JSON-parsed to read `at`; unparseable bodies, missing
+ * `at`, or non-parseable timestamps all return `false` (never throw).
+ * The boundary is inclusive: `now - at <= maxAgeMs` passes, and a future
+ * `at` (negative age) always passes.
+ */
+function payloadFreshEnough(
+  body: string | PayoutWebhookPayload,
+  maxAgeMs: number,
+  nowMs: number,
+): boolean {
+  let at: unknown;
+  if (typeof body === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return false;
+    }
+    // A JSON string's `.at` is String#at (a function); the `typeof` check
+    // below rejects it before Date.parse ever sees it. Same for null.
+    at = (parsed as { at?: unknown } | null)?.at;
+  } else {
+    at = body.at;
+  }
+  const atMs = typeof at === "string" ? Date.parse(at) : Number.NaN;
+  if (Number.isNaN(atMs)) return false;
+  return nowMs - atMs <= maxAgeMs;
 }
 
 /* ------------------------------------------------------------------ */

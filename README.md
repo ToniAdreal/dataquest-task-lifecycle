@@ -375,6 +375,25 @@ return `false` instead of throwing. Verify over the raw request body
 bytes — the object overload re-stringifies for in-process convenience,
 but bytes are the transport-safe path.
 
+Verification is signature-only by default — and a signature has no
+expiry, so a captured webhook could otherwise be replayed forever. Pass
+the opt-in fourth argument to bound replays with a freshness window:
+
+```ts
+verifyPayoutWebhook(rawBody, signature, secret, { maxAgeMs: 5 * 60_000 });
+// => false when the signature is valid but now - payload.at > maxAgeMs
+```
+
+The signature is checked first (unauthenticated input is never parsed
+for its timestamp); only then is the payload `at` compared against
+`now` (injectable as a `Date` or ISO string, default the real clock).
+The boundary is inclusive (an age of exactly `maxAgeMs` passes), future
+timestamps pass (sender clock skew is tolerated), and an unparseable
+`at` fails closed as `false`. An illegal `maxAgeMs` (negative, `NaN`,
+infinite, non-number) or an invalid `now` throws a caller configuration
+error. Freshness is defense-in-depth only — it does not replace
+deduplication on `eventId`.
+
 Delivery is included: `deliverPayoutWebhook(url, webhook)` POSTs the
 signed payload as JSON with the `X-Hub-Signature-256: <signature>`
 header — the request body is byte-identical to what was signed, so the
@@ -603,7 +622,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 296 tests covering the happy path, reject→resubmit
+`npm test` runs 307 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -660,7 +679,12 @@ auditable dispatch appends with an unbroken hash chain), and
 documentation-shape coverage (the README claims about history-entry
 fields and the snapshot shape are verified against `TaskHistoryEntry`
 and `TaskSnapshot` in `src/taskLifecycle.ts`; no behavior changed in
-this release). No
+this release), and payout webhook freshness (the opt-in `maxAgeMs`
+replay window on `verifyPayoutWebhook`: fresh/stale payloads, the
+inclusive boundary and `maxAgeMs: 0`, future-timestamp tolerance,
+illegal-window configuration errors, signature-before-freshness
+ordering, fail-closed unparseable `at`, and legacy signature-only
+behavior when the option is omitted). No
 network, no randomness in assertions.
 
 ## License

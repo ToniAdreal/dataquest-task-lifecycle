@@ -32,6 +32,7 @@ export type {
   PayoutWebhook,
   PayoutWebhookFetchImpl,
   PayoutWebhookPayload,
+  VerifyPayoutWebhookOptions,
 } from "./settlementWebhook.js";
 export type {
   DispatchOptions,
