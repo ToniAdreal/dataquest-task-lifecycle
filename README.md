@@ -386,6 +386,36 @@ is rounded to cents (`Math.round(x * 100) / 100`, the same money
 convention as the sibling escrow-state-machine-ts) while per-entry
 amounts are stored verbatim.
 
+The owed half of that comparison is `quotedAmount`: the amount the task
+was agreed to pay, recorded with `dispatch(event, { quotedAmount })` —
+conventionally on `ACCEPT`, the moment the price is agreed:
+
+```ts
+task.dispatch("ACCEPT", { actor: "contributor", quotedAmount: 10098.5 });
+```
+
+It follows the exact `payoutAmount` rules: finite number ≥ 0 or
+`invalid dispatch options: …` before anything is appended, stored
+verbatim, survives `toJSON()` / `fromJSON()` and NDJSON round-trips, is
+committed into the audit-history hash chain, and a malformed value in an
+untrusted snapshot is rejected as `invalid history`. The
+`payoutMismatch()` helper compares the last `ACCEPT` quote against the
+`PAYOUT_COMPLETE` settled amount, and `mismatchedPayouts()` screens a
+batch with it:
+
+```ts
+import { mismatchedPayouts, payoutMismatch } from "dataquest-task-lifecycle";
+
+payoutMismatch(paidTask); // => { quoted: 100, paid: 90, delta: -10 } — underpaid by 10
+mismatchedPayouts(allTasks); // => PAID tasks whose settled amount differs from the quote
+```
+
+`payoutMismatch()` returns `undefined` — no mismatch to report — when
+the task is not `PAID`, when either amount was never recorded (the
+library cannot compare what it cannot observe), or when
+`quoted === paid` exactly. `delta` is `paid - quoted` rounded to cents:
+negative means underpaid, positive overpaid.
+
 ### Payout webhooks
 
 The in-process `subscribe()` hook cannot notify anything outside the
@@ -668,7 +698,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 331 tests covering the happy path, reject→resubmit
+`npm test` runs 345 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -722,7 +752,13 @@ failed keys never persisted, seq-continuity), payout amounts
 recording on the entry, toJSON/fromJSON round-trips, malformed-amount
 snapshot rejection, hash-chain commitment, `totalPaidOut`: per-PAID-task
 sums, unrecorded amounts as 0, non-PAID exclusion, cent-rounded totals,
-purity), and the audit-history
+purity), quoted amounts (`quotedAmount`: same dispatch-time finite/≥0
+validation and fail-fast semantics, verbatim recording on the ACCEPT
+entry, toJSON/fromJSON and NDJSON round-trips, malformed-quote snapshot
+rejection, hash-chain commitment with legacy canonical bytes unchanged,
+`payoutMismatch`: underpaid negative delta / overpaid positive delta,
+exact-settlement and missing-amount and non-PAID undefined, and
+`mismatchedPayouts` mixed-batch screening with purity), and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,

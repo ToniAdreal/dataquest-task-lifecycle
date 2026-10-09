@@ -491,6 +491,81 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
   return Math.round(total * 100) / 100;
 }
 
+/**
+ * One task's quoted-vs-settled discrepancy, as returned by
+ * {@link payoutMismatch}.
+ */
+export interface PayoutMismatch {
+  /** Quoted (owed) amount from the last `ACCEPT` entry. */
+  quoted: number;
+  /** Actually settled amount from the `PAYOUT_COMPLETE` entry. */
+  paid: number;
+  /**
+   * `paid - quoted`, rounded to cents (the same
+   * `Math.round(x * 100) / 100` convention as {@link totalPaidOut}):
+   * negative means the task was underpaid, positive overpaid.
+   */
+  delta: number;
+}
+
+/**
+ * Reconciliation helper: compare what a `PAID` task was quoted (owed)
+ * against what actually settled.
+ *
+ * The quote is the `quotedAmount` on the LAST `ACCEPT` entry; the
+ * settled amount is the `payoutAmount` on the `PAYOUT_COMPLETE` entry
+ * (the same entry {@link totalPaidOut} reads). Returns
+ * `{ quoted, paid, delta }` with `delta = paid - quoted` rounded to
+ * cents — negative is an underpayment, positive an overpayment.
+ *
+ * Returns `undefined` — "no mismatch to report" — when:
+ *  - the task is not `PAID` (nothing has settled yet, or never will);
+ *  - either amount was never recorded (no `ACCEPT` quote, or no
+ *    `PAYOUT_COMPLETE` amount — the library cannot compare what it
+ *    cannot observe);
+ *  - `quoted === paid` exactly (settled as agreed).
+ *
+ * Pure: reads the task, never mutates or dispatches.
+ */
+export function payoutMismatch(task: TaskLifecycle): PayoutMismatch | undefined {
+  if (task.state !== "PAID") return undefined;
+  let quoted: number | undefined;
+  let paid: number | undefined;
+  for (const entry of task.history) {
+    if (entry.event === "ACCEPT") {
+      quoted = entry.quotedAmount;
+    }
+    if (entry.event === "PAYOUT_COMPLETE") {
+      paid = entry.payoutAmount;
+    }
+  }
+  if (quoted === undefined || paid === undefined) return undefined;
+  if (quoted === paid) return undefined;
+  const delta = Math.round((paid - quoted) * 100) / 100;
+  return { quoted, paid, delta: delta === 0 ? 0 : delta };
+}
+
+/**
+ * Reconciliation helper: from a batch of tasks, return the ones whose
+ * settled payout differs from the quoted amount — the batch form of
+ * {@link payoutMismatch}, mirroring {@link unreconciledPayouts}' pure
+ * screening style:
+ *
+ *   for (const task of mismatchedPayouts(allTasks)) {
+ *     const { quoted, paid, delta } = payoutMismatch(task)!;
+ *     alertFinance(task.id, `quoted ${quoted}, paid ${paid} (delta ${delta})`);
+ *   }
+ *
+ * Tasks that are not `PAID`, lack either recorded amount, or settled
+ * exactly as quoted are never selected. Pure: reads the tasks, never
+ * mutates or dispatches. An empty input returns an empty array.
+ */
+export function mismatchedPayouts(
+  tasks: readonly TaskLifecycle[],
+): TaskLifecycle[] {
+  return tasks.filter((task) => payoutMismatch(task) !== undefined);
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
@@ -522,6 +597,20 @@ export interface TaskHistoryEntry {
    * {@link totalPaidOut} helper rounds the summed total to cents.
    */
   payoutAmount?: number;
+  /**
+   * Quoted (owed) payout amount — what the task was agreed to pay,
+   * as opposed to {@link payoutAmount}, which records what actually
+   * settled. Conventionally attached to the `ACCEPT` entry via
+   * `dispatch("ACCEPT", { quotedAmount })`: acceptance is the moment
+   * the price is agreed. A task without one simply has no recorded
+   * quote — the library cannot invent what was owed.
+   *
+   * Stored verbatim on the audit entry (no rounding at write time),
+   * exactly like `payoutAmount`. The {@link payoutMismatch} helper
+   * compares the last `ACCEPT` quote against the `PAYOUT_COMPLETE`
+   * settled amount for settlement reconciliation.
+   */
+  quotedAmount?: number;
   /**
    * Hash-chain link to the previous audit entry (see the "Audit-history
    * hash chain" section). `dispatch()` writes both fields on every
@@ -773,6 +862,14 @@ export interface DispatchOptions {
    * `invalid dispatch options: …` up front, before anything mutates.
    */
   payoutAmount?: number;
+  /**
+   * Quoted (owed) amount recorded on the audit entry
+   * ({@link TaskHistoryEntry.quotedAmount}). Must be a finite number ≥ 0
+   * when provided; an invalid value throws
+   * `invalid dispatch options: …` up front, before anything mutates.
+   * Conventionally attached to `ACCEPT`, the moment the price is agreed.
+   */
+  quotedAmount?: number;
   idempotencyKey?: string;
 }
 
@@ -887,7 +984,7 @@ export const GENESIS_PREV_HASH = "GENESIS";
 /**
  * Canonical serialization of a history entry for hashing: fixed key order
  * (seq, event, from, to, at, then the optional fields in declaration
- * order: actor, note, payoutRef, payoutAmount, prevHash), `undefined`
+ * order: actor, note, payoutRef, payoutAmount, quotedAmount, prevHash), `undefined`
  * values omitted.
  * `hash` itself is never part of the hashed content (it is what we are
  * computing). Deterministic: the same entry always serializes to the
@@ -908,6 +1005,7 @@ function canonicalHistoryEntry(
   if (entry.note !== undefined) obj.note = entry.note;
   if (entry.payoutRef !== undefined) obj.payoutRef = entry.payoutRef;
   if (entry.payoutAmount !== undefined) obj.payoutAmount = entry.payoutAmount;
+  if (entry.quotedAmount !== undefined) obj.quotedAmount = entry.quotedAmount;
   if (entry.prevHash !== undefined) obj.prevHash = entry.prevHash;
   return JSON.stringify(obj);
 }
@@ -1101,6 +1199,22 @@ export function parseHistory(history: unknown): TaskHistoryEntry[] {
         );
       }
       entry.payoutAmount = raw.payoutAmount;
+    }
+    if (raw.quotedAmount !== undefined) {
+      // Same bar as payoutAmount: dispatch() only ever writes finite,
+      // non-negative amounts, so a negative, NaN/Infinity, or non-number
+      // quotedAmount in an untrusted log is malformed (an unrecorded
+      // quote simply omits the field).
+      if (
+        typeof raw.quotedAmount !== "number" ||
+        !Number.isFinite(raw.quotedAmount) ||
+        raw.quotedAmount < 0
+      ) {
+        throw new Error(
+          `${tag}: quotedAmount must be a non-negative finite number, got ${String(raw.quotedAmount)}`,
+        );
+      }
+      entry.quotedAmount = raw.quotedAmount;
     }
     // Hash-chain fields are all-or-nothing per entry: one without the
     // other is malformed. Chain CONTENT verification happens after the
@@ -1436,6 +1550,16 @@ export class TaskLifecycle {
    * what was recorded, not what was owed). Like `payoutRef`, it is accepted
    * on any event but intended for `PAYOUT_COMPLETE`.
    *
+   * `opts.quotedAmount` is the quoted (owed) counterpart: the amount the
+   * task was agreed to pay, recorded verbatim into the audit entry. It
+   * must be a finite number ≥ 0; an invalid value throws
+   * `invalid dispatch options: …` up front, before anything mutates. Like
+   * `payoutAmount`, it is generic audit metadata accepted on any event,
+   * but conventionally attached to `ACCEPT` — the moment the price is
+   * agreed. The {@link payoutMismatch} / {@link mismatchedPayouts}
+   * reconciliation helpers compare it against the settled
+   * `PAYOUT_COMPLETE` amount.
+   *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
    * already consumed, dispatch returns the current state immediately as a
    * no-op — no history entry, no listener notification, no transition
@@ -1518,6 +1642,21 @@ export class TaskLifecycle {
       ) {
         throw new Error(
           `invalid dispatch options: payoutAmount must be a non-negative finite number, got ${String(opts.payoutAmount)}`,
+        );
+      }
+    }
+    if (opts?.quotedAmount !== undefined) {
+      // Same bar as payoutAmount: a quoted amount must be a real,
+      // non-negative number — a bad quote in the audit trail would
+      // poison payoutMismatch reconciliation — so fail fast up front,
+      // before anything mutates. Stored verbatim; no rounding at write.
+      if (
+        typeof opts.quotedAmount !== "number" ||
+        !Number.isFinite(opts.quotedAmount) ||
+        opts.quotedAmount < 0
+      ) {
+        throw new Error(
+          `invalid dispatch options: quotedAmount must be a non-negative finite number, got ${String(opts.quotedAmount)}`,
         );
       }
     }
@@ -1621,6 +1760,7 @@ export class TaskLifecycle {
     if (opts?.note !== undefined) entry.note = opts.note;
     if (opts?.payoutRef !== undefined) entry.payoutRef = opts.payoutRef;
     if (opts?.payoutAmount !== undefined) entry.payoutAmount = opts.payoutAmount;
+    if (opts?.quotedAmount !== undefined) entry.quotedAmount = opts.quotedAmount;
     entry.hash = hashHistoryEntry(canonicalHistoryEntry(entry), prevHash);
     this._history.push(entry);
     this._notifyListeners(event, from, to, entry);
