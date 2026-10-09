@@ -25,14 +25,18 @@ export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export {
   buildPayoutWebhook,
   deliverPayoutWebhook,
+  deliverPayoutWebhookToMany,
   parsePayoutRetryAfter,
   verifyPayoutWebhook,
 } from "./settlementWebhook.js";
 export type {
   BuildPayoutWebhookOptions,
   DeliverPayoutWebhookOptions,
+  DeliverPayoutWebhookToManyOptions,
+  DeliverPayoutWebhookToManyResult,
   DeliverWebhookResult,
   PayoutWebhook,
+  PayoutWebhookEndpoint,
   PayoutWebhookFetchImpl,
   PayoutWebhookPayload,
   VerifyPayoutWebhookOptions,

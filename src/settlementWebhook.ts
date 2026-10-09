@@ -15,8 +15,11 @@
  *   HTTP POST of the signed payload with the `X-Hub-Signature-256` header, a
  *   per-attempt timeout, and exponential-backoff retries on 429, 5xx, and
  *   network errors (a 429 `Retry-After` hint is honored, clamped to
- *   `maxRetryDelayMs`). Fan-out to multiple endpoints stays the caller's
- *   job — call it once per endpoint.
+ *   `maxRetryDelayMs`). Multi-endpoint fan-out is included too via
+ *   {@link deliverPayoutWebhookToMany}: one settlement event delivered
+ *   concurrently to many endpoints, each with its own secret/signature.
+ *   There is still no durable queue or cross-process retry: if the
+ *   process dies mid-fan-out, the caller reconciles by `eventId`.
  * - Secret distribution is the caller's responsibility. Whoever holds the
  *   secret can forge signatures; store it like any other API credential.
  * - `verifyPayoutWebhook` should run over the raw request body bytes. A
@@ -528,11 +531,26 @@ function defaultSleep(ms: number): Promise<void> {
  * and invalid options throw a `cannot deliver payout webhook: …`
  * configuration error before any request is made (zero fetch calls).
  */
-export async function deliverPayoutWebhook(
-  url: string,
-  webhook: PayoutWebhook,
-  opts: DeliverPayoutWebhookOptions = {},
-): Promise<DeliverWebhookResult> {
+/** Delivery options with defaults applied and configuration validated. */
+interface ResolvedDeliverOptions {
+  timeoutMs: number;
+  maxAttempts: number;
+  backoffMs: number;
+  maxRetryDelayMs: number;
+  fetchImpl: PayoutWebhookFetchImpl;
+  sleepImpl: (ms: number) => Promise<void>;
+}
+
+/**
+ * Apply delivery-option defaults and validate them. Invalid values are
+ * caller configuration errors and throw `cannot deliver payout webhook:
+ * …` before any request is made. Shared by {@link deliverPayoutWebhook}
+ * and {@link deliverPayoutWebhookToMany} (which validates the caller's
+ * global options once, up front, with the exact same rules).
+ */
+function resolveDeliverOptions(
+  opts: DeliverPayoutWebhookOptions,
+): ResolvedDeliverOptions {
   const timeoutMs = opts.timeoutMs ?? 5000;
   const maxAttempts = opts.maxAttempts ?? 3;
   const backoffMs = opts.backoffMs ?? 1000;
@@ -579,6 +597,16 @@ export async function deliverPayoutWebhook(
       "cannot deliver payout webhook: sleepImpl must be a function",
     );
   }
+  return { timeoutMs, maxAttempts, backoffMs, maxRetryDelayMs, fetchImpl, sleepImpl };
+}
+
+export async function deliverPayoutWebhook(
+  url: string,
+  webhook: PayoutWebhook,
+  opts: DeliverPayoutWebhookOptions = {},
+): Promise<DeliverWebhookResult> {
+  const { timeoutMs, maxAttempts, backoffMs, maxRetryDelayMs, fetchImpl, sleepImpl } =
+    resolveDeliverOptions(opts);
 
   let target: URL;
   try {
@@ -637,6 +665,184 @@ export async function deliverPayoutWebhook(
   // Unreachable (maxAttempts >= 1 guarantees a return inside the loop),
   // kept so the function has an explicit terminal result.
   return { ok: false, attempts: maxAttempts, status: lastStatus, error: lastError };
+}
+
+/* ------------------------------------------------------------------ */
+/* Multi-endpoint fan-out delivery                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One fan-out destination for {@link deliverPayoutWebhookToMany}. Each
+ * endpoint has its OWN signing secret: the shared payload is signed
+ * independently per endpoint, so one endpoint's secret can never verify
+ * another endpoint's delivery. The delivery-option fields override the
+ * call-level options of {@link deliverPayoutWebhookToMany} for this
+ * endpoint only (retry counts are therefore counted per endpoint).
+ */
+export interface PayoutWebhookEndpoint {
+  /** Destination URL (http/https), validated per endpoint. */
+  url: string;
+  /** This endpoint's signing secret (non-empty string or Buffer). */
+  secret: string | Buffer;
+  /** Per-endpoint fetch override; defaults to the call-level `fetchImpl`. */
+  fetchImpl?: PayoutWebhookFetchImpl;
+  /** Per-endpoint sleep override; defaults to the call-level `sleepImpl`. */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** Per-endpoint override of the call-level `timeoutMs`. */
+  timeoutMs?: number;
+  /** Per-endpoint override of the call-level `maxAttempts`. */
+  maxAttempts?: number;
+  /** Per-endpoint override of the call-level `backoffMs`. */
+  backoffMs?: number;
+  /** Per-endpoint override of the call-level `maxRetryDelayMs`. */
+  maxRetryDelayMs?: number;
+}
+
+/** Options for {@link deliverPayoutWebhookToMany}. All fields optional. */
+export interface DeliverPayoutWebhookToManyOptions
+  extends DeliverPayoutWebhookOptions {
+  /**
+   * Payload `at` timestamp shared by every endpoint's copy of the
+   * event. Resolved ONCE per call (defaults to the real clock) so all
+   * endpoints receive the same logical event, not one event per
+   * endpoint with drifting timestamps.
+   */
+  now?: Date | string;
+  /**
+   * Payload `eventId` shared by every endpoint (see the eventId
+   * semantics on {@link deliverPayoutWebhookToMany}). Defaults to one
+   * freshly generated `crypto.randomUUID()` per call; inject a fixed
+   * value in tests for determinism. Must be a non-empty string.
+   */
+  eventId?: string;
+}
+
+/**
+ * Aggregate outcome of {@link deliverPayoutWebhookToMany}. `results[i]`
+ * always corresponds to `endpoints[i]` (input order is preserved even
+ * though deliveries run concurrently), and `delivered + failed` always
+ * equals `results.length`.
+ */
+export interface DeliverPayoutWebhookToManyResult {
+  /** Per-endpoint results, in the same order as the input endpoints. */
+  results: DeliverWebhookResult[];
+  /** How many endpoints reported `ok: true`. */
+  delivered: number;
+  /** How many endpoints reported `ok: false`. */
+  failed: number;
+}
+
+/**
+ * Fan one PAID task's payout webhook out to many endpoints at once —
+ * the marketplace-platform shape where a single settlement event must
+ * notify billing, risk, notifications, and other systems, each holding
+ * its own secret.
+ *
+ * Semantics:
+ * - Each endpoint gets an independent {@link buildPayoutWebhook} signed
+ *   with that endpoint's own secret, delivered via
+ *   {@link deliverPayoutWebhook} with the endpoint's option overrides
+ *   applied over the call-level options. Retry budgets are therefore
+ *   per endpoint: one endpoint burning its retries never consumes
+ *   another's.
+ * - eventId semantics: ONE shared `eventId` (and one shared `at`) for
+ *   the whole call. This is a single logical settlement event fanned
+ *   out, not N distinct events — each receiver deduplicates on the
+ *   `eventId` within its own endpoint, exactly as for a retried
+ *   single-endpoint delivery. Two separate calls (two settlements, or
+ *   a caller re-fan-out) get different `eventId`s unless the caller
+ *   pins one via `opts.eventId`.
+ * - Deliveries run concurrently. One endpoint's failure — retries
+ *   exhausted, network error, even a per-endpoint configuration problem
+ *   such as an invalid URL or an empty secret — is reported as that
+ *   endpoint's `{ ok: false, attempts: 0, error }` result and never
+ *   blocks or fails the other endpoints.
+ * - Call-level configuration errors DO throw before any request is
+ *   made: a missing/empty/non-array `endpoints`, invalid global
+ *   delivery options, an invalid shared `now`/`eventId`, or a non-PAID
+ *   task are caller bugs, not per-endpoint outcomes.
+ *
+ * Honest limit: there is no durable queue and no cross-process retry.
+ * If the process dies mid-fan-out, some endpoints may have received the
+ * event and others not; the caller reconciles by re-delivering and
+ * letting receivers deduplicate on the shared `eventId`.
+ */
+export async function deliverPayoutWebhookToMany(
+  task: TaskLifecycle,
+  endpoints: PayoutWebhookEndpoint[],
+  opts: DeliverPayoutWebhookToManyOptions = {},
+): Promise<DeliverPayoutWebhookToManyResult> {
+  if (!Array.isArray(endpoints) || endpoints.length === 0) {
+    throw new Error(
+      "cannot deliver payout webhook to many endpoints: endpoints must be a non-empty array",
+    );
+  }
+  // Global delivery options are call-level configuration: validate them
+  // once, up front, with the same rules as a single delivery. (Per-
+  // endpoint overrides are validated per endpoint, inside the fan-out,
+  // so a bad override fails only its own endpoint.)
+  resolveDeliverOptions(opts);
+  // A non-PAID task cannot build any endpoint's webhook: also a
+  // call-level configuration error, checked before any request.
+  if (task.state !== "PAID") {
+    throw new Error(
+      `cannot build payout webhook: task ${task.id} is in state ${task.state}, only PAID tasks have a completed settlement to announce`,
+    );
+  }
+  // One logical event: resolve the shared timestamp and eventId once.
+  const now = opts.now ?? new Date();
+  const eventId = opts.eventId ?? randomUUID();
+  // The shared build inputs are call-level configuration too: validate
+  // them up front (same rules/messages as buildPayoutWebhook) so a bad
+  // `now`/`eventId` throws instead of failing every endpoint one by one.
+  if (Number.isNaN(new Date(now).getTime())) {
+    throw new Error(
+      `cannot build payout webhook: invalid 'now' timestamp for task ${task.id}`,
+    );
+  }
+  if (typeof eventId !== "string" || eventId.length === 0) {
+    throw new Error(
+      `cannot build payout webhook: 'eventId' must be a non-empty string for task ${task.id}`,
+    );
+  }
+
+  const results = await Promise.all(
+    endpoints.map(async (endpoint, index): Promise<DeliverWebhookResult> => {
+      try {
+        if (
+          endpoint === null ||
+          typeof endpoint !== "object" ||
+          typeof endpoint.url !== "string"
+        ) {
+          throw new Error(
+            `cannot deliver payout webhook to many endpoints: endpoints[${index}] must be an object with a string url and a secret`,
+          );
+        }
+        const webhook = buildPayoutWebhook(task, endpoint.secret, {
+          now,
+          eventId,
+        });
+        return await deliverPayoutWebhook(endpoint.url, webhook, {
+          timeoutMs: endpoint.timeoutMs ?? opts.timeoutMs,
+          maxAttempts: endpoint.maxAttempts ?? opts.maxAttempts,
+          backoffMs: endpoint.backoffMs ?? opts.backoffMs,
+          maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
+          fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
+          sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
+        });
+      } catch (err) {
+        // Per-endpoint pre-flight failures (invalid URL, empty secret,
+        // invalid per-endpoint override) fail only this endpoint.
+        return {
+          ok: false,
+          attempts: 0,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }),
+  );
+  const delivered = results.filter((r) => r.ok).length;
+  return { results, delivered, failed: results.length - delivered };
 }
 
 /**

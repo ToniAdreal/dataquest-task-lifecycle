@@ -531,8 +531,38 @@ hint can never stall delivery. Delivery outcomes are reported in the
 result object, never thrown; invalid URLs and invalid options are
 caller configuration errors and throw before any request is made.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
-with no network and no real sleeps. Fan-out to multiple endpoints
-stays the caller's job — call it once per endpoint.
+with no network and no real sleeps.
+
+Multi-endpoint fan-out is included too:
+`deliverPayoutWebhookToMany(task, endpoints)` delivers ONE settlement
+event concurrently to every endpoint — the marketplace shape where
+billing, risk, and notification systems each need the same payout
+event, each holding its own secret:
+
+```ts
+import { deliverPayoutWebhookToMany } from "dataquest-task-lifecycle";
+
+const out = await deliverPayoutWebhookToMany(paidTask, [
+  { url: "https://billing.example.com/hooks/payout", secret: billingSecret },
+  { url: "https://risk.example.com/hooks/payout", secret: riskSecret },
+]);
+// out: { results: DeliverWebhookResult[], delivered: number, failed: number }
+// results[i] corresponds to endpoints[i], in input order.
+```
+
+Each endpoint's copy is built and signed independently with that
+endpoint's own secret (one endpoint's secret cannot verify another's
+delivery), and retry budgets are counted per endpoint — an endpoint
+can also override `maxAttempts`/`timeoutMs`/`backoffMs`/`fetchImpl`
+for itself. All copies share ONE `eventId` (and one `at` timestamp):
+this is a single logical event fanned out, not one event per endpoint,
+so each receiver deduplicates on `eventId` within its own endpoint,
+exactly as for a retried single-endpoint delivery. One endpoint's
+failure — retries exhausted, network error, even an invalid URL —
+marks only that endpoint's result `{ ok: false, … }` and never blocks
+the others. Call-level configuration errors still throw before any
+request: an empty/non-array `endpoints` list, invalid global delivery
+options, or a non-PAID task.
 
 Honest limits: the payload carries only what the audit history records —
 `payoutRef`/`payoutAmount` are omitted when the entry lacks them (a `PAID`
@@ -716,8 +746,13 @@ webhooks, retries). That remains the caller's infrastructure.
   authentication — see "Event-level RBAC"), no
   deadline scheduler (expiry is an explicit event, not a timer). In-process
   dispatch subscriptions exist (`task.subscribe` — fire-and-forget,
-  listener errors swallowed, not persisted); there is still no durable
-  notification fan-out (queues, multi-endpoint fan-out). Webhook-shaped
+  listener errors swallowed, not persisted). Multi-endpoint webhook
+  fan-out does exist (`deliverPayoutWebhookToMany`, see "Payout
+  webhooks" above), but there is still no durable queue and no
+  cross-process retry: delivery is in-process only, so if the process
+  dies mid-fan-out some endpoints may have received the event and
+  others not — the caller must reconcile and re-deliver, letting
+  receivers deduplicate on the shared `eventId`. Webhook-shaped
   payout *signing* does exist — `buildPayoutWebhook`/
   `verifyPayoutWebhook` derive and HMAC-sign a `PAYOUT_COMPLETE`
   notification from a PAID task's audit history — and single-endpoint
@@ -750,7 +785,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 376 tests covering the happy path, reject→resubmit
+`npm test` runs 387 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -840,8 +875,15 @@ new-secret and old-secret acceptance inside the rotation window,
 unrelated-secret failure, positional/`secrets` mutual-exclusion and
 empty-candidate configuration errors, Buffer candidates,
 malformed-signature fail-closed behavior, and `maxAgeMs` freshness
-still enforced after a rotation match). No
-network, no randomness in assertions.
+still enforced after a rotation match), and payout webhook
+multi-endpoint fan-out (`deliverPayoutWebhookToMany`: per-endpoint
+secrets with cross-secret verification failure, one shared `eventId`
+across endpoints, input-ordered results with aggregate counts,
+single-endpoint equivalence with `deliverPayoutWebhook`, per-endpoint
+retry counting and `maxAttempts`/`fetchImpl` overrides, an invalid-URL
+or network-error endpoint failing only itself, and empty-endpoints /
+invalid-global-option configuration errors thrown before any request).
+No network, no randomness in assertions.
 
 ## License
 
