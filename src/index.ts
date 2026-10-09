@@ -12,6 +12,7 @@ export {
   parseHistory,
   payoutMismatch,
   replay,
+  SNAPSHOT_VERSION,
   staleTasks,
   stateDiagram,
   totalPaidOut,

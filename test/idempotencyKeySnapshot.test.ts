@@ -51,12 +51,14 @@ test("multiple consumed keys all survive, in consumption order", () => {
   assert.deepEqual(restored.toJSON().idempotencyKeys, ["k-a", "k-b", "k-c"]);
 });
 
-test("empty key set is not written: legacy snapshot shape is unchanged", () => {
+test("empty key set is not written: snapshot carries only the base fields", () => {
   const t = new TaskLifecycle("snap-3");
   t.dispatch("PUBLISH"); // no key
   const snap = t.toJSON();
   assert.equal("idempotencyKeys" in snap, false);
-  assert.deepEqual(Object.keys(snap), ["id", "state", "history", "slaDeadlines"]);
+  // `v` leads since snapshot versioning (backlog #145); the point of
+  // this test is unchanged: no optional field is written when unset.
+  assert.deepEqual(Object.keys(snap), ["v", "id", "state", "history", "slaDeadlines"]);
 });
 
 test("JSON.stringify(task) carries the keys through the wire round-trip", () => {

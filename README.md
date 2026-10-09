@@ -194,8 +194,8 @@ const task = new TaskLifecycle("task-042");
 task.dispatch("PUBLISH", { actor: "researcher" });
 task.setSlaDeadline("2026-12-01T00:00:00.000Z"); // advisory SLA deadline
 
-// snapshot: { id, state, history, slaDeadlines, [maxResubmits],
-//   [maxDisputes], [rolePolicy] } — plain JSON, no Maps, no class
+// snapshot: { v, id, state, history, slaDeadlines, [maxResubmits],
+//   [maxDisputes], [rolePolicy], [idempotencyKeys] } — plain JSON, no Maps, no class
 //   instances. The bracketed fields appear only when the corresponding
 //   option is configured (see TaskSnapshot). Also what
 //   JSON.stringify(task) produces.
@@ -216,6 +216,19 @@ are normalized exactly like `setSlaDeadline` does. Malformed or
 inconsistent input throws a specific `invalid snapshot: …` error instead
 of producing a task with a broken audit trail. See
 `test/serialization.test.ts` for the full checklist.
+
+Snapshots carry a schema version: `toJSON()` always writes `v: 1` (the
+exported `SNAPSHOT_VERSION` constant), and `fromJSON()` checks it before
+any structural or hash-chain validation. A snapshot with no `v` is a
+legacy pre-versioning snapshot and is still accepted, with state,
+history, and SLA deadlines restored exactly as before; a snapshot
+carrying any other `v` value (`2`, `"1"`, `null`, …) throws
+`invalid snapshot: unsupported snapshot version …`, so a future format
+change stays distinguishable from corruption. One honest asymmetry,
+recorded as-is: unlike the sibling `escrow-state-machine-ts` parser,
+this parser currently *ignores* unknown top-level snapshot fields
+instead of rejecting them — tightening that is tracked separately from
+versioning and is not claimed here.
 
 ### Hash-chained audit history
 
@@ -785,7 +798,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 387 tests covering the happy path, reject→resubmit
+`npm test` runs 396 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -796,8 +809,10 @@ dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
 deadlines and overdue checks, JSON snapshot persistence
-(round-trip, detached copies, and rejection of 18 malformed-snapshot
-shapes), event-sourced replay (golden paths, input detachment, and 10
+(round-trip, detached copies, rejection of 18 malformed-snapshot
+shapes, and the snapshot schema-version gate: `v: 1` always written,
+legacy snapshots without `v` still accepted, any other `v` rejected
+before structural checks), event-sourced replay (golden paths, input detachment, and 10
 malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,

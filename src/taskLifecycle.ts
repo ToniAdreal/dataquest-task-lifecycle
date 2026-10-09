@@ -962,7 +962,25 @@ export interface SubscribeOptions {
  * duplicates deduped, so a consumed key keeps its no-op effect after a
  * snapshot restore.
  */
+/**
+ * Current snapshot schema version, written by `toJSON()` as the `v`
+ * field. Snapshots produced before versioning existed carry no `v` and
+ * are accepted as legacy; a snapshot carrying any other version is
+ * rejected by the parser (see {@link TaskSnapshot.v}). The same
+ * convention is used by the sibling escrow-state-machine-ts repo.
+ */
+export const SNAPSHOT_VERSION = 1;
+
 export interface TaskSnapshot {
+  /**
+   * Snapshot schema version. `toJSON()` always writes the current
+   * version ({@link SNAPSHOT_VERSION}). Optional in the type so legacy
+   * (pre-versioning) snapshots stay representable: the parser accepts a
+   * missing `v` as legacy, but a present `v` that is not exactly the
+   * current version throws `unsupported snapshot version` — that is how
+   * a future format evolution stays distinguishable from corruption.
+   */
+  v?: number;
   id: string;
   state: TaskState;
   history: TaskHistoryEntry[];
@@ -1377,6 +1395,15 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
  *
  * Throws with a specific message on the first problem found:
  *  - not an object / missing id / unknown state
+ *  - `v`, when present, must be exactly {@link SNAPSHOT_VERSION}; a
+ *    missing `v` is a legacy (pre-versioning) snapshot and passes, but
+ *    any other value throws `unsupported snapshot version`. The version
+ *    check runs before the history/hash-chain checks, so a snapshot
+ *    from an unknown future format reports its version problem rather
+ *    than a misleading structural or chain error. (Top-level fields
+ *    other than the known ones are currently ignored, not rejected —
+ *    recorded as-is; fail-closed unknown-field rejection is a separate
+ *    concern from versioning.)
  *  - history entry violations — see parseHistory for the full checklist
  *  - the history's replayed state must land on the snapshot's state
  *  - SLA deadlines must name real states with parseable dates (values
@@ -1404,6 +1431,17 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
 } {
   if (!isRecord(snapshot)) {
     throw new Error("invalid snapshot: expected a JSON object");
+  }
+  // Schema version gate, deliberately first (right after the shape
+  // check): missing `v` = legacy snapshot, accepted for backward
+  // compatibility (the same pass-through treatment as hashless chains);
+  // present-but-not-current = a format this parser does not understand,
+  // rejected before any structural or hash-chain check can misreport
+  // it as corruption.
+  if (snapshot.v !== undefined && snapshot.v !== SNAPSHOT_VERSION) {
+    throw new Error(
+      `invalid snapshot: unsupported snapshot version ${String(snapshot.v)}`,
+    );
   }
   if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
     throw new Error("invalid snapshot: id must be a non-empty string");
@@ -2010,6 +2048,11 @@ export class TaskLifecycle {
    * Export this task as a plain-JSON snapshot. The returned object is
    * detached: mutating it never affects the live task.
    *
+   * The snapshot always carries `v: SNAPSHOT_VERSION` (currently 1) as
+   * its first field. Snapshots written before versioning existed have
+   * no `v`; `fromJSON()` still accepts those as legacy (see
+   * {@link TaskSnapshot.v}).
+   *
    * When the retry budget is finite, `maxResubmits` is included in the
    * envelope (the unlimited default is omitted — JSON cannot represent
    * `Infinity`). The used count is not stored; it is derived from the
@@ -2047,6 +2090,7 @@ export class TaskLifecycle {
       deadlines[state] = deadline;
     }
     const snapshot: TaskSnapshot = {
+      v: SNAPSHOT_VERSION,
       id: this.id,
       state: this._state,
       history: this._history.map((e) => ({ ...e })),
