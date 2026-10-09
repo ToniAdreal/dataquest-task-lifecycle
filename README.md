@@ -491,11 +491,32 @@ The signature is checked first (unauthenticated input is never parsed
 for its timestamp); only then is the payload `at` compared against
 `now` (injectable as a `Date` or ISO string, default the real clock).
 The boundary is inclusive (an age of exactly `maxAgeMs` passes), future
-timestamps pass (sender clock skew is tolerated), and an unparseable
-`at` fails closed as `false`. An illegal `maxAgeMs` (negative, `NaN`,
-infinite, non-number) or an invalid `now` throws a caller configuration
-error. Freshness is defense-in-depth only — it does not replace
-deduplication on `eventId`.
+timestamps pass under `maxAgeMs` alone (sender clock skew is tolerated),
+and an unparseable `at` fails closed as `false`. An illegal `maxAgeMs`
+(negative, `NaN`, infinite, non-number) or an invalid `now` throws a
+caller configuration error. Freshness is defense-in-depth only — it
+does not replace deduplication on `eventId`.
+
+`maxAgeMs` alone leaves the future direction unbounded: a
+legitimately-signed payload issued far into the future (a sender clock
+set wrong or fast) would gain a near-unbounded replay window. Pass
+`maxFutureSkewMs` to bound that direction too:
+
+```ts
+verifyPayoutWebhook(rawBody, signature, secret, {
+  maxAgeMs: 5 * 60_000,
+  maxFutureSkewMs: 60_000,
+});
+// => false when the signature is valid but payload.at - now > maxFutureSkewMs
+```
+
+It is enforced only after the signature matches, fails closed as
+`false`, and its boundary is likewise inclusive (a skew of exactly
+`maxFutureSkewMs` passes); an illegal value throws the same style of
+configuration error as `maxAgeMs`. Together the two fields form a
+two-sided freshness window. Left unset, `maxFutureSkewMs` changes
+nothing — far-future timestamps still pass, exactly as before — and
+neither bound replaces deduplication on `eventId`.
 
 During a secret rotation window, a receiver that verified with a
 single secret would reject in-flight notifications signed with the
@@ -798,7 +819,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 396 tests covering the happy path, reject→resubmit
+`npm test` runs 404 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -884,7 +905,14 @@ replay window on `verifyPayoutWebhook`: fresh/stale payloads, the
 inclusive boundary and `maxAgeMs: 0`, future-timestamp tolerance,
 illegal-window configuration errors, signature-before-freshness
 ordering, fail-closed unparseable `at`, and legacy signature-only
-behavior when the option is omitted), and payout webhook secret
+behavior when the option is omitted), and payout webhook future skew
+(the opt-in `maxFutureSkewMs` future-timestamp bound on
+`verifyPayoutWebhook`: far-future rejection for object and string
+bodies, in-window and inclusive-boundary passes including
+`maxFutureSkewMs: 0`, legacy far-future acceptance when the option is
+omitted, illegal-skew configuration errors,
+signature-before-timestamp ordering, and the two-sided
+`maxAgeMs` + `maxFutureSkewMs` window), and payout webhook secret
 rotation (the `secrets` candidate list on `verifyPayoutWebhook`:
 new-secret and old-secret acceptance inside the rotation window,
 unrelated-secret failure, positional/`secrets` mutual-exclusion and

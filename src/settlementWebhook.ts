@@ -27,8 +27,9 @@
  *   payload is built with a fixed literal key order), but raw bytes are
  *   the transport-safe path. Verification is signature-only by default;
  *   an opt-in `maxAgeMs` freshness window additionally bounds replays of
- *   legitimately-signed old payloads, but receivers must still
- *   deduplicate on `eventId`. During a secret rotation window the
+ *   legitimately-signed old payloads, and an opt-in `maxFutureSkewMs`
+ *   bounds how far in the future a payload `at` may lie, but receivers
+ *   must still deduplicate on `eventId`. During a secret rotation window the
  *   receiver can pass `secrets: [newSecret, oldSecret]` instead of a
  *   single secret (the two shapes are mutually exclusive) so in-flight
  *   notifications signed with either secret verify; signing always uses
@@ -208,9 +209,28 @@ export interface VerifyPayoutWebhookOptions {
    * Must be a finite non-negative number; illegal values throw a caller
    * configuration error. The boundary is inclusive: an age exactly
    * equal to `maxAgeMs` still passes (`now - at > maxAgeMs` fails).
-   * Future timestamps are not bounded (a negative age always passes).
+   * Future timestamps are not bounded by this field (a negative age
+   * always passes); bound them separately with `maxFutureSkewMs`.
    */
   maxAgeMs?: number;
+  /**
+   * Maximum clock skew into the future tolerated for the payload, in
+   * milliseconds, measured from `now` to the payload `at` timestamp.
+   * When set, a payload whose signature verifies but whose `at` lies
+   * further in the future than this window returns `false`
+   * (fail-closed): a legitimately-signed payload issued far into the
+   * future would otherwise gain a near-unbounded replay window under a
+   * `maxAgeMs`-only check, and a sender clock set wrong (or fast) would
+   * leave the receiver with no defense. Leave unset (the default) for
+   * the legacy behavior, in which future timestamps pass however far
+   * ahead they lie. Must be a finite non-negative number; illegal
+   * values throw a caller configuration error, with the same style as
+   * `maxAgeMs`. The boundary is inclusive: a future skew exactly equal
+   * to `maxFutureSkewMs` still passes (`at - now > maxFutureSkewMs`
+   * fails). Together, `maxAgeMs` and `maxFutureSkewMs` form a two-sided
+   * freshness window; neither replaces deduplication on `eventId`.
+   */
+  maxFutureSkewMs?: number;
   /**
    * "Now" for the freshness check. Defaults to the real clock; inject a
    * fixed value in tests for determinism. An invalid timestamp throws a
@@ -241,10 +261,15 @@ export interface VerifyPayoutWebhookOptions {
  * its own, so without this check a captured webhook could be replayed
  * forever). An unparseable `at` — or an unparseable string body — fails
  * closed as `false`, not an exception. Future timestamps are not bounded
- * by this check (a negative age always passes), tolerating sender clock
+ * by `maxAgeMs` (a negative age always passes), tolerating sender clock
  * skew; the boundary is inclusive (`now - at > maxAgeMs` fails, exactly
- * `maxAgeMs` passes). Freshness is defense-in-depth only: receivers MUST
- * still deduplicate on `eventId`.
+ * `maxAgeMs` passes). Pass `maxFutureSkewMs` alongside (or instead) to
+ * bound that future direction too: after the signature matches, a
+ * payload with `at - now > maxFutureSkewMs` returns `false`, with the
+ * same inclusive boundary, so the two fields together form a two-sided
+ * window. When `maxFutureSkewMs` is unset, far-future timestamps still
+ * pass exactly as before. Freshness is defense-in-depth only: receivers
+ * MUST still deduplicate on `eventId`.
  *
  * Secret rotation: pass `undefined` as the positional secret and
  * `{ secrets: [newSecret, oldSecret] }` in the options to accept either
@@ -317,6 +342,19 @@ export function verifyPayoutWebhook(
       )}`,
     );
   }
+  const maxFutureSkewMs = opts.maxFutureSkewMs;
+  if (
+    maxFutureSkewMs !== undefined &&
+    (typeof maxFutureSkewMs !== "number" ||
+      !Number.isFinite(maxFutureSkewMs) ||
+      maxFutureSkewMs < 0)
+  ) {
+    throw new Error(
+      `cannot verify payout webhook: maxFutureSkewMs must be a finite non-negative number, got ${String(
+        maxFutureSkewMs,
+      )}`,
+    );
+  }
   let nowMs = Date.now();
   if (opts.now !== undefined) {
     nowMs = new Date(opts.now).getTime();
@@ -346,21 +384,26 @@ export function verifyPayoutWebhook(
   if (!signatureMatches) return false;
   // Freshness runs only after the signature matched: forgeries fail above,
   // never here, and unauthenticated bodies are never timestamp-parsed.
-  if (maxAgeMs === undefined) return true;
-  return payloadFreshEnough(body, maxAgeMs, nowMs);
+  if (maxAgeMs === undefined && maxFutureSkewMs === undefined) return true;
+  return payloadFreshEnough(body, maxAgeMs, maxFutureSkewMs, nowMs);
 }
 
 /**
  * Fail-closed freshness gate over `payload.at`.
  *
  * String bodies are JSON-parsed to read `at`; unparseable bodies, missing
- * `at`, or non-parseable timestamps all return `false` (never throw).
- * The boundary is inclusive: `now - at <= maxAgeMs` passes, and a future
- * `at` (negative age) always passes.
+ * `at`, or non-parseable timestamps all return `false` (never throw)
+ * whenever either window bound is configured.
+ * Each boundary is inclusive: `now - at <= maxAgeMs` passes when
+ * `maxAgeMs` is set, and `at - now <= maxFutureSkewMs` passes when
+ * `maxFutureSkewMs` is set. An unset bound never rejects: with no
+ * `maxFutureSkewMs`, a future `at` (negative age) always passes, and
+ * with no `maxAgeMs`, an old `at` always passes.
  */
 function payloadFreshEnough(
   body: string | PayoutWebhookPayload,
-  maxAgeMs: number,
+  maxAgeMs: number | undefined,
+  maxFutureSkewMs: number | undefined,
   nowMs: number,
 ): boolean {
   let at: unknown;
@@ -379,7 +422,11 @@ function payloadFreshEnough(
   }
   const atMs = typeof at === "string" ? Date.parse(at) : Number.NaN;
   if (Number.isNaN(atMs)) return false;
-  return nowMs - atMs <= maxAgeMs;
+  if (maxAgeMs !== undefined && nowMs - atMs > maxAgeMs) return false;
+  if (maxFutureSkewMs !== undefined && atMs - nowMs > maxFutureSkewMs) {
+    return false;
+  }
+  return true;
 }
 
 /* ------------------------------------------------------------------ */
