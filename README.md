@@ -484,6 +484,30 @@ infinite, non-number) or an invalid `now` throws a caller configuration
 error. Freshness is defense-in-depth only — it does not replace
 deduplication on `eventId`.
 
+During a secret rotation window, a receiver that verified with a
+single secret would reject in-flight notifications signed with the
+other one. Pass the candidates instead — the positional secret becomes
+`undefined` and `secrets` lists both, newest first:
+
+```ts
+verifyPayoutWebhook(rawBody, signature, undefined, {
+  secrets: [newSecret, oldSecret],
+});
+// => true when the signature matches EITHER secret
+```
+
+Any one matching secret authenticates (array order is a performance
+preference only); all-mismatch fails closed as `false`. The positional
+secret and `secrets` are mutually exclusive — passing both throws a
+configuration error, as do an empty `secrets` array and any empty
+entry in it. Signing never rotates: `buildPayoutWebhook` always signs
+with the single current secret it is given. Rotation does not relax
+freshness — a `maxAgeMs` window passed alongside `secrets` is still
+enforced after the signature matches. Honest limit: how long the old
+secret stays in the list (the window length) is the caller's policy,
+and anyone holding either listed secret can forge signatures for the
+duration of the window.
+
 Delivery is included: `deliverPayoutWebhook(url, webhook)` POSTs the
 signed payload as JSON with the `X-Hub-Signature-256: <signature>`
 header — the request body is byte-identical to what was signed, so the
@@ -726,7 +750,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 366 tests covering the happy path, reject→resubmit
+`npm test` runs 376 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -810,7 +834,13 @@ replay window on `verifyPayoutWebhook`: fresh/stale payloads, the
 inclusive boundary and `maxAgeMs: 0`, future-timestamp tolerance,
 illegal-window configuration errors, signature-before-freshness
 ordering, fail-closed unparseable `at`, and legacy signature-only
-behavior when the option is omitted). No
+behavior when the option is omitted), and payout webhook secret
+rotation (the `secrets` candidate list on `verifyPayoutWebhook`:
+new-secret and old-secret acceptance inside the rotation window,
+unrelated-secret failure, positional/`secrets` mutual-exclusion and
+empty-candidate configuration errors, Buffer candidates,
+malformed-signature fail-closed behavior, and `maxAgeMs` freshness
+still enforced after a rotation match). No
 network, no randomness in assertions.
 
 ## License

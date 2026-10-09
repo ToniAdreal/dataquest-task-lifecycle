@@ -25,7 +25,11 @@
  *   the transport-safe path. Verification is signature-only by default;
  *   an opt-in `maxAgeMs` freshness window additionally bounds replays of
  *   legitimately-signed old payloads, but receivers must still
- *   deduplicate on `eventId`.
+ *   deduplicate on `eventId`. During a secret rotation window the
+ *   receiver can pass `secrets: [newSecret, oldSecret]` instead of a
+ *   single secret (the two shapes are mutually exclusive) so in-flight
+ *   notifications signed with either secret verify; signing always uses
+ *   the single current secret.
  * - Only PAID tasks build a webhook. A PAID task whose PAYOUT_COMPLETE
  *   entry carries no `payoutRef`/`payoutAmount` still builds (the payload
  *   just omits those fields) — consistent with the advisory semantics of
@@ -173,6 +177,24 @@ export function buildPayoutWebhook(
 /** Options for {@link verifyPayoutWebhook}. All fields optional. */
 export interface VerifyPayoutWebhookOptions {
   /**
+   * Candidate HMAC secrets for a secret-rotation window: pass
+   * `[newSecret, oldSecret]` so notifications signed with either secret
+   * verify while senders migrate to the new one (the dataquest-side peer
+   * of escrow's `VerifyWebhookOptions.secrets`). Any one matching secret
+   * authenticates; the array order is only a performance preference (put
+   * the newest first), never a security one — all-mismatch fails closed
+   * as `false`. Must be a non-empty array of non-empty secrets; an empty
+   * array, a non-array value, or an empty/non-string entry is a caller
+   * configuration error and throws. Mutually exclusive with the
+   * positional `secret` argument: pass one shape or the other, never
+   * both (passing both throws, mirroring the rfc9421-signing-demo
+   * `key`/`keyResolver` rule). Rotation never relaxes freshness: a
+   * `maxAgeMs` window, when also set, is still enforced after the
+   * signature matches. How long the old secret stays in the list — the
+   * rotation window length — is the caller's policy, not this library's.
+   */
+  secrets?: (string | Buffer)[];
+  /**
    * Maximum age of the payload in milliseconds, measured from the
    * payload `at` timestamp to `now`. When set, a payload whose
    * signature verifies but whose `at` is older than this window returns
@@ -220,16 +242,65 @@ export interface VerifyPayoutWebhookOptions {
  * skew; the boundary is inclusive (`now - at > maxAgeMs` fails, exactly
  * `maxAgeMs` passes). Freshness is defense-in-depth only: receivers MUST
  * still deduplicate on `eventId`.
+ *
+ * Secret rotation: pass `undefined` as the positional secret and
+ * `{ secrets: [newSecret, oldSecret] }` in the options to accept either
+ * secret during a rotation window. The positional secret and `secrets`
+ * are mutually exclusive — passing both throws a configuration error —
+ * and passing neither also throws (there is nothing to verify against).
+ * Any candidate that matches authenticates; the freshness gate, when
+ * configured, runs after a match exactly as in the single-secret shape,
+ * so rotation does not widen the replay window.
  */
 export function verifyPayoutWebhook(
   body: string | PayoutWebhookPayload,
   signature: string,
-  secret: string | Buffer,
+  secret: string | Buffer | undefined,
   opts: VerifyPayoutWebhookOptions = {},
 ): boolean {
-  if (secret.length === 0) {
+  const hasPositional = secret !== undefined;
+  const hasSecrets = opts.secrets !== undefined;
+  if (hasPositional && hasSecrets) {
     throw new Error(
-      "cannot verify payout webhook: signing secret must not be empty",
+      "cannot verify payout webhook: pass either 'secret' or 'secrets', not both",
+    );
+  }
+  let secrets: (string | Buffer)[];
+  if (hasSecrets) {
+    if (!Array.isArray(opts.secrets)) {
+      throw new Error(
+        "cannot verify payout webhook: secrets must be a non-empty array",
+      );
+    }
+    if (opts.secrets.length === 0) {
+      throw new Error(
+        "cannot verify payout webhook: secrets must be a non-empty array",
+      );
+    }
+    opts.secrets.forEach((candidate, i) => {
+      if (
+        (typeof candidate !== "string" && !Buffer.isBuffer(candidate)) ||
+        candidate.length === 0
+      ) {
+        throw new Error(
+          `cannot verify payout webhook: secrets[${i}] must not be empty`,
+        );
+      }
+    });
+    secrets = opts.secrets;
+  } else if (hasPositional) {
+    if (
+      (typeof secret !== "string" && !Buffer.isBuffer(secret)) ||
+      secret.length === 0
+    ) {
+      throw new Error(
+        "cannot verify payout webhook: signing secret must not be empty",
+      );
+    }
+    secrets = [secret];
+  } else {
+    throw new Error(
+      "cannot verify payout webhook: a signing secret is required (pass 'secret' or 'secrets')",
     );
   }
   const maxAgeMs = opts.maxAgeMs;
@@ -256,13 +327,19 @@ export function verifyPayoutWebhook(
   if (!match) return false;
   const bodyString = typeof body === "string" ? body : canonicalJson(body);
   const actual = Buffer.from(match[1], "hex");
-  const expected = Buffer.from(
-    createHmac("sha256", secret).update(bodyString, "utf8").digest(),
-  );
+  // Each candidate is compared in constant time; the first match wins.
   // timingSafeEqual throws on length mismatch; a forged 64-hex string that
   // decodes short (never, given the regex) or long is simply a failure.
-  const signatureMatches =
-    expected.length === actual.length && timingSafeEqual(expected, actual);
+  let signatureMatches = false;
+  for (const candidate of secrets) {
+    const expected = Buffer.from(
+      createHmac("sha256", candidate).update(bodyString, "utf8").digest(),
+    );
+    if (expected.length === actual.length && timingSafeEqual(expected, actual)) {
+      signatureMatches = true;
+      break;
+    }
+  }
   if (!signatureMatches) return false;
   // Freshness runs only after the signature matched: forgeries fail above,
   // never here, and unauthenticated bodies are never timestamp-parsed.
