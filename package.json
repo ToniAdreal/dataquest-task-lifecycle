@@ -1,5 +1,5 @@
 {
-  "name": "dataquest-task-lifecycle",
+  "name": "@toniadreal/dataquest-task-lifecycle",
   "version": "0.1.0",
   "description": "Task lifecycle state machine for a two-sided data marketplace (reproduced from the DataQuest portfolio case study)",
   "type": "module",
@@ -9,7 +9,8 @@
     "build": "tsc",
     "demo": "npm run build && node dist/src/demo.js",
     "diagram": "npm run build && node dist/src/diagram.js",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -18,5 +19,15 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ToniAdreal/dataquest-task-lifecycle.git"
+  },
+  "files": [
+    "dist"
+  ]
 }
