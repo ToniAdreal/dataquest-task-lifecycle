@@ -704,9 +704,8 @@ export interface DeliverPayoutWebhookOptions {
   fetchImpl?: PayoutWebhookFetchImpl;
   /**
    * Sleep implementation used between retries. Defaults to a real
-   * `setTimeout` sleep (unref'd, so a pending backoff never holds the
-   * process open). Inject a recorder in tests to assert the exact delay
-   * schedule instead of really sleeping.
+   * `setTimeout` sleep. Inject a recorder in tests to assert the exact
+   * delay schedule instead of really sleeping.
    */
   sleepImpl?: (ms: number) => Promise<void>;
   /**
@@ -788,9 +787,11 @@ function retryDelayMs(
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    // A pending backoff must not hold the process open on its own.
-    timer.unref();
+    // The timer deliberately stays ref'd: an awaited delivery must keep
+    // the process alive until the backoff settles. With an unref'd timer
+    // the event loop can drain mid-backoff (stubbed fetch, no live
+    // sockets) and the delivery promise then never settles.
+    setTimeout(resolve, ms);
   });
 }
 
