@@ -849,6 +849,9 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Limitations (honest)
 
+Security scope, the caller-trust model, and what this library does
+*not* guarantee are collected in [SECURITY.md](SECURITY.md).
+
 - **Off-chain reproduction.** The case study is a product-design artifact;
   this models the *rules* of the lifecycle, not a production backend.
   `toJSON()` / `fromJSON()` export and rehydrate in-memory snapshots (see
