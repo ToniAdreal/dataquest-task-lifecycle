@@ -875,6 +875,28 @@ function assertRolePolicy(
  * parallel can both execute the same key. For cross-process
  * exactly-once semantics, pair this with a durable store (e.g. a
  * UNIQUE constraint on the key column).
+ *
+ * `expectedSeq` is an optimistic-concurrency guard: the caller asserts
+ * the sequence number it based its decision on — the current history
+ * length, which is also the last entry's `seq` (`0` for a task with no
+ * history yet). The guard is checked before every other dispatch
+ * validation and before the idempotency dedupe, so a writer holding a
+ * stale snapshot fails loudly with `dispatch conflict: …` instead of
+ * silently advancing a state it never saw — or silently no-oping a
+ * retry it expected to conflict. A mismatch changes nothing: no state
+ * move, no history entry, no idempotency key consumed, no listener
+ * notified, so re-reading the task and retrying with the fresh seq
+ * works. A non-integer or negative value is a caller configuration
+ * error and throws `invalid dispatch options: …`. Omitting
+ * `expectedSeq` preserves the exact pre-guard behavior.
+ *
+ * Honest limit: this is a single-process optimistic lock — the
+ * comparison is against the in-memory history. Two processes that each
+ * restored the same snapshot can still race; cross-process writers
+ * need compare-and-swap in the durable store itself (e.g. a
+ * conditional update keyed on a version column). The sibling
+ * escrow-state-machine-ts repo carries the paired guard with identical
+ * semantics.
  */
 export interface DispatchOptions {
   actor?: string;
@@ -897,6 +919,17 @@ export interface DispatchOptions {
    */
   quotedAmount?: number;
   idempotencyKey?: string;
+  /**
+   * Optimistic-concurrency guard: the history length (last entry's
+   * `seq`; `0` when the history is empty) the caller expects the task
+   * to be at. When set, dispatch throws
+   * `dispatch conflict: expected seq <n> but task is at seq <m>` if the
+   * task has moved on, before any other check runs. Must be a
+   * non-negative integer when provided; anything else throws
+   * `invalid dispatch options: …`. See the {@link DispatchOptions}
+   * remarks for the ordering and the single-process limit.
+   */
+  expectedSeq?: number;
 }
 
 /**
@@ -1723,6 +1756,18 @@ export class TaskLifecycle {
    * reconciliation helpers compare it against the settled
    * `PAYOUT_COMPLETE` amount.
    *
+   * Optimistic concurrency: when `opts.expectedSeq` is set, it must equal
+   * the task's current history length (the last entry's `seq`; `0` for an
+   * empty history), or dispatch throws
+   * `dispatch conflict: expected seq <n> but task is at seq <m>`. The
+   * guard runs before every other check in this method — option
+   * validation, the idempotency dedupe, transition legality, RBAC, and
+   * the budgets — and a conflict changes nothing (no key consumed, no
+   * listener notified), so a caller that re-reads the task can retry with
+   * the fresh seq. A non-integer or negative `expectedSeq` throws
+   * `invalid dispatch options: …` instead. This is a single-process
+   * optimistic lock only — see {@link DispatchOptions}.
+   *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
    * already consumed, dispatch returns the current state immediately as a
    * no-op — no history entry, no listener notification, no transition
@@ -1759,6 +1804,30 @@ export class TaskLifecycle {
    * history stays intact.
    */
   dispatch(event: TaskEvent, opts?: DispatchOptions): TaskState {
+    // Optimistic-concurrency guard — checked before EVERYTHING else in
+    // dispatch (option shape, idempotency dedupe, transition, RBAC,
+    // budgets): a caller that pinned the seq it read must learn that the
+    // task moved on, loudly, instead of advancing a state it never saw
+    // (or silently no-oping through the dedupe). A conflict is a pure
+    // rejection: no mutation, no key consumed, no listener notified.
+    // The seq of a task is its history length (entries are numbered
+    // from 1, so the length IS the last entry's seq; empty history = 0).
+    if (opts?.expectedSeq !== undefined) {
+      if (
+        typeof opts.expectedSeq !== "number" ||
+        !Number.isInteger(opts.expectedSeq) ||
+        opts.expectedSeq < 0
+      ) {
+        throw new Error(
+          `invalid dispatch options: expectedSeq must be a non-negative integer, got ${String(opts.expectedSeq)}`,
+        );
+      }
+      if (opts.expectedSeq !== this._history.length) {
+        throw new Error(
+          `dispatch conflict: expected seq ${opts.expectedSeq} but task is at seq ${this._history.length}`,
+        );
+      }
+    }
     // An empty actor has zero audit value: the field exists to say WHO
     // did the dispatch, and "" says nothing (assertRolePolicy already
     // rejects empty role names — the producer side matches that bar).

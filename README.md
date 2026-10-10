@@ -641,6 +641,38 @@ parallel can both execute the same key. For cross-process
 exactly-once semantics, pair this with a durable store (e.g. a
 `UNIQUE` constraint on the key column).
 
+## Optimistic concurrency (`expectedSeq`)
+
+Two writers holding the same snapshot of a task can both dispatch
+against it — the second writer then advances a state it never saw, a
+classic cause of double-settlement accidents in payment flows.
+`dispatch(event, { expectedSeq })` is the optimistic-lock guard:
+`expectedSeq` asserts the task's current sequence number — the
+history length, which is the last entry's `seq` (`0` for a task with
+no history yet):
+
+```ts
+task.dispatch("PUBLISH", { expectedSeq: 0 }); // seq 0 -> 1
+task.dispatch("ACCEPT", { expectedSeq: 1 });  // seq 1 -> 2
+task.dispatch("START_CAPTURE", { expectedSeq: 1 });
+// throws: dispatch conflict: expected seq 1 but task is at seq 2
+```
+
+The check runs before every other dispatch check — option
+validation, the idempotency dedupe, transition legality, RBAC, and
+the budgets — and a rejected dispatch changes nothing: no state move,
+no history entry, no idempotency key consumed, no listener notified,
+so re-reading the task and retrying with the fresh `expectedSeq`
+works. A non-integer or negative `expectedSeq` is a caller error and
+throws `invalid dispatch options: …` up front. Omitting it preserves
+the exact pre-guard behavior.
+
+Honest limit: this is a single-process optimistic lock — it compares
+against the in-memory history, so it cannot stop two processes that
+each restored the same snapshot from racing. Cross-process writers
+still need compare-and-swap in the durable store itself (e.g. a
+conditional update keyed on a version column).
+
 ## Retry budgets
 
 A task can cap how many times it may be resubmitted — the production
@@ -819,7 +851,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 404 tests covering the happy path, reject→resubmit
+`npm test` runs 413 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -870,7 +902,14 @@ dispatch idempotency keys (duplicate no-op without transition validation,
 per-task global keys, failed-dispatch key non-consumption, shape
 validation, snapshot persistence: non-empty-only envelope field,
 strict rehydration validation with dedupe, `fromHistory` re-attachment,
-failed keys never persisted, seq-continuity), payout amounts
+failed keys never persisted, seq-continuity), the optimistic
+concurrency guard (`expectedSeq`: matching-seq advance, seq 0 on an
+empty history, stale and ahead conflicts leaving state, history,
+the idempotency-key set, and listeners untouched, non-integer /
+negative / non-number rejection, check-first ordering ahead of
+option validation, the idempotency dedupe, and transition legality,
+conflict-then-fresh-retry, and unchanged behavior when the option is
+omitted), payout amounts
 (dispatch-time finite/≥0 validation with fail-fast semantics, verbatim
 recording on the entry, toJSON/fromJSON round-trips, malformed-amount
 snapshot rejection, hash-chain commitment, `totalPaidOut`: per-PAID-task
