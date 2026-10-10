@@ -25,7 +25,7 @@ printed to stdout.
 ## Quickstart
 
 ```ts
-import { TaskLifecycle } from "./dist/index.js";
+import { TaskLifecycle } from "./dist/src/index.js";
 
 const task = new TaskLifecycle("task-042");
 task.dispatch("PUBLISH", { actor: "researcher" });
