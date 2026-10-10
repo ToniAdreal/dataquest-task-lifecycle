@@ -503,6 +503,36 @@ and an unparseable `at` fails closed as `false`. An illegal `maxAgeMs`
 caller configuration error. Freshness is defense-in-depth only — it
 does not replace deduplication on `eventId`.
 
+That deduplication step is included: `PayoutEventDedupe` is the
+receiver-side store a handler runs after a successful verify, so
+receivers no longer hand-roll a `Map` with ad-hoc TTL/capacity/clock
+choices. It follows the sibling rfc9421 `ReplayCache` paradigm
+(TTL + LRU, injectable clock):
+
+```ts
+import { PayoutEventDedupe } from "dataquest-task-lifecycle";
+
+const dedupe = new PayoutEventDedupe({ ttlMs: 24 * 60 * 60_000 }); // defaults: 1h TTL, 10_000 entries
+if (dedupe.checkAndRecord(payload.eventId)) {
+  // duplicate delivery — acknowledge it, do not pay out twice
+}
+```
+
+`checkAndRecord(eventId)` returns `false` on first sighting and
+`true` for a repeat within the TTL ("true = is a replay"); at exactly
+`ttlMs` the record has expired and the id counts as unseen again, and
+a duplicate hit never extends the window. At capacity, expired
+entries are reclaimed before the least recently seen entry is
+evicted. Illegal configuration (`ttlMs` not a positive finite
+number, `maxEntries` not a positive integer) throws at construction,
+and an empty or non-string `eventId` throws instead of silently
+passing. `size` and `stats()` (`{ size, hits, misses, evictions }`)
+expose observability, and `clear()` resets both. Honest limit: the
+store is single-process and in-memory only — two receiver processes
+cannot see each other's records and a restart forgets every id, so a
+multi-process receiver must deduplicate over shared storage (a
+database unique constraint, Redis, …) instead.
+
 `maxAgeMs` alone leaves the future direction unbounded: a
 legitimately-signed payload issued far into the future (a sender clock
 set wrong or fast) would gain a near-unbounded replay window. Pass
@@ -857,7 +887,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 422 tests covering the happy path, reject→resubmit
+`npm test` runs 434 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -971,7 +1001,15 @@ across endpoints, input-ordered results with aggregate counts,
 single-endpoint equivalence with `deliverPayoutWebhook`, per-endpoint
 retry counting and `maxAttempts`/`fetchImpl` overrides, an invalid-URL
 or network-error endpoint failing only itself, and empty-endpoints /
-invalid-global-option configuration errors thrown before any request).
+invalid-global-option configuration errors thrown before any request),
+and payout webhook receiver deduplication (`PayoutEventDedupe`:
+first-sighting `false` / duplicate `true` semantics, TTL expiry with
+an age of exactly `ttlMs` counting as unseen, duplicate hits not
+extending the window, capacity eviction — expired entries reclaimed
+before LRU eviction and hits refreshing recency — injectable-clock
+deterministic double-runs, illegal-configuration and
+empty/non-string-`eventId` rejection, `size`/`stats()` observability
+with detached snapshots, `clear()`, and per-instance isolation).
 No network, no randomness in assertions.
 
 ## License

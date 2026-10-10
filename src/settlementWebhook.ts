@@ -34,6 +34,11 @@
  *   single secret (the two shapes are mutually exclusive) so in-flight
  *   notifications signed with either secret verify; signing always uses
  *   the single current secret.
+ * - Receiver-side `eventId` deduplication is included via
+ *   {@link PayoutEventDedupe}: a single-process in-memory TTL + LRU
+ *   store receivers run after a successful verify. It is not shared
+ *   between processes — a multi-process receiver must deduplicate over
+ *   shared storage instead (see the class docs).
  * - Only PAID tasks build a webhook. A PAID task whose PAYOUT_COMPLETE
  *   entry carries no `payoutRef`/`payoutAmount` still builds (the payload
  *   just omits those fields) — consistent with the advisory semantics of
@@ -427,6 +432,223 @@ function payloadFreshEnough(
     return false;
   }
   return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Receiver-side eventId deduplication                                 */
+/* ------------------------------------------------------------------ */
+
+/** Options for {@link PayoutEventDedupe}. All fields optional. */
+export interface PayoutEventDedupeOptions {
+  /**
+   * Milliseconds a recorded `eventId` stays deduplicated. An id seen
+   * again while `now - firstSeenAt < ttlMs` is a duplicate; at exactly
+   * `ttlMs` the record has expired and the id counts as unseen again
+   * (the same boundary rule as the sibling rfc9421 `ReplayCache`).
+   * Defaults to 3_600_000 (1 hour). Must be a finite number > 0.
+   * Pick a TTL at least as long as the longest window in which the
+   * sender (or a fan-out retry) can re-deliver the same event — the
+   * delivery layer's retry horizon, not the freshness window.
+   */
+  ttlMs?: number;
+  /**
+   * Maximum number of `eventId`s tracked. When a new id needs room,
+   * expired entries are reclaimed first, then the least recently seen
+   * entry is evicted (LRU). Defaults to 10_000 (aligned with the
+   * sibling `ReplayCache`). Must be a positive integer.
+   */
+  maxEntries?: number;
+  /**
+   * Clock source (milliseconds since the epoch). Defaults to
+   * `Date.now`. Inject a fake clock for deterministic tests.
+   */
+  now?: () => number;
+}
+
+/**
+ * Observability snapshot of a {@link PayoutEventDedupe}.
+ *
+ * - `size`: live (unexpired) entries tracked, computed against the
+ *   dedupe's injected clock — same reading as the `size` getter.
+ * - `hits`: `checkAndRecord` calls where the id was already seen
+ *   within the TTL (i.e. duplicates).
+ * - `misses`: `checkAndRecord` calls where the id was unseen and got
+ *   recorded (including an id whose previous record had expired —
+ *   expiry means "unseen").
+ * - `evictions`: entries dropped while making room for a new entry —
+ *   both expired-entry reclamation and LRU eviction count. The
+ *   delete+re-record of an expired id inside `checkAndRecord` is part
+ *   of the miss path and is *not* an eviction.
+ *
+ * Counters reset to zero on `clear()`.
+ */
+export interface PayoutEventDedupeStats {
+  size: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+}
+
+/**
+ * Receiver-side deduplication store for payout webhook `eventId`s.
+ *
+ * `verifyPayoutWebhook`'s freshness window is only defense-in-depth:
+ * its docs require receivers to deduplicate on `eventId`, because a
+ * retried (or fanned-out) delivery re-POSTs the same logical event
+ * with the same `eventId`. This class is that deduplication step, so
+ * receivers no longer hand-roll a `Map` with ad-hoc TTL/capacity/clock
+ * choices. It follows the same paradigm as the sibling
+ * rfc9421-signing-demo `ReplayCache` (TTL + LRU, injectable clock,
+ * `hits`/`misses`/`evictions` observability).
+ *
+ * Usage — after the signature (and any freshness window) verifies:
+ *
+ * ```ts
+ * const dedupe = new PayoutEventDedupe();
+ * if (dedupe.checkAndRecord(payload.eventId)) {
+ *   // duplicate delivery: acknowledge it, do not pay out twice
+ * }
+ * ```
+ *
+ * Honest scope: this is a single-process, in-memory store. Two
+ * receiver processes each keep their own store and cannot see each
+ * other's records, and a restart forgets every recorded id — a
+ * deployment with multiple receiver processes (or one that must
+ * survive restarts inside the TTL) must deduplicate over shared
+ * storage (a database unique constraint, Redis, …) instead. Within
+ * one process the store is exact: an id is a duplicate if and only if
+ * it was recorded within the TTL and has not since been evicted.
+ */
+export class PayoutEventDedupe {
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
+  private readonly clock: () => number;
+  /** eventId -> first-seen-at (ms). Insertion order = LRU order. */
+  private readonly seenAt = new Map<string, number>();
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
+
+  constructor(opts: PayoutEventDedupeOptions = {}) {
+    const ttlMs = opts.ttlMs ?? 3_600_000;
+    const maxEntries = opts.maxEntries ?? 10_000;
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw new Error(
+        "PayoutEventDedupe: ttlMs must be a positive finite number",
+      );
+    }
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+      throw new Error(
+        "PayoutEventDedupe: maxEntries must be a positive integer",
+      );
+    }
+    if (opts.now !== undefined && typeof opts.now !== "function") {
+      throw new Error("PayoutEventDedupe: now must be a function");
+    }
+    this.ttlMs = ttlMs;
+    this.maxEntries = maxEntries;
+    this.clock = opts.now ?? Date.now;
+  }
+
+  /**
+   * Atomically check-and-record an `eventId`: returns `true` when the
+   * id was already recorded within the TTL — i.e. this delivery is a
+   * duplicate/replay, the same "true = is a replay" contract as the
+   * rfc9421 `NonceStore.check` — otherwise records the id and returns
+   * `false` (first sighting; process the event).
+   *
+   * Expired entries are treated as unseen and re-recorded with a fresh
+   * timestamp. On a duplicate hit the entry's LRU recency is refreshed
+   * but its original first-seen timestamp is kept, so repeated
+   * duplicates cannot extend the deduplication window.
+   *
+   * An empty or non-string `eventId` is a caller bug and throws —
+   * silently accepting it would disable deduplication for exactly the
+   * malformed deliveries that need it most.
+   */
+  checkAndRecord(eventId: string): boolean {
+    if (typeof eventId !== "string" || eventId.length === 0) {
+      throw new Error(
+        "PayoutEventDedupe: eventId must be a non-empty string",
+      );
+    }
+    const t = this.clock();
+    const prev = this.seenAt.get(eventId);
+    if (prev !== undefined) {
+      if (t - prev < this.ttlMs) {
+        // Refresh LRU recency (delete + re-insert moves it to the
+        // tail) while keeping the original first-seen timestamp.
+        this.seenAt.delete(eventId);
+        this.seenAt.set(eventId, prev);
+        this.hits++;
+        return true; // duplicate
+      }
+      // Expired: drop and fall through to re-record with a fresh
+      // timestamp. This is the miss path (an expired record means
+      // "unseen"), not an eviction.
+      this.seenAt.delete(eventId);
+    }
+    this.prune(t);
+    this.seenAt.set(eventId, t);
+    this.misses++;
+    return false;
+  }
+
+  /**
+   * Number of live (unexpired) entries tracked, computed against the
+   * dedupe's injected clock.
+   */
+  get size(): number {
+    const t = this.clock();
+    let n = 0;
+    for (const at of this.seenAt.values()) if (t - at < this.ttlMs) n++;
+    return n;
+  }
+
+  /** Drop all tracked ids and reset the observability counters. */
+  clear(): void {
+    this.seenAt.clear();
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+  }
+
+  /**
+   * Point-in-time observability snapshot (see
+   * {@link PayoutEventDedupeStats}). The returned object is a fresh
+   * copy — mutating it does not affect the store.
+   */
+  stats(): PayoutEventDedupeStats {
+    return {
+      size: this.size,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions,
+    };
+  }
+
+  /**
+   * Make room for one new entry: reclaim expired entries first, then
+   * evict the least recently seen ones. Map iteration order is
+   * insertion order, so the head is always the oldest entry. Every
+   * entry dropped here counts as an eviction for observability.
+   */
+  private prune(t: number): void {
+    if (this.seenAt.size < this.maxEntries) return;
+    for (const [eventId, at] of this.seenAt) {
+      if (t - at >= this.ttlMs) {
+        this.seenAt.delete(eventId);
+        this.evictions++;
+      }
+      if (this.seenAt.size < this.maxEntries) return;
+    }
+    while (this.seenAt.size >= this.maxEntries) {
+      const oldest = this.seenAt.keys().next();
+      if (oldest.done) break;
+      this.seenAt.delete(oldest.value);
+      this.evictions++;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
