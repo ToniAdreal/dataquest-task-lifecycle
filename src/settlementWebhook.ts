@@ -15,7 +15,12 @@
  *   HTTP POST of the signed payload with the `X-Hub-Signature-256` header, a
  *   per-attempt timeout, and exponential-backoff retries on 429, 5xx, and
  *   network errors (a 429 `Retry-After` hint is honored, clamped to
- *   `maxRetryDelayMs`). Multi-endpoint fan-out is included too via
+ *   `maxRetryDelayMs`). Both delivery entry points also accept an
+ *   external `AbortSignal`: aborting it stops an in-flight request or a
+ *   pending backoff sleep, and the abort is reported in the delivery
+ *   result object (never thrown), matching this module's convention
+ *   that delivery outcomes are reported, not raised. Multi-endpoint
+ *   fan-out is included too via
  *   {@link deliverPayoutWebhookToMany}: one settlement event delivered
  *   concurrently to many endpoints, each with its own secret/signature.
  *   There is still no durable queue or cross-process retry: if the
@@ -704,6 +709,21 @@ export interface DeliverPayoutWebhookOptions {
    * schedule instead of really sleeping.
    */
   sleepImpl?: (ms: number) => Promise<void>;
+  /**
+   * Optional external abort signal (the dataquest-side peer of escrow's
+   * `DeliverWebhookOptions.signal`). Wired into both the in-flight
+   * request and the backoff sleep between retries: aborting the signal
+   * ends the whole delivery — no further attempts are made — and the
+   * abort is reported as
+   * `{ ok: false, attempts: <attempts actually made>, error: "payout webhook delivery aborted" }`
+   * (a pre-aborted signal reports `attempts: 0` and makes zero fetch
+   * calls). Unlike escrow, whose delivery throws, this module reports
+   * delivery outcomes, so an abort is a reported outcome too; only a
+   * non-`AbortSignal` value is a caller configuration error and throws
+   * before any request is made. The per-attempt `timeoutMs` still
+   * applies independently.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -795,11 +815,21 @@ function defaultSleep(ms: number): Promise<void> {
  *   `{ ok: false, attempts: maxAttempts, status?, error }` — delivery
  *   failure is reported, not thrown. A per-attempt timeout surfaces in
  *   `error` as `webhook delivery timed out after <timeoutMs>ms`.
+ * - An external `opts.signal` aborts the in-flight request and any
+ *   pending backoff sleep alike: no further attempts are made and the
+ *   result is `{ ok: false, attempts: <attempts actually made>, error:
+ *   "payout webhook delivery aborted" }` (a pre-aborted signal makes
+ *   zero fetch calls and reports `attempts: 0`). An abort is a caller
+ *   request to stop, never a retryable failure — and, per this module's
+ *   convention, it is reported in the result, not thrown.
  *
  * Invalid URLs (including the empty string), non-http(s) protocols,
  * and invalid options throw a `cannot deliver payout webhook: …`
  * configuration error before any request is made (zero fetch calls).
  */
+/** The one error text every abort path reports (pinned by tests). */
+const PAYOUT_DELIVERY_ABORTED = "payout webhook delivery aborted";
+
 /** Delivery options with defaults applied and configuration validated. */
 interface ResolvedDeliverOptions {
   timeoutMs: number;
@@ -808,6 +838,7 @@ interface ResolvedDeliverOptions {
   maxRetryDelayMs: number;
   fetchImpl: PayoutWebhookFetchImpl;
   sleepImpl: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -866,7 +897,59 @@ function resolveDeliverOptions(
       "cannot deliver payout webhook: sleepImpl must be a function",
     );
   }
-  return { timeoutMs, maxAttempts, backoffMs, maxRetryDelayMs, fetchImpl, sleepImpl };
+  if (opts.signal !== undefined && !(opts.signal instanceof AbortSignal)) {
+    throw new Error(
+      `cannot deliver payout webhook: signal must be an AbortSignal, got ${String(
+        opts.signal,
+      )}`,
+    );
+  }
+  return {
+    timeoutMs,
+    maxAttempts,
+    backoffMs,
+    maxRetryDelayMs,
+    fetchImpl,
+    sleepImpl,
+    signal: opts.signal,
+  };
+}
+
+/**
+ * Sleep between retries via the (possibly injected) `sleepImpl`,
+ * interruptible by an external abort signal. Resolves `false` when the
+ * sleep ran to completion and `true` when the signal was already
+ * aborted or aborted while the sleep was pending — in the aborted case
+ * the underlying sleep may still be pending in the background, but the
+ * caller stops immediately and makes no further attempt. Without a
+ * signal this is exactly the injected sleep. (The sibling escrow
+ * delivery rejects its sleep promise on abort; this module's
+ * report-don't-throw convention turns the same event into a boolean
+ * the delivery loop converts into an aborted result.)
+ */
+async function sleepWithSignal(
+  ms: number,
+  sleepImpl: (ms: number) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal === undefined) {
+    await sleepImpl(ms);
+    return false;
+  }
+  if (signal.aborted) return true;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<boolean>((resolve) => {
+    onAbort = () => resolve(true);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      sleepImpl(ms).then(() => false),
+      aborted,
+    ]);
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 export async function deliverPayoutWebhook(
@@ -874,8 +957,23 @@ export async function deliverPayoutWebhook(
   webhook: PayoutWebhook,
   opts: DeliverPayoutWebhookOptions = {},
 ): Promise<DeliverWebhookResult> {
-  const { timeoutMs, maxAttempts, backoffMs, maxRetryDelayMs, fetchImpl, sleepImpl } =
-    resolveDeliverOptions(opts);
+  const {
+    timeoutMs,
+    maxAttempts,
+    backoffMs,
+    maxRetryDelayMs,
+    fetchImpl,
+    sleepImpl,
+    signal,
+  } = resolveDeliverOptions(opts);
+
+  if (signal?.aborted) {
+    // Pre-aborted: the caller asked to stop before we started. Zero
+    // fetch calls, and the abort is reported (not thrown) with zero
+    // attempts — the same early-exit position escrow's throwing
+    // variant takes, adapted to this module's result convention.
+    return { ok: false, attempts: 0, error: PAYOUT_DELIVERY_ABORTED };
+  }
 
   let target: URL;
   try {
@@ -897,15 +995,40 @@ export async function deliverPayoutWebhook(
   let lastStatus: number | undefined;
   let lastError = "unknown error";
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      // Aborted between attempts (e.g. the signal fired just as a
+      // backoff sleep completed): start no new attempt and report the
+      // attempts actually made so far (`attempt` is their count).
+      return { ok: false, attempts: attempt, error: PAYOUT_DELIVERY_ABORTED };
+    }
     const attempts = attempt + 1;
     let response: Response;
     try {
-      response = await postOnce(fetchImpl, target, webhook.signature, body, timeoutMs);
+      response = await postOnce(
+        fetchImpl,
+        target,
+        webhook.signature,
+        body,
+        timeoutMs,
+        signal,
+      );
     } catch (err) {
+      if (signal?.aborted) {
+        // The caller asked to stop: report the abort immediately,
+        // never treat it as a retryable network failure.
+        return { ok: false, attempts, error: PAYOUT_DELIVERY_ABORTED };
+      }
       lastStatus = undefined;
       lastError = err instanceof Error ? err.message : String(err);
       if (attempt < maxAttempts - 1) {
-        await sleepImpl(backoffMs * 2 ** attempt);
+        const aborted = await sleepWithSignal(
+          backoffMs * 2 ** attempt,
+          sleepImpl,
+          signal,
+        );
+        if (aborted) {
+          return { ok: false, attempts, error: PAYOUT_DELIVERY_ABORTED };
+        }
         continue;
       }
       return { ok: false, attempts, error: lastError };
@@ -917,7 +1040,19 @@ export async function deliverPayoutWebhook(
     lastError = `server responded with status ${response.status}`;
     if (response.status === 429 || (response.status >= 500 && response.status <= 599)) {
       if (attempt < maxAttempts - 1) {
-        await sleepImpl(retryDelayMs(response, attempt, backoffMs, maxRetryDelayMs));
+        const aborted = await sleepWithSignal(
+          retryDelayMs(response, attempt, backoffMs, maxRetryDelayMs),
+          sleepImpl,
+          signal,
+        );
+        if (aborted) {
+          return {
+            ok: false,
+            attempts,
+            status: lastStatus,
+            error: PAYOUT_DELIVERY_ABORTED,
+          };
+        }
         continue;
       }
       return { ok: false, attempts, status: lastStatus, error: lastError };
@@ -965,6 +1100,8 @@ export interface PayoutWebhookEndpoint {
   backoffMs?: number;
   /** Per-endpoint override of the call-level `maxRetryDelayMs`. */
   maxRetryDelayMs?: number;
+  /** Per-endpoint override of the call-level `signal`. */
+  signal?: AbortSignal;
 }
 
 /** Options for {@link deliverPayoutWebhookToMany}. All fields optional. */
@@ -1021,6 +1158,11 @@ export interface DeliverPayoutWebhookToManyResult {
  *   single-endpoint delivery. Two separate calls (two settlements, or
  *   a caller re-fan-out) get different `eventId`s unless the caller
  *   pins one via `opts.eventId`.
+ * - The call-level `signal` is passed through to every endpoint's
+ *   delivery, and an endpoint may override it with its own `signal`.
+ *   Aborting stops that endpoint's delivery exactly as in a
+ *   single-endpoint call (reported in its result, never thrown); the
+ *   result array still carries one entry per endpoint, in input order.
  * - Deliveries run concurrently. One endpoint's failure — retries
  *   exhausted, network error, even a per-endpoint configuration problem
  *   such as an invalid URL or an empty secret — is reported as that
@@ -1098,6 +1240,7 @@ export async function deliverPayoutWebhookToMany(
           maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
           fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
           sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
+          signal: endpoint.signal ?? opts.signal,
         });
       } catch (err) {
         // Per-endpoint pre-flight failures (invalid URL, empty secret,
@@ -1119,6 +1262,17 @@ export async function deliverPayoutWebhookToMany(
  * attempt's `AbortController`; a fetch rejection caused by that abort
  * is translated into a clear timeout error. Network errors propagate
  * unchanged so the caller's `error` field names the real cause.
+ *
+ * Signal composition: the per-attempt timeout and the caller's
+ * external `signal` both feed the SAME attempt `AbortController` —
+ * the timeout via its timer, the external signal via an `abort`
+ * listener forwarded into `controller.abort()` (an already-aborted
+ * external signal aborts the attempt before the fetch starts). The
+ * fetch only ever sees the composed controller signal, and the catch
+ * below attributes the abort: timeout first, then external abort
+ * (reported with the module's one abort error text), so the delivery
+ * loop can tell "stop, the caller said so" apart from a retryable
+ * network failure.
  */
 async function postOnce(
   fetchImpl: PayoutWebhookFetchImpl,
@@ -1126,6 +1280,7 @@ async function postOnce(
   signature: string,
   body: string,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
   let timedOut = false;
@@ -1134,6 +1289,16 @@ async function postOnce(
     controller.abort();
   }, timeoutMs);
   timer.unref();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, {
+        once: true,
+      });
+    }
+  }
   try {
     return await fetchImpl(target.toString(), {
       method: "POST",
@@ -1151,8 +1316,12 @@ async function postOnce(
     if (timedOut) {
       throw new Error(`webhook delivery timed out after ${timeoutMs}ms`);
     }
+    if (externalSignal?.aborted) {
+      throw new Error(PAYOUT_DELIVERY_ABORTED);
+    }
     throw err;
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }

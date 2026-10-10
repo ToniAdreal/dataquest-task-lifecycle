@@ -597,9 +597,16 @@ network errors (including timeouts) are retried; other 3xx/4xx fail
 immediately (redirects are never followed with the signed payload). A
 429 `Retry-After` hint (delay-seconds or HTTP-date) wins over backoff
 and is clamped to `maxRetryDelayMs: 60000` by default, so a runaway
-hint can never stall delivery. Delivery outcomes are reported in the
-result object, never thrown; invalid URLs and invalid options are
-caller configuration errors and throw before any request is made.
+hint can never stall delivery. An optional `signal` (`AbortSignal`)
+lets the caller cancel a delivery — a process shutting down, a job
+being cancelled: aborting stops an in-flight request or a pending
+backoff sleep, makes no further attempts, and is reported as
+`{ ok: false, attempts: <attempts actually made>, error: "payout webhook delivery aborted" }`
+(a pre-aborted signal reports `attempts: 0` and fetches nothing); a
+non-`AbortSignal` value is a configuration error. Delivery outcomes
+are reported in the result object, never thrown; invalid URLs and
+invalid options are caller configuration errors and throw before any
+request is made.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
 with no network and no real sleeps.
 
@@ -623,8 +630,10 @@ const out = await deliverPayoutWebhookToMany(paidTask, [
 Each endpoint's copy is built and signed independently with that
 endpoint's own secret (one endpoint's secret cannot verify another's
 delivery), and retry budgets are counted per endpoint — an endpoint
-can also override `maxAttempts`/`timeoutMs`/`backoffMs`/`fetchImpl`
-for itself. All copies share ONE `eventId` (and one `at` timestamp):
+can also override `maxAttempts`/`timeoutMs`/`backoffMs`/`fetchImpl`/
+`signal` for itself. The call-level `signal` is passed through to
+every endpoint, so one cancellation can stop the whole fan-out, or a
+per-endpoint signal just one endpoint's delivery. All copies share ONE `eventId` (and one `at` timestamp):
 this is a single logical event fanned out, not one event per endpoint,
 so each receiver deduplicates on `eventId` within its own endpoint,
 exactly as for a retried single-endpoint delivery. One endpoint's
@@ -887,7 +896,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 434 tests covering the happy path, reject→resubmit
+`npm test` runs 443 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
