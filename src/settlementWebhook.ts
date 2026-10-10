@@ -1289,7 +1289,11 @@ async function postOnce(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  timer.unref();
+  // No unref(): with an injected fetchImpl that only settles via this
+  // abort, the timeout timer can be the only handle that settles the
+  // awaited attempt — unref'ing it lets the event loop drain first.
+  // The timer is always cleared in the finally below, so it never
+  // outlives the attempt.
   const onExternalAbort = () => controller.abort();
   if (externalSignal) {
     if (externalSignal.aborted) {
