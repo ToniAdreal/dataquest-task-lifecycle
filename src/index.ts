@@ -38,6 +38,7 @@ export type {
   DeliverPayoutWebhookToManyResult,
   DeliverWebhookResult,
   PayoutEventDedupeOptions,
+  PayoutEventDedupeSnapshot,
   PayoutEventDedupeStats,
   PayoutWebhook,
   PayoutWebhookEndpoint,

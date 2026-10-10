@@ -529,9 +529,33 @@ and an empty or non-string `eventId` throws instead of silently
 passing. `size` and `stats()` (`{ size, hits, misses, evictions }`)
 expose observability, and `clear()` resets both. Honest limit: the
 store is single-process and in-memory only — two receiver processes
-cannot see each other's records and a restart forgets every id, so a
-multi-process receiver must deduplicate over shared storage (a
-database unique constraint, Redis, …) instead.
+cannot see each other's records, so a multi-process receiver must
+deduplicate over shared storage (a database unique constraint,
+Redis, …) instead.
+
+A single process can still carry its ids across its own restart:
+`exportSnapshot()` returns a detached, JSON-serializable
+`{ v: 1, entries: [eventId, seenAtMs][] }` of the entries still live
+against the store's clock, and `PayoutEventDedupe.restore(snapshot, opts)`
+(alias `fromSnapshot`) rebuilds a store from it:
+
+```ts
+// before shutdown:
+persist(JSON.stringify(dedupe.exportSnapshot()));
+// at startup:
+const dedupe2 = PayoutEventDedupe.restore(JSON.parse(saved), { ttlMs: 24 * 60 * 60_000 });
+```
+
+Restore validates strictly — a wrong version, a non-array `entries`,
+a malformed entry, or an unknown top-level field throws instead of
+silently disabling deduplication. Entries already expired are dropped
+at load, an over-`maxEntries` snapshot evicts the oldest `seenAtMs`
+first, and TTLs keep counting from each id's original first-seen time
+— restoring never grants a fresh window. The `hits`/`misses`/
+`evictions` counters are not part of the snapshot: a restored store
+starts them at zero. The snapshot bridges one process across its own
+restart only; two processes restoring the same snapshot afterwards
+diverge, so it is not a substitute for shared storage.
 
 `maxAgeMs` alone leaves the future direction unbounded: a
 legitimately-signed payload issued far into the future (a sender clock
@@ -899,7 +923,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 443 tests covering the happy path, reject→resubmit
+`npm test` runs 451 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -1021,7 +1045,12 @@ extending the window, capacity eviction — expired entries reclaimed
 before LRU eviction and hits refreshing recency — injectable-clock
 deterministic double-runs, illegal-configuration and
 empty/non-string-`eventId` rejection, `size`/`stats()` observability
-with detached snapshots, `clear()`, and per-instance isolation).
+with detached snapshots, `clear()`, per-instance isolation, and
+snapshot export/restore: live-only detached exports, restored ids
+still deduping with TTLs counted from the original first-seen time,
+strict malformed-snapshot rejection, expired entries dropped at
+load, over-capacity loads evicting the oldest `seenAtMs` first, and
+counters restarting at zero).
 No network, no randomness in assertions.
 
 ## Benchmarks

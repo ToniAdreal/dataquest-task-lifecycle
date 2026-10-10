@@ -495,6 +495,32 @@ export interface PayoutEventDedupeStats {
 }
 
 /**
+ * Serializable snapshot of a {@link PayoutEventDedupe}, produced by
+ * `exportSnapshot()` and consumed by `PayoutEventDedupe.restore()`.
+ *
+ * - `v`: snapshot format version. Only `1` exists; `restore` rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `entries`: `[eventId, seenAtMs]` pairs in LRU order (least
+ *   recently seen first). `seenAtMs` is a millisecond timestamp in the
+ *   same unit as `PayoutEventDedupeOptions.now` — the original
+ *   first-seen time, *not* the export time, so a restored id keeps
+ *   counting down its original TTL instead of getting a fresh window.
+ *   Only entries still live at export time are included.
+ *
+ * The observability counters (`hits`/`misses`/`evictions`) are *not*
+ * part of the snapshot: a restored dedupe starts them at zero.
+ *
+ * The snapshot is plain JSON data (`JSON.stringify` it to persist
+ * it), but it is not a shared store: two processes restoring the same
+ * snapshot afterwards diverge, and ids recorded by one are invisible
+ * to the other. Multi-instance deployments still need shared storage.
+ */
+export interface PayoutEventDedupeSnapshot {
+  v: 1;
+  entries: Array<[eventId: string, seenAtMs: number]>;
+}
+
+/**
  * Receiver-side deduplication store for payout webhook `eventId`s.
  *
  * `verifyPayoutWebhook`'s freshness window is only defense-in-depth:
@@ -517,11 +543,14 @@ export interface PayoutEventDedupeStats {
  *
  * Honest scope: this is a single-process, in-memory store. Two
  * receiver processes each keep their own store and cannot see each
- * other's records, and a restart forgets every recorded id — a
- * deployment with multiple receiver processes (or one that must
- * survive restarts inside the TTL) must deduplicate over shared
- * storage (a database unique constraint, Redis, …) instead. Within
- * one process the store is exact: an id is a duplicate if and only if
+ * other's records. A single process *can* carry its recorded ids
+ * across its own restart: `exportSnapshot()` before shutdown and
+ * `PayoutEventDedupe.restore()` at startup (see
+ * {@link PayoutEventDedupeSnapshot}) — but that covers only the
+ * process that saved the snapshot, never a fleet. A deployment with
+ * multiple receiver processes must deduplicate over shared storage
+ * (a database unique constraint, Redis, …) instead. Within one
+ * process the store is exact: an id is a duplicate if and only if
  * it was recorded within the TTL and has not since been evicted.
  */
 export class PayoutEventDedupe {
@@ -630,6 +659,132 @@ export class PayoutEventDedupe {
       misses: this.misses,
       evictions: this.evictions,
     };
+  }
+
+  /**
+   * Export the live recorded ids as a detached, JSON-serializable
+   * {@link PayoutEventDedupeSnapshot}: persist it before a restart
+   * and pass it to `PayoutEventDedupe.restore()` at startup so the
+   * restart does not reopen the deduplication window for ids seen
+   * inside their TTL — exactly when a deploy or scale-out would
+   * otherwise let a payout event be recorded twice.
+   *
+   * Entries already expired against this dedupe's clock are excluded.
+   * The returned object (including every entry pair) is a fresh copy —
+   * mutating it does not affect this store.
+   */
+  exportSnapshot(): PayoutEventDedupeSnapshot {
+    const t = this.clock();
+    const entries: Array<[string, number]> = [];
+    for (const [eventId, at] of this.seenAt) {
+      if (t - at < this.ttlMs) entries.push([eventId, at]);
+    }
+    return { v: 1, entries };
+  }
+
+  /**
+   * Rebuild a dedupe from a snapshot produced by `exportSnapshot()`
+   * (typically after a `JSON.parse` of the persisted form). `opts`
+   * configures the *new* dedupe (`ttlMs`/`maxEntries`/`now`) and is
+   * validated exactly like the constructor's.
+   *
+   * The input is untrusted data and is validated strictly: a
+   * non-object snapshot, an unknown top-level field, a `v` other than
+   * `1`, a non-array `entries`, or a malformed entry (not an
+   * `[eventId, seenAtMs]` pair, an empty/non-string `eventId`, a
+   * non-finite or negative `seenAtMs`) throws — a corrupt snapshot
+   * fails loudly at startup rather than silently disabling
+   * deduplication.
+   *
+   * Entries already expired against the new dedupe's clock are
+   * dropped. If the surviving entries exceed `maxEntries`, the oldest
+   * by `seenAtMs` are evicted first until the store fits (ties break
+   * by snapshot order, least recently seen first). Duplicate ids
+   * collapse to their last occurrence. TTLs keep counting from each
+   * entry's original `seenAtMs` — restoring never extends an id's
+   * deduplication window. Observability counters start at zero: the
+   * load-time drops above are not counted as `evictions`.
+   *
+   * This covers a single process across its own restart only; see
+   * {@link PayoutEventDedupeSnapshot} for the multi-instance limit.
+   */
+  static restore(
+    snapshot: unknown,
+    opts: PayoutEventDedupeOptions = {},
+  ): PayoutEventDedupe {
+    const fail = (detail: string): never => {
+      throw new Error(`PayoutEventDedupe: invalid snapshot: ${detail}`);
+    };
+    if (
+      typeof snapshot !== "object" ||
+      snapshot === null ||
+      Array.isArray(snapshot)
+    )
+      fail("expected an object of the form { v: 1, entries: [...] }");
+    const record = snapshot as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "entries") fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported snapshot version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const rawEntries: unknown = record.entries;
+    if (!Array.isArray(rawEntries)) fail("entries must be an array");
+    const entriesList = rawEntries as unknown[];
+    const parsed: Array<[string, number]> = [];
+    for (let i = 0; i < entriesList.length; i++) {
+      const entry: unknown = entriesList[i];
+      if (!Array.isArray(entry) || entry.length !== 2)
+        fail(`entries[${i}] must be a [eventId, seenAtMs] pair`);
+      const pair = entry as unknown[];
+      const eventId: unknown = pair[0];
+      const seenAtMs: unknown = pair[1];
+      if (typeof eventId !== "string" || eventId === "")
+        fail(`entries[${i}]: eventId must be a non-empty string`);
+      if (
+        typeof seenAtMs !== "number" ||
+        !Number.isFinite(seenAtMs) ||
+        seenAtMs < 0
+      )
+        fail(
+          `entries[${i}]: seenAtMs must be a finite non-negative number (milliseconds)`,
+        );
+      parsed.push([eventId as string, seenAtMs as number]);
+    }
+
+    const dedupe = new PayoutEventDedupe(opts);
+    const t = dedupe.clock();
+    // Drop entries whose TTL already ran out against the new clock, and
+    // collapse duplicate ids to their last occurrence (position and
+    // timestamp), mirroring the recency refresh in `checkAndRecord`.
+    const live = new Map<string, number>();
+    for (const [eventId, at] of parsed) {
+      if (t - at >= dedupe.ttlMs) continue;
+      live.delete(eventId);
+      live.set(eventId, at);
+    }
+    let kept = [...live.entries()];
+    if (kept.length > dedupe.maxEntries) {
+      const excess = kept.length - dedupe.maxEntries;
+      const drop = new Set(
+        kept
+          .map((_, i) => i)
+          .sort((a, b) => kept[a][1] - kept[b][1] || a - b)
+          .slice(0, excess),
+      );
+      kept = kept.filter((_, i) => !drop.has(i));
+    }
+    for (const [eventId, at] of kept) dedupe.seenAt.set(eventId, at);
+    return dedupe;
+  }
+
+  /** Alias of {@link PayoutEventDedupe.restore} (snapshot naming). */
+  static fromSnapshot(
+    snapshot: unknown,
+    opts: PayoutEventDedupeOptions = {},
+  ): PayoutEventDedupe {
+    return PayoutEventDedupe.restore(snapshot, opts);
   }
 
   /**
