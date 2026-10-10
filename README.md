@@ -224,11 +224,17 @@ legacy pre-versioning snapshot and is still accepted, with state,
 history, and SLA deadlines restored exactly as before; a snapshot
 carrying any other `v` value (`2`, `"1"`, `null`, …) throws
 `invalid snapshot: unsupported snapshot version …`, so a future format
-change stays distinguishable from corruption. One honest asymmetry,
-recorded as-is: unlike the sibling `escrow-state-machine-ts` parser,
-this parser currently *ignores* unknown top-level snapshot fields
-instead of rejecting them — tightening that is tracked separately from
-versioning and is not claimed here.
+change stays distinguishable from corruption. The parser is also
+fail-closed about unknown fields, exactly like the sibling
+`escrow-state-machine-ts` parser: a top-level field outside the
+`toJSON()` shape throws `invalid snapshot: unknown field "<name>"`, and
+a history-entry field outside `TaskHistoryEntry` throws
+`invalid history: entry[i]: unknown field "<name>"` — both checked
+before any field is consumed (the version gate still runs first), so a
+typo like `deadlline` or `payoutAmout` fails loudly instead of quietly
+dropping the SLA deadlines or payout amount it was meant to carry.
+Snapshots produced by `toJSON()` always pass, and legacy snapshots
+without `v` are unaffected.
 
 ### Hash-chained audit history
 
@@ -851,7 +857,7 @@ webhooks, retries). That remains the caller's infrastructure.
 
 ## Reproducibility
 
-`npm test` runs 413 tests covering the happy path, reject→resubmit
+`npm test` runs 422 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -865,7 +871,8 @@ deadlines and overdue checks, JSON snapshot persistence
 (round-trip, detached copies, rejection of 18 malformed-snapshot
 shapes, and the snapshot schema-version gate: `v: 1` always written,
 legacy snapshots without `v` still accepted, any other `v` rejected
-before structural checks), event-sourced replay (golden paths, input detachment, and 10
+before structural checks, plus fail-closed unknown-field rejection at
+both the snapshot and history-entry level), event-sourced replay (golden paths, input detachment, and 10
 malformed-history shapes), invalid transitions, terminal-state
 locking, the README-diagram sync guard, the `npm run diagram` CLI
 output, audit-history integrity (seq increment, from/to chain continuity,

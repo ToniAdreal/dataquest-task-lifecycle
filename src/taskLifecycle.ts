@@ -994,6 +994,11 @@ export interface SubscribeOptions {
  * (non-array / non-string / empty-string entries are rejected) with
  * duplicates deduped, so a consumed key keeps its no-op effect after a
  * snapshot restore.
+ *
+ * The parser is fail-closed about fields outside this shape: any
+ * top-level field other than the ones listed here (and any history-entry
+ * field outside {@link TaskHistoryEntry}) is rejected as an unknown
+ * field instead of being silently dropped — see {@link parseSnapshot}.
  */
 /**
  * Current snapshot schema version, written by `toJSON()` as the `v`
@@ -1023,6 +1028,45 @@ export interface TaskSnapshot {
   rolePolicy?: RolePolicy;
   idempotencyKeys?: string[];
 }
+
+/**
+ * Snapshot field whitelists for {@link parseSnapshot} / {@link parseHistory}
+ * (fail-closed strict parsing). A field outside these sets is rejected,
+ * never silently dropped: a typo'd `slaDeadlines` (e.g. `deadlline`) would
+ * otherwise parse as "no deadlines" and the SLA configuration would vanish
+ * without a trace, and a typo'd entry `payoutAmount` (`payoutAmout`) would
+ * parse as a payout entry carrying no amount. The top-level set is exactly
+ * the fields `toJSON()` can write (including the `v` schema version), and
+ * the entry set is exactly the fields `parseHistory` recognizes, so
+ * self-produced snapshots and histories always pass. The same convention
+ * is used by the sibling escrow-state-machine-ts repo.
+ */
+const SNAPSHOT_FIELDS = new Set([
+  "v",
+  "id",
+  "state",
+  "history",
+  "slaDeadlines",
+  "maxResubmits",
+  "maxDisputes",
+  "rolePolicy",
+  "idempotencyKeys",
+]);
+
+const HISTORY_ENTRY_FIELDS = new Set([
+  "seq",
+  "event",
+  "from",
+  "to",
+  "at",
+  "actor",
+  "note",
+  "payoutRef",
+  "payoutAmount",
+  "quotedAmount",
+  "prevHash",
+  "hash",
+]);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -1231,6 +1275,11 @@ function chainHistoryEntries(
  *
  * Throws `invalid history: …` on the first problem found:
  *  - history is not an array, or an entry is not an object
+ *  - unknown fields are rejected (fail-closed), never silently dropped:
+ *    an entry allows only `seq`/`event`/`from`/`to`/`at`/`actor`/`note`/
+ *    `payoutRef`/`payoutAmount`/`quotedAmount`/`prevHash`/`hash`
+ *    (`entry[i]: unknown field "<name>"`), checked before any field is
+ *    consumed so a typo is reported as itself
  *  - entry shape violations (seq, event, from, to, at, actor, note,
  *    payoutRef, prevHash, hash)
  *  - seq must restart at 1 and increment by 1 with no gaps
@@ -1265,6 +1314,14 @@ export function parseHistory(
     const raw = history[i];
     const tag = `invalid history: entry[${i}]`;
     if (!isRecord(raw)) throw new Error(`${tag}: entry must be an object`);
+    // Unknown entry fields fail closed (see HISTORY_ENTRY_FIELDS),
+    // checked before any field is consumed so a typo is reported as
+    // itself, not as a missing-field or chain error.
+    for (const key of Object.keys(raw)) {
+      if (!HISTORY_ENTRY_FIELDS.has(key)) {
+        throw new Error(`${tag}: unknown field "${key}"`);
+      }
+    }
     if (raw.seq !== i + 1) {
       throw new Error(`${tag}: seq must be ${i + 1}, got ${String(raw.seq)}`);
     }
@@ -1433,10 +1490,14 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
  *    any other value throws `unsupported snapshot version`. The version
  *    check runs before the history/hash-chain checks, so a snapshot
  *    from an unknown future format reports its version problem rather
- *    than a misleading structural or chain error. (Top-level fields
- *    other than the known ones are currently ignored, not rejected —
- *    recorded as-is; fail-closed unknown-field rejection is a separate
- *    concern from versioning.)
+ *    than a misleading structural or chain error.
+ *  - unknown top-level fields are rejected (fail-closed), never silently
+ *    dropped: only `v`/`id`/`state`/`history`/`slaDeadlines`/
+ *    `maxResubmits`/`maxDisputes`/`rolePolicy`/`idempotencyKeys` are
+ *    allowed (`unknown field "<name>"`), checked right after the
+ *    version gate and before any field is consumed, so a typo like
+ *    `deadlline` fails loudly instead of quietly losing the SLA
+ *    deadlines it was meant to carry
  *  - history entry violations — see parseHistory for the full checklist
  *  - the history's replayed state must land on the snapshot's state
  *  - SLA deadlines must name real states with parseable dates (values
@@ -1475,6 +1536,14 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     throw new Error(
       `invalid snapshot: unsupported snapshot version ${String(snapshot.v)}`,
     );
+  }
+  // Unknown top-level fields fail closed (see SNAPSHOT_FIELDS): after
+  // the version gate, so an unknown future format still reports its
+  // version first, but before any field is consumed.
+  for (const key of Object.keys(snapshot)) {
+    if (!SNAPSHOT_FIELDS.has(key)) {
+      throw new Error(`invalid snapshot: unknown field "${key}"`);
+    }
   }
   if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
     throw new Error("invalid snapshot: id must be a non-empty string");
