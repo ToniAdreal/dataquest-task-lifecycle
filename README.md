@@ -1024,6 +1024,31 @@ empty/non-string-`eventId` rejection, `size`/`stats()` observability
 with detached snapshots, `clear()`, and per-instance isolation).
 No network, no randomness in assertions.
 
+## Benchmarks
+
+`npm run bench` measures locally-observed throughput for the four hot
+paths (3000 timed iterations per op after 200 warmup, printing the Node
+version and CPU): hash-chained `dispatch`, event-sourced
+`replay`/`fromHistory`, `verifyHistoryChain`, and payout webhook
+build/verify. Fixtures are deterministic — one task driven through the
+full `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a
+fixed webhook secret, payload timestamp, and `eventId`. One real run on
+2026-10-10:
+
+| path | throughput |
+|------|------------|
+| dispatch (full lifecycle, 8 dispatches) | ~4,500 ops/sec (~220 µs/op) |
+| replay (8-entry history) | ~22,500 ops/sec (~44 µs/op) |
+| fromHistory (8-entry history) | ~12,800 ops/sec (~78 µs/op) |
+| verifyHistoryChain (8 entries) | ~44,400 ops/sec (~23 µs/op) |
+| buildPayoutWebhook (sign) | ~119,300 ops/sec (~8 µs/op) |
+| verifyPayoutWebhook | ~147,100 ops/sec (~7 µs/op) |
+
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
+shared host, so numbers vary run to run). Machine-local measurements
+for capacity planning, not guaranteed throughput — run
+`npm run bench` on your own hardware.
+
 ## License
 
 MIT

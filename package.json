@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "bench": "npm run build && node dist/bench/bench.js",
     "build": "tsc",
     "demo": "npm run build && node dist/src/demo.js",
     "diagram": "npm run build && node dist/src/diagram.js",
