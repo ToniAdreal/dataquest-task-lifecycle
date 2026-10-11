@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the five hot paths a
+ * Measures real, locally-observed throughput for the six hot paths a
  * watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -17,7 +17,14 @@
  *      the same 8-entry history) and `historyFromNdjson` (per-line JSON
  *      parsing interleaved with a full `parseHistory` hash-chain
  *      re-verification — a differently-shaped cost from the standalone
- *      `verifyHistoryChain` path above).
+ *      `verifyHistoryChain` path above);
+ *   6. payout reconciliation screening — `mismatchedPayouts(tasks)` and
+ *      `unreconciledPayouts(tasks)` over a fixed batch of 12 PAID tasks
+ *      (each with the full 8-entry history), scanning every task's
+ *      history for its `ACCEPT` quote / `PAYOUT_COMPLETE` settlement
+ *      evidence. This is the batch pass finance reconciliation runs
+ *      over a whole task set, as opposed to the per-task webhook paths
+ *      above.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -33,8 +40,10 @@ import {
   buildPayoutWebhook,
   historyFromNdjson,
   historyToNdjson,
+  mismatchedPayouts,
   replay,
   TaskLifecycle,
+  unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
   type TaskEvent,
@@ -73,6 +82,38 @@ const LIFECYCLE: Array<{
 function runLifecycle(): TaskLifecycle {
   const task = new TaskLifecycle("BENCH-001");
   LIFECYCLE.forEach(({ event, actor, extra }, i) => {
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  return task;
+}
+
+/**
+ * One deterministic PAID task with a caller-chosen quote, settled
+ * amount, and optional payout reference — the building block of the
+ * reconciliation-screening batch below. Same lifecycle shape, actors,
+ * and per-step timestamp offsets as `runLifecycle()`; only the task id
+ * and the ACCEPT / PAYOUT_COMPLETE amounts and ref vary.
+ */
+function buildPaidTask(
+  id: string,
+  opts: { quotedAmount: number; payoutAmount: number; payoutRef?: string },
+): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  LIFECYCLE.forEach(({ event, actor }, i) => {
+    const extra: {
+      quotedAmount?: number;
+      payoutRef?: string;
+      payoutAmount?: number;
+    } = {};
+    if (event === "ACCEPT") extra.quotedAmount = opts.quotedAmount;
+    if (event === "PAYOUT_COMPLETE") {
+      extra.payoutAmount = opts.payoutAmount;
+      if (opts.payoutRef !== undefined) extra.payoutRef = opts.payoutRef;
+    }
     task.dispatch(event, {
       actor,
       at: new Date(BASE_MS + i * 1000).toISOString(),
@@ -130,6 +171,66 @@ if (
   historyToNdjson(ndjsonRoundTrip) !== ndjsonFixture
 ) {
   throw new Error("benchmark fixture failed: NDJSON round-trip mismatch");
+}
+
+// Reconciliation-screening batch: 12 PAID tasks in three hand-counted
+// categories (every task carries the full 8-entry history):
+//   - 4 settled exactly as quoted, WITH a payoutRef
+//       -> selected by neither screening helper;
+//   - 4 settled for a different amount than quoted, WITH a payoutRef
+//       -> selected by mismatchedPayouts only;
+//   - 2 settled exactly as quoted, WITHOUT a payoutRef, plus
+//     2 settled for a different amount, WITHOUT a payoutRef
+//       -> the no-ref pair settled exactly is selected by
+//          unreconciledPayouts only; the no-ref mismatched pair is
+//          selected by both.
+// Hand-computed expectations: mismatchedPayouts selects 6 tasks,
+// unreconciledPayouts selects 4 tasks, in batch order.
+const screeningBatch: TaskLifecycle[] = [
+  buildPaidTask("BENCH-SCR-01", { quotedAmount: 100, payoutAmount: 100, payoutRef: "bench-pay-scr-01" }),
+  buildPaidTask("BENCH-SCR-02", { quotedAmount: 100, payoutAmount: 80, payoutRef: "bench-pay-scr-02" }),
+  buildPaidTask("BENCH-SCR-03", { quotedAmount: 150, payoutAmount: 150 }),
+  buildPaidTask("BENCH-SCR-04", { quotedAmount: 200, payoutAmount: 200, payoutRef: "bench-pay-scr-04" }),
+  buildPaidTask("BENCH-SCR-05", { quotedAmount: 120, payoutAmount: 132, payoutRef: "bench-pay-scr-05" }),
+  buildPaidTask("BENCH-SCR-06", { quotedAmount: 90, payoutAmount: 75 }),
+  buildPaidTask("BENCH-SCR-07", { quotedAmount: 300, payoutAmount: 300, payoutRef: "bench-pay-scr-07" }),
+  buildPaidTask("BENCH-SCR-08", { quotedAmount: 250, payoutAmount: 200, payoutRef: "bench-pay-scr-08" }),
+  buildPaidTask("BENCH-SCR-09", { quotedAmount: 175, payoutAmount: 175 }),
+  buildPaidTask("BENCH-SCR-10", { quotedAmount: 80, payoutAmount: 80, payoutRef: "bench-pay-scr-10" }),
+  buildPaidTask("BENCH-SCR-11", { quotedAmount: 400, payoutAmount: 440, payoutRef: "bench-pay-scr-11" }),
+  buildPaidTask("BENCH-SCR-12", { quotedAmount: 60, payoutAmount: 54 }),
+];
+if (
+  screeningBatch.length !== 12 ||
+  screeningBatch.some((t) => t.state !== "PAID" || t.history.length !== 8)
+) {
+  throw new Error("benchmark fixture failed: screening batch shape");
+}
+const expectedMismatchedIds = [
+  "BENCH-SCR-02",
+  "BENCH-SCR-05",
+  "BENCH-SCR-06",
+  "BENCH-SCR-08",
+  "BENCH-SCR-11",
+  "BENCH-SCR-12",
+];
+const expectedUnreconciledIds = [
+  "BENCH-SCR-03",
+  "BENCH-SCR-06",
+  "BENCH-SCR-09",
+  "BENCH-SCR-12",
+];
+const expectedMismatched = mismatchedPayouts(screeningBatch);
+const expectedUnreconciled = unreconciledPayouts(screeningBatch);
+if (
+  expectedMismatched.map((t) => t.id).join(",") !==
+    expectedMismatchedIds.join(",") ||
+  expectedUnreconciled.map((t) => t.id).join(",") !==
+    expectedUnreconciledIds.join(",")
+) {
+  throw new Error(
+    "benchmark fixture failed: screening counts differ from the hand-computed expectations",
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -207,11 +308,35 @@ function benchHistoryFromNdjson(): number {
   }, ITERATIONS);
 }
 
+function benchMismatchedPayouts(): number {
+  return measure(() => {
+    const out = mismatchedPayouts(screeningBatch);
+    if (
+      out.length !== expectedMismatched.length ||
+      out.some((t, i) => t !== expectedMismatched[i])
+    ) {
+      throw new Error("benchmark self-check failed: mismatchedPayouts");
+    }
+  }, ITERATIONS);
+}
+
+function benchUnreconciledPayouts(): number {
+  return measure(() => {
+    const out = unreconciledPayouts(screeningBatch);
+    if (
+      out.length !== expectedUnreconciled.length ||
+      out.some((t, i) => t !== expectedUnreconciled[i])
+    ) {
+      throw new Error("benchmark self-check failed: unreconciledPayouts");
+    }
+  }, ITERATIONS);
+}
+
 console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -225,6 +350,8 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyPayoutWebhook", ops: benchVerifyPayoutWebhook() },
   { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
+  { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
+  { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
 ];
 
 console.log("path                                              throughput");

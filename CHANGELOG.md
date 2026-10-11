@@ -23,6 +23,11 @@ change type; no entry describes a feature that is not in the history.
   parsing interleaved with full hash-chain re-verification) now appear
   in `npm run bench` alongside the existing paths, with the README
   Benchmarks table refreshed from one real run.
+- Benchmark coverage for payout reconciliation screening:
+  `mismatchedPayouts` and `unreconciledPayouts` over a fixed batch of
+  12 PAID tasks (hand-counted screening expectations as bench
+  self-checks) now appear in `npm run bench`, with the README
+  Benchmarks table refreshed from one real run.
 
 ### Fixed
 
