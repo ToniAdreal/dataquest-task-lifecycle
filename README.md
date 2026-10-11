@@ -1081,3 +1081,5 @@ for capacity planning, not guaranteed throughput — run
 ## License
 
 MIT
+
+Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
