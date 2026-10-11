@@ -30,6 +30,28 @@ import type { PayoutWebhook } from "../src/index.js";
  *
  * Every test injects `fetchImpl`/`sleepImpl`: no real network, and the
  * in-flight stubs honor `init.signal` exactly like real `fetch` does.
+ *
+ * Deterministic abort triggers (no wall-clock racing, backlog #193 —
+ * the same de-racing treatment escrow's `webhookAbortSignal` tests got
+ * in #191): earlier revisions fired `controller.abort()` from a
+ * `setTimeout` (20ms / 80ms). Under load those timers drift against the
+ * delivery schedule — the abort landed in the wrong phase and the test
+ * flaked in full-suite runs while passing standalone. Every trigger
+ * below is an event that proves the delivery is in the phase under
+ * test:
+ *
+ * - backoff / Retry-After cases abort from inside the injected
+ *   `sleepImpl`: being invoked at all proves the interruptible wait has
+ *   been entered (`sleepWithSignal` registers its abort listener
+ *   before invoking the sleep, so an abort fired there still wins the
+ *   race deterministically);
+ * - in-flight cases abort from inside the injected `fetchImpl`: being
+ *   invoked proves the request is in flight, and the abort propagates
+ *   through the composed per-attempt signal the stub honors.
+ *
+ * Wall clock survives only as loose upper-bound assertions inside the
+ * tests (`elapsed < 5000`): abort must cut a 30s wait short — it is a
+ * fail-fast bound, never a trigger.
  */
 
 const SECRET = "whsec_test_payout_abort_20261010";
@@ -92,10 +114,16 @@ function stubFetch(script: Array<Response | Error>): {
  * only when the composed per-attempt signal it receives aborts, exactly
  * like a real `fetch` against a server that never responds.
  */
-function hangingFetch(): { fetchImpl: typeof fetch; calls: RecordedCall[] } {
+function hangingFetch(onCall?: () => void): {
+  fetchImpl: typeof fetch;
+  calls: RecordedCall[];
+} {
   const calls: RecordedCall[] = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     calls.push({ url, init });
+    // The request is in flight by construction at this point; the
+    // optional hook is the deterministic abort trigger for this phase.
+    onCall?.();
     return await new Promise<Response>((_resolve, reject) => {
       const sig = init.signal;
       if (sig?.aborted) {
@@ -113,7 +141,7 @@ function hangingFetch(): { fetchImpl: typeof fetch; calls: RecordedCall[] } {
 }
 
 /** First call answers 500; every later call hangs until aborted. */
-function failThenHangFetch(): {
+function failThenHangFetch(onHang?: () => void): {
   fetchImpl: typeof fetch;
   calls: RecordedCall[];
 } {
@@ -121,6 +149,9 @@ function failThenHangFetch(): {
   const fetchImpl = (async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     if (calls.length === 1) return res(500);
+    // The retry is in flight by construction at this point; the
+    // optional hook is the deterministic abort trigger for this phase.
+    onHang?.();
     return await new Promise<Response>((_resolve, reject) => {
       const sig = init.signal;
       if (sig?.aborted) {
@@ -151,8 +182,13 @@ function stubSleep(): {
   };
 }
 
-/** A sleep stub that records the delay and then never resolves. */
-function hangingSleep(): {
+/**
+ * A sleep stub that records the delay and then never resolves. The
+ * optional `onEntry` hook runs the moment the sleep is entered — the
+ * deterministic abort trigger for the backoff / Retry-After phases
+ * (no `setTimeout` guesswork about when the wait begins).
+ */
+function hangingSleep(onEntry?: () => void): {
   sleepImpl: (ms: number) => Promise<void>;
   delays: number[];
 } {
@@ -161,14 +197,10 @@ function hangingSleep(): {
     delays,
     sleepImpl: (ms: number) => {
       delays.push(ms);
+      onEntry?.();
       return new Promise<void>(() => {});
     },
   };
-}
-
-/** Fire `controller.abort()` after `ms`. */
-function abortAfter(controller: AbortController, ms: number): void {
-  setTimeout(() => controller.abort(), ms);
 }
 
 test("pre-aborted signal reports attempts: 0 with zero fetch calls", async () => {
@@ -191,10 +223,11 @@ test("pre-aborted signal reports attempts: 0 with zero fetch calls", async () =>
 test("abort during the backoff sleep starts no new attempt", async () => {
   const webhook = goldenWebhook();
   const { fetchImpl, calls } = stubFetch([res(500)]);
-  const { sleepImpl, delays } = hangingSleep();
   const controller = new AbortController();
+  // Abort the moment the backoff sleep is entered — that invocation is
+  // the event proving the delivery is in the wait under test.
+  const { sleepImpl, delays } = hangingSleep(() => controller.abort());
   const started = Date.now();
-  abortAfter(controller, 20);
   const result = await deliverPayoutWebhook(HOOK_URL, webhook, {
     fetchImpl,
     sleepImpl,
@@ -223,10 +256,11 @@ test("abort during a Retry-After wait stops the loop", async () => {
     res(429, { "Retry-After": "30" }),
     res(200),
   ]);
-  const { sleepImpl, delays } = hangingSleep();
   const controller = new AbortController();
+  // Abort the moment the Retry-After sleep is entered (see the backoff
+  // case above for why the sleep invocation is the trigger event).
+  const { sleepImpl, delays } = hangingSleep(() => controller.abort());
   const started = Date.now();
-  abortAfter(controller, 20);
   const result = await deliverPayoutWebhook(HOOK_URL, webhook, {
     fetchImpl,
     sleepImpl,
@@ -247,11 +281,12 @@ test("abort during a Retry-After wait stops the loop", async () => {
 
 test("abort during an in-flight request is reported, not retried", async () => {
   const webhook = goldenWebhook();
-  const { fetchImpl, calls } = hangingFetch();
-  const { sleepImpl } = stubSleep();
   const controller = new AbortController();
+  // Abort from inside the fetch stub: its invocation proves the
+  // request is in flight, so the abort is deterministic.
+  const { fetchImpl, calls } = hangingFetch(() => controller.abort());
+  const { sleepImpl } = stubSleep();
   const started = Date.now();
-  abortAfter(controller, 20);
   const result = await deliverPayoutWebhook(HOOK_URL, webhook, {
     fetchImpl,
     sleepImpl,
@@ -274,10 +309,12 @@ test("abort during an in-flight request is reported, not retried", async () => {
 
 test("abort on a retry attempt reports the attempts actually made", async () => {
   const webhook = goldenWebhook();
-  const { fetchImpl, calls } = failThenHangFetch();
-  const { sleepImpl, delays } = stubSleep();
   const controller = new AbortController();
-  abortAfter(controller, 80);
+  // Abort from inside the hanging retry: its invocation proves the
+  // second attempt is in flight — replacing the old 80ms guess that
+  // the retry (5ms backoff + scheduling) would have happened by then.
+  const { fetchImpl, calls } = failThenHangFetch(() => controller.abort());
+  const { sleepImpl, delays } = stubSleep();
   const result = await deliverPayoutWebhook(HOOK_URL, webhook, {
     fetchImpl,
     sleepImpl,
