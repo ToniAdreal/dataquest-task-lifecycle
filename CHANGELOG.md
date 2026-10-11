@@ -9,7 +9,13 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Fixed
+
+- Corrected the `PayoutWebhookPayload.eventId` JSDoc, which still described
+  the retrying delivery layer as future work: `deliverPayoutWebhook` retries
+  and `deliverPayoutWebhookToMany` fan-out re-POST the same logical event
+  under the same `eventId` today, and receivers deduplicate on it (see
+  `PayoutEventDedupe`). Documentation only; no behavior change.
 
 ## [0.1.0]
 

@@ -70,9 +70,13 @@ export interface PayoutWebhookPayload {
   at: string;
   /**
    * Unique delivery ID for this notification. Receivers MUST deduplicate on
-   * `eventId`: a future delivery layer with retries would re-POST the same
-   * logical event more than once, and two independent payouts always get
-   * different `eventId`s.
+   * `eventId`: {@link deliverPayoutWebhook} retries re-POST the same logical
+   * event with the same `eventId`, and {@link deliverPayoutWebhookToMany}
+   * fans one logical event out to many endpoints under one shared
+   * `eventId`, so a receiver can see the same `eventId` more than once
+   * without it being a second payout. Two independent payouts always get
+   * different `eventId`s. {@link PayoutEventDedupe} is the included
+   * receiver-side store for this deduplication step.
    */
   eventId: string;
 }
