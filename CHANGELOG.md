@@ -11,6 +11,13 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook payloads now carry `quotedAmount` (the owed amount
+  from the last `ACCEPT` audit entry, derived exactly as
+  `payoutMismatch()` derives it), placed after `payoutAmount` in the
+  signed canonical key order and omitted as a whole key when the last
+  `ACCEPT` entry carries no quote. Receivers can recompute the
+  quoted-vs-settled comparison locally; the field only carries data,
+  adjudication stays with the receiver.
 - Benchmark coverage for the NDJSON audit-log round-trip:
   `historyToNdjson` export and `historyFromNdjson` import (per-line
   parsing interleaved with full hash-chain re-verification) now appear

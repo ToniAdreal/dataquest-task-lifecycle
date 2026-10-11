@@ -56,8 +56,9 @@ import type { TaskHistoryEntry, TaskLifecycle } from "./taskLifecycle.js";
 
 /**
  * Compact machine-readable payout notification. Every figure is derived
- * from the task's audit history (the PAYOUT_COMPLETE entry that moved it
- * to PAID): nothing is invented here.
+ * from the task's audit history: the settled side from the
+ * PAYOUT_COMPLETE entry that moved it to PAID, and `quotedAmount` from
+ * the last ACCEPT entry. Nothing is invented here.
  */
 export interface PayoutWebhookPayload {
   event: "PAYOUT_COMPLETE";
@@ -66,6 +67,17 @@ export interface PayoutWebhookPayload {
   payoutRef?: string;
   /** Settled payout amount from the PAYOUT_COMPLETE entry; omitted when absent. */
   payoutAmount?: number;
+  /**
+   * Quoted (owed) amount from the LAST `ACCEPT` entry — the same
+   * derivation `payoutMismatch` uses in-repo — so a receiver can
+   * locally recompute the quoted-vs-settled comparison without querying
+   * the sender's store. Omitted when the last `ACCEPT` entry carries no
+   * quote (the advisory omission rule `payoutRef`/`payoutAmount` use).
+   * The field only carries the data: whether a difference between
+   * `quotedAmount` and `payoutAmount` is a problem, and what to do
+   * about it, remains the receiver's adjudication.
+   */
+  quotedAmount?: number;
   /** ISO-8601 timestamp of when the payload was built. */
   at: string;
   /**
@@ -114,8 +126,9 @@ function assertSecret(secret: string | Buffer): void {
 /**
  * Fixed-literal-key-order serialization. The payload object is constructed
  * below with one literal key order (`event`, `taskId`, `payoutRef`,
- * `payoutAmount`, `at`, `eventId`), so `JSON.stringify` is deterministic;
- * the same deterministic serialization is what the signature covers.
+ * `payoutAmount`, `quotedAmount`, `at`, `eventId`), so `JSON.stringify` is
+ * deterministic; the same deterministic serialization is what the signature
+ * covers.
  */
 function canonicalJson(payload: PayoutWebhookPayload): string {
   return JSON.stringify(payload);
@@ -138,6 +151,22 @@ function completionEntry(task: TaskLifecycle): TaskHistoryEntry | undefined {
     if (entry.event === "PAYOUT_COMPLETE") complete = entry;
   }
   return complete;
+}
+
+/**
+ * Quoted (owed) amount for the payload: the `quotedAmount` on the LAST
+ * `ACCEPT` entry — the exact derivation `payoutMismatch` uses, so the
+ * webhook and the in-repo screening can never disagree about which
+ * quote counts. A last `ACCEPT` entry without a quote yields
+ * `undefined` (an earlier quote does not survive a later, quoteless
+ * acceptance), and the payload then omits the field entirely.
+ */
+function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
+  let quoted: number | undefined;
+  for (const entry of task.history) {
+    if (entry.event === "ACCEPT") quoted = entry.quotedAmount;
+  }
+  return quoted;
 }
 
 /**
@@ -177,6 +206,7 @@ export function buildPayoutWebhook(
   const eventId = options.eventId ?? randomUUID();
 
   const complete = completionEntry(task);
+  const quotedAmount = quotedAmountFromHistory(task);
   // Fixed literal key order — this order IS the signed serialization.
   const payload: PayoutWebhookPayload = {
     event: "PAYOUT_COMPLETE",
@@ -185,6 +215,7 @@ export function buildPayoutWebhook(
     ...(complete?.payoutAmount !== undefined
       ? { payoutAmount: complete.payoutAmount }
       : {}),
+    ...(quotedAmount !== undefined ? { quotedAmount } : {}),
     at,
     eventId,
   };

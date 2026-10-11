@@ -476,9 +476,22 @@ task's audit history — the dataquest-side peer of escrow's
 import { buildPayoutWebhook, verifyPayoutWebhook } from "dataquest-task-lifecycle";
 
 const { payload, signature } = buildPayoutWebhook(paidTask, webhookSecret);
-// payload: { event: "PAYOUT_COMPLETE", taskId, payoutRef?, payoutAmount?, at, eventId }
+// payload: { event: "PAYOUT_COMPLETE", taskId, payoutRef?, payoutAmount?, quotedAmount?, at, eventId }
 // signature: "sha256=<hex>"
 ```
+
+The payload carries both sides of settlement reconciliation: the
+settled side (`payoutRef`/`payoutAmount`, from the `PAYOUT_COMPLETE`
+entry) and the owed side (`quotedAmount`, from the last `ACCEPT`
+entry — the same derivation `payoutMismatch()` uses in-repo). A
+receiver can therefore recompute the quoted-vs-settled comparison
+locally, without querying the sender's store. Each field follows the
+same advisory omission rule: when its source entry carries no value,
+the key is omitted entirely (legacy `PAID` tasks keep building
+unchanged), and every present field is covered by the signature. The
+payload only carries the data — whether a `quotedAmount` /
+`payoutAmount` difference is a problem, and what to do about it,
+remains the receiver's adjudication.
 
 `eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
 on it, because a retried delivery would otherwise look like a second
@@ -927,7 +940,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 470 tests covering the happy path, reject→resubmit
+`npm test` runs 477 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -997,7 +1010,12 @@ entry, toJSON/fromJSON and NDJSON round-trips, malformed-quote snapshot
 rejection, hash-chain commitment with legacy canonical bytes unchanged,
 `payoutMismatch`: underpaid negative delta / overpaid positive delta,
 exact-settlement and missing-amount and non-PAID undefined, and
-`mismatchedPayouts` mixed-batch screening with purity), and the audit-history
+`mismatchedPayouts` mixed-batch screening with purity, plus the payout
+webhook carrying the same derived quote (`quotedAmount`: canonical
+key order after `payoutAmount`, signature-covered with tamper
+rejection, whole-key omission when the last ACCEPT entry is quoteless,
+zero quote not omitted, and last-ACCEPT-wins cross-checked against
+`payoutMismatch` on the same histories)), and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,
