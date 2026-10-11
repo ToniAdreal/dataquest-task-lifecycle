@@ -9,6 +9,14 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
+### Added
+
+- Benchmark coverage for the NDJSON audit-log round-trip:
+  `historyToNdjson` export and `historyFromNdjson` import (per-line
+  parsing interleaved with full hash-chain re-verification) now appear
+  in `npm run bench` alongside the existing paths, with the README
+  Benchmarks table refreshed from one real run.
+
 ### Fixed
 
 - Corrected the `PayoutWebhookPayload.eventId` JSDoc, which still described

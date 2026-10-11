@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the four hot paths a
+ * Measures real, locally-observed throughput for the five hot paths a
  * watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -12,7 +12,12 @@
  *   3. `verifyHistoryChain(history)` — full SHA-256 hash-chain
  *      re-verification of that same history;
  *   4. payout webhook build / verify — `buildPayoutWebhook` (HMAC-SHA256
- *      signing) and `verifyPayoutWebhook` over the signed body.
+ *      signing) and `verifyPayoutWebhook` over the signed body;
+ *   5. NDJSON export / import — `historyToNdjson` (validated export of
+ *      the same 8-entry history) and `historyFromNdjson` (per-line JSON
+ *      parsing interleaved with a full `parseHistory` hash-chain
+ *      re-verification — a differently-shaped cost from the standalone
+ *      `verifyHistoryChain` path above).
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -26,6 +31,8 @@
 import { cpus } from "node:os";
 import {
   buildPayoutWebhook,
+  historyFromNdjson,
+  historyToNdjson,
   replay,
   TaskLifecycle,
   verifyHistoryChain,
@@ -114,6 +121,16 @@ const webhookBody = JSON.stringify(webhook.payload);
 if (!verifyPayoutWebhook(webhookBody, webhook.signature, WEBHOOK_SECRET)) {
   throw new Error("benchmark fixture failed: webhook does not verify");
 }
+const ndjsonFixture = historyToNdjson(historyFixture);
+const ndjsonRoundTrip = historyFromNdjson(ndjsonFixture);
+// parseHistory returns entries in canonical key order, so compare the
+// round-trip through the canonical serializer rather than raw stringify.
+if (
+  ndjsonRoundTrip.length !== 8 ||
+  historyToNdjson(ndjsonRoundTrip) !== ndjsonFixture
+) {
+  throw new Error("benchmark fixture failed: NDJSON round-trip mismatch");
+}
 
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
@@ -173,11 +190,28 @@ function benchVerifyPayoutWebhook(): number {
   }, ITERATIONS);
 }
 
+function benchHistoryToNdjson(): number {
+  return measure(() => {
+    if (historyToNdjson(historyFixture) !== ndjsonFixture) {
+      throw new Error("benchmark self-check failed: historyToNdjson");
+    }
+  }, ITERATIONS);
+}
+
+function benchHistoryFromNdjson(): number {
+  return measure(() => {
+    const entries = historyFromNdjson(ndjsonFixture);
+    if (entries.length !== 8 || entries[7].to !== "PAID") {
+      throw new Error("benchmark self-check failed: historyFromNdjson");
+    }
+  }, ITERATIONS);
+}
+
 console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -189,12 +223,14 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyHistoryChain (8 entries)", ops: benchVerifyHistoryChain() },
   { path: "buildPayoutWebhook (sign)", ops: benchBuildPayoutWebhook() },
   { path: "verifyPayoutWebhook", ops: benchVerifyPayoutWebhook() },
+  { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
+  { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
 ];
 
-console.log("path                                      throughput");
-console.log("-------------------------------------------------------------");
+console.log("path                                              throughput");
+console.log("---------------------------------------------------------------------");
 for (const r of results) {
-  console.log(`${r.path.padEnd(42)} ${fmt(r.ops)}`);
+  console.log(`${r.path.padEnd(50)} ${fmt(r.ops)}`);
 }
 console.log("");
 console.log("Numbers are machine-local measurements, not guarantees.");

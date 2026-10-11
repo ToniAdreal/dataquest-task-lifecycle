@@ -1059,23 +1059,27 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the four hot
+`npm run bench` measures locally-observed throughput for the five hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
-`replay`/`fromHistory`, `verifyHistoryChain`, and payout webhook
-build/verify. Fixtures are deterministic — one task driven through the
-full `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a
-fixed webhook secret, payload timestamp, and `eventId`. One real run on
-2026-10-10:
+`replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
+build/verify, and NDJSON history export/import (`historyToNdjson` /
+`historyFromNdjson`, whose import path interleaves per-line parsing
+with a full hash-chain re-verification). Fixtures are deterministic —
+one task driven through the full `DRAFT → PAID` lifecycle (8
+hash-chained audit entries), with a fixed webhook secret, payload
+timestamp, and `eventId`. One real run on 2026-10-11:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~4,500 ops/sec (~220 µs/op) |
-| replay (8-entry history) | ~22,500 ops/sec (~44 µs/op) |
-| fromHistory (8-entry history) | ~12,800 ops/sec (~78 µs/op) |
-| verifyHistoryChain (8 entries) | ~44,400 ops/sec (~23 µs/op) |
-| buildPayoutWebhook (sign) | ~119,300 ops/sec (~8 µs/op) |
-| verifyPayoutWebhook | ~147,100 ops/sec (~7 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~5,600 ops/sec (~178 µs/op) |
+| replay (8-entry history) | ~8,400 ops/sec (~119 µs/op) |
+| fromHistory (8-entry history) | ~7,500 ops/sec (~132 µs/op) |
+| verifyHistoryChain (8 entries) | ~28,800 ops/sec (~35 µs/op) |
+| buildPayoutWebhook (sign) | ~76,500 ops/sec (~13 µs/op) |
+| verifyPayoutWebhook | ~68,700 ops/sec (~15 µs/op) |
+| historyToNdjson (8 entries) | ~13,200 ops/sec (~76 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~14,300 ops/sec (~70 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
