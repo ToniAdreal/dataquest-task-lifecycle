@@ -3,8 +3,15 @@
   "version": "0.1.0",
   "description": "Task lifecycle state machine for a two-sided data marketplace (reproduced from the DataQuest portfolio case study)",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    }
+  },
   "scripts": {
     "bench": "npm run build && node dist/bench/bench.js",
     "build": "tsc",

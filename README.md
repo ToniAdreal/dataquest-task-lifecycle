@@ -22,6 +22,10 @@ Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one tas
 through the full `DRAFT → PAID` chain with the append-only audit history
 printed to stdout.
 
+The package entry point is declared in `package.json` via an `exports` map
+(`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
+kept pointing at the same files for older resolvers.
+
 ## Quickstart
 
 ```ts
@@ -923,7 +927,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 461 tests covering the happy path, reject→resubmit
+`npm test` runs 466 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
