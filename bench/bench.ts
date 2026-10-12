@@ -1,8 +1,8 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the six hot paths a
- * watchdog / reconciliation deployment actually hammers:
+ * Measures real, locally-observed throughput for the eight hot-path
+ * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
  *      appending a hash-chained audit entry) on a fresh task;
@@ -31,7 +31,14 @@
  *      signed with its endpoint's own secret) through an injected
  *      deterministic fake fetch that answers 200 immediately. No real
  *      network, retries, or sleeps are involved, so this measures this
- *      library's fan-out overhead only — not network throughput.
+ *      library's fan-out overhead only — not network throughput;
+ *   8. payout event dedupe — `PayoutEventDedupe.checkAndRecord()`
+ *      steady-state duplicate hits cycling over 1,000 pre-recorded
+ *      `eventId`s under an injected fixed clock (the clock never
+ *      advances, so no entry expires and none is evicted in the timed
+ *      loop). This is the receiver-side counterpart of the sender
+ *      paths above: every delivered payout notification pays this
+ *      check before it may be processed.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -49,6 +56,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   mismatchedPayouts,
+  PayoutEventDedupe,
   replay,
   TaskLifecycle,
   unreconciledPayouts,
@@ -311,6 +319,50 @@ for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
   }
 }
 
+// Dedupe fixture: 1,000 fixed `eventId`s pre-recorded in a
+// `PayoutEventDedupe` under an injected FIXED clock — the clock never
+// advances, so in the timed loop no entry can expire (default TTL is
+// 1 hour) and none is evicted (1,001 live entries, far under the
+// default 10,000 cap): the measured path is the pure steady-state
+// duplicate hit, LRU recency refresh included. No network, no
+// randomness, no wall clock.
+const DEDUPE_PREFILL = 1000;
+const DEDUPE_NOW_MS = BASE_MS + 120_000;
+const dedupeIds: string[] = Array.from(
+  { length: DEDUPE_PREFILL },
+  (_, i) => `bench-dedupe-${String(i).padStart(4, "0")}`,
+);
+const dedupe = new PayoutEventDedupe({ now: () => DEDUPE_NOW_MS });
+for (const id of dedupeIds) {
+  if (dedupe.checkAndRecord(id)) {
+    throw new Error("benchmark fixture failed: dedupe prefill saw a duplicate");
+  }
+}
+// Semantics self-checks (outside the timed loop): an already-recorded
+// id is a duplicate; an unseen id is admitted on first sight and
+// judged a duplicate on the second; and the stats counters agree
+// exactly with the calls made so far (1,000 prefill misses, then
+// hit + miss + hit, no evictions).
+if (!dedupe.checkAndRecord(dedupeIds[0])) {
+  throw new Error("benchmark fixture failed: dedupe missed a recorded id");
+}
+if (dedupe.checkAndRecord("bench-dedupe-unseen")) {
+  throw new Error("benchmark fixture failed: dedupe flagged a first sighting");
+}
+if (!dedupe.checkAndRecord("bench-dedupe-unseen")) {
+  throw new Error("benchmark fixture failed: dedupe missed a second sighting");
+}
+const dedupeStatsFixture = dedupe.stats();
+if (
+  dedupeStatsFixture.size !== DEDUPE_PREFILL + 1 ||
+  dedupeStatsFixture.hits !== 2 ||
+  dedupeStatsFixture.misses !== DEDUPE_PREFILL + 1 ||
+  dedupeStatsFixture.evictions !== 0
+) {
+  throw new Error("benchmark fixture failed: dedupe stats do not match calls");
+}
+let dedupeCursor = 0;
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -404,6 +456,29 @@ async function benchDeliverPayoutWebhookToMany(): Promise<number> {
   }, ITERATIONS);
 }
 
+function benchPayoutEventDedupe(): number {
+  const hitsBefore = dedupe.stats().hits;
+  const ops = measure(() => {
+    const id = dedupeIds[dedupeCursor];
+    dedupeCursor = (dedupeCursor + 1) % dedupeIds.length;
+    if (!dedupe.checkAndRecord(id)) {
+      throw new Error("benchmark self-check failed: PayoutEventDedupe hit");
+    }
+  }, ITERATIONS);
+  // Stats consistency across the timed loop: every warmup + timed
+  // call was a duplicate hit on a pre-recorded id, nothing else.
+  const after = dedupe.stats();
+  if (
+    after.hits !== hitsBefore + WARMUP + ITERATIONS ||
+    after.misses !== DEDUPE_PREFILL + 1 ||
+    after.evictions !== 0 ||
+    after.size !== DEDUPE_PREFILL + 1
+  ) {
+    throw new Error("benchmark self-check failed: PayoutEventDedupe stats");
+  }
+  return ops;
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -420,7 +495,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -437,6 +512,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
+  { path: "PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids)", ops: benchPayoutEventDedupe() },
 ];
 
 console.log("path                                              throughput");
