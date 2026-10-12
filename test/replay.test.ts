@@ -154,6 +154,15 @@ test("replay: unknown event throws", () => {
 test("replay: decreasing timestamps throw", () => {
   const t = happyPath();
   const bad = JSON.parse(JSON.stringify(t.history)) as TaskHistoryEntry[];
+  // Build the violation on a hashless (legacy) history: rewriting `at` on
+  // a chained entry without recomputing the chain would conflate this
+  // rule with hash-chain tamper evidence. Stripped of prevHash/hash, the
+  // entries are legacy-valid, so the non-decreasing check is the only
+  // rule that can reject this history.
+  for (const entry of bad) {
+    delete entry.prevHash;
+    delete entry.hash;
+  }
   bad[1] = { ...bad[1], at: "2000-01-01T00:00:00.000Z" };
   assert.throws(() => replay(bad), /non-decreasing/);
 });
@@ -163,8 +172,32 @@ test("fromHistory: empty id throws", () => {
 });
 
 test("replay: equal consecutive timestamps are allowed (same-millisecond events)", () => {
-  const t = happyPath();
-  const same = JSON.parse(JSON.stringify(t.history)) as TaskHistoryEntry[];
-  same[1] = { ...same[1], at: same[0].at };
-  assert.equal(replay(same), "PAID");
+  // Build the equal timestamps through dispatch's `at` injection so the
+  // entries are chained consistently from birth. The previous version of
+  // this test rewrote an already-chained entry's `at` to match its
+  // predecessor without recomputing the hash chain — and `at` is part of
+  // the canonical hash input, so the rewrite broke the chain and the
+  // test only passed when the first two wall-clock dispatches happened
+  // to land in the same millisecond (the rewrite was then a no-op).
+  const at = "2026-03-01T10:00:00.000Z";
+  const later = (min: number) =>
+    `2026-03-01T10:${String(min).padStart(2, "0")}:00.000Z`;
+  const t = new TaskLifecycle("task-rep-eq-ts");
+  t.dispatch("PUBLISH", { actor: "researcher", at });
+  t.dispatch("ACCEPT", { actor: "contributor", at }); // same instant: allowed
+  t.dispatch("START_CAPTURE", { actor: "contributor", at: later(2) });
+  t.dispatch("SUBMIT", { actor: "contributor", note: "100 images", at: later(3) });
+  t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: later(4) });
+  t.dispatch("APPROVE", { actor: "reviewer", at: later(5) });
+  t.dispatch("REQUEST_PAYOUT", { actor: "contributor", at: later(6) });
+  t.dispatch("PAYOUT_COMPLETE", { actor: "system", at: later(7) });
+  assert.equal(t.history[0].at, at);
+  assert.equal(t.history[1].at, at);
+  assert.equal(replay(t.history), "PAID");
+  const restored = TaskLifecycle.fromHistory(
+    "task-rep-eq-ts",
+    JSON.parse(JSON.stringify(t.history)),
+  );
+  assert.equal(restored.state, "PAID");
+  assert.deepEqual(restored.history, t.history);
 });
