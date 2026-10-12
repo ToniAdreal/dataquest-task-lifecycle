@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook field-set audit (README "Payout webhooks"): the
+  payload's fields were checked one by one against the audit history
+  and escrow's settlement payload — every identifier/settlement
+  field derivable from the same history (`taskId`, `payoutRef`,
+  `payoutAmount`, `quotedAmount`) is already carried, so no field
+  was invented; the README documents each field's source, escrow
+  counterpart, and omission rule, and new snapshot tests pin the
+  exact field set and canonical key order (tampering with, stripping,
+  or adding any field fails verification). Documentation and tests
+  only; no behavior change.
 - A README FAQ section answering the positioning questions honestly:
   this is an off-chain reproduction of the case study's lifecycle
   rules, not the real DataQuest platform backend; `PAID` records a

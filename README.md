@@ -493,6 +493,31 @@ payload only carries the data — whether a `quotedAmount` /
 `payoutAmount` difference is a problem, and what to do about it,
 remains the receiver's adjudication.
 
+Field-set audit (checked field by field against the audit history
+and escrow's `SettlementWebhookPayload`): every identifier and
+settlement field deterministically derivable from the same history
+is carried — no further field is added, and the exact set and
+canonical key order are pinned by snapshot tests
+(`test/payoutWebhookFieldSet.test.ts`):
+
+| Payload field | Source | Escrow counterpart | When omitted |
+| --- | --- | --- | --- |
+| `event` | constant `"PAYOUT_COMPLETE"` | `event` (`"escrow.settled"`) | never |
+| `taskId` | the task's own `id` | `escrowId` | never |
+| `payoutRef` | `PAYOUT_COMPLETE` entry | — (escrow identifies settlement via `escrowId` + `parties`) | the entry carries no ref |
+| `payoutAmount` | `PAYOUT_COMPLETE` entry | — (escrow splits amounts across the `parties` ledger) | the entry carries no amount |
+| `quotedAmount` | last `ACCEPT` entry | `deposit` is the closest owed-side field | the last `ACCEPT` entry carries no quote |
+| `at` | payload build time | `at` | never |
+| `eventId` | build (UUID / injected) | `eventId` | never |
+
+The remaining history fields are deliberately not carried: `actor`
+is a caller-asserted role label (`contributor` / `reviewer` /
+`system`), not a unique payee identity; `note` is free-text
+annotation, not settlement data; `seq` / `from` / `to` / `prevHash` /
+`hash` are audit-chain internals. Escrow's `deposit` / `parties`
+ledger has no dataquest counterpart to derive from — the history
+records no per-party inflow/outflow — so none is invented here.
+
 `eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
 on it, because a retried delivery would otherwise look like a second
 payout. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
@@ -995,7 +1020,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 477 tests covering the happy path, reject→resubmit
+`npm test` runs 485 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

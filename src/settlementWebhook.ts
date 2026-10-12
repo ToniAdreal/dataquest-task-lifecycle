@@ -59,6 +59,15 @@ import type { TaskHistoryEntry, TaskLifecycle } from "./taskLifecycle.js";
  * from the task's audit history: the settled side from the
  * PAYOUT_COMPLETE entry that moved it to PAID, and `quotedAmount` from
  * the last ACCEPT entry. Nothing is invented here.
+ *
+ * Field-set audit (backlog #211, see the README "Payout webhooks"
+ * table): this set is complete for what the same history can
+ * deterministically supply — `taskId` is the task identifier
+ * (escrow's `escrowId` counterpart). History fields deliberately not
+ * carried: `actor` (a caller-asserted role label, not a unique payee
+ * identity), `note` (free text), and the `seq`/`from`/`to`/hash-chain
+ * internals. The exact field set and canonical key order are pinned
+ * by `test/payoutWebhookFieldSet.test.ts`.
  */
 export interface PayoutWebhookPayload {
   event: "PAYOUT_COMPLETE";
