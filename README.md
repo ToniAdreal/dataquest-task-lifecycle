@@ -888,6 +888,61 @@ Honest caveat: subscriptions are in-memory only — they do not survive
 zero listeners), and the library provides no durable fan-out (queues,
 webhooks, retries). That remains the caller's infrastructure.
 
+## FAQ (honest)
+
+- **Is this the real DataQuest platform backend?**
+  No. This is an off-chain reproduction of the task lifecycle *rules*
+  from the DataQuest portfolio case study (a human-action data
+  marketplace for embodied AI), written as a TypeScript library with
+  zero runtime dependencies. There is no production backend here: no
+  built-in store, no identity layer, and no deadline scheduler (see
+  "Limitations" below). It models the lifecycle — creation through
+  payout, plus abandonment, expiration, and dispute resolution — not
+  the platform itself.
+
+- **Does a task reaching `PAID` mean money actually moved?**
+  No. `PAID` means a caller dispatched `PAYOUT_COMPLETE`; the library
+  records the settlement evidence it is given (`payoutRef`,
+  `payoutAmount`) verbatim in the audit history, but it cannot verify
+  whether an external payment actually happened — see "Settlement
+  payout references". `unreconciledPayouts()` exists precisely to flag
+  `PAID` tasks whose `PAYOUT_COMPLETE` entry carries no `payoutRef`.
+
+- **If an SLA deadline passes, does the task expire on its own?**
+  No. SLA deadlines are advisory only: there is no timer and no
+  background scheduler, and a deadline never moves a task by itself.
+  Expiry is always an explicit `EXPIRE` event, so it lands in the
+  append-only history. The intended wiring is a watchdog (cron, queue
+  consumer) that polls `isOverdue()` / `expiredTasks()` and dispatches
+  `EXPIRE` itself — `expireOverdueTasks()` is that executor; see "SLA
+  deadlines".
+
+- **Is the payout webhook a payment?**
+  No. `buildPayoutWebhook` derives a compact HMAC-SHA256-signed
+  *notification* from a `PAID` task's audit history — it announces that
+  the lifecycle reached payout; it does not move money. Delivery
+  (`deliverPayoutWebhook` / `deliverPayoutWebhookToMany`) is in-process
+  with retries but no durable queue and no cross-process retry, so a
+  process dying mid-delivery leaves reconciliation — and receiver-side
+  deduplication on `eventId` — to the caller; see "Payout webhooks".
+
+- **Are snapshots and NDJSON a database?**
+  No. `toJSON()` / `fromJSON()` snapshots and the NDJSON history export
+  are interchange formats, not built-in storage: you choose the store,
+  save the plain JSON, and rehydrate later (see "Persistence").
+  Snapshots carry the full task (state, history, SLA deadlines,
+  configured budgets/policy); NDJSON carries the audit history only —
+  replay restores state + history, while the task id and SLA deadlines
+  are not part of the log and are not restored from it.
+
+- **Does event-level RBAC authenticate who is calling?**
+  No. `rolePolicy` is a caller-supplied actor allowlist, not identity:
+  the library records the actor string it is given and guarantees a
+  policy violation never dispatches, but it cannot verify who
+  `"senior-moderator"` really is. Authentication belongs to the
+  deployment in front of the library; see "Event-level RBAC" and
+  SECURITY.md.
+
 ## Limitations (honest)
 
 Security scope, the caller-trust model, and what this library does

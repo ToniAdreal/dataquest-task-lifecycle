@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A README FAQ section answering the positioning questions honestly:
+  this is an off-chain reproduction of the case study's lifecycle
+  rules, not the real DataQuest platform backend; `PAID` records a
+  dispatched `PAYOUT_COMPLETE`, not a verified external payment; SLA
+  deadlines are advisory and expiry stays an explicit `EXPIRE` event;
+  the payout webhook is a signed notification, not a payment; and
+  snapshots/NDJSON are export formats, not built-in storage.
+  Documentation only; no behavior change.
 - Payout webhook payloads now carry `quotedAmount` (the owed amount
   from the last `ACCEPT` audit entry, derived exactly as
   `payoutMismatch()` derives it), placed after `payoutAmount` in the
