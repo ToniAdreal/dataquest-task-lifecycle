@@ -27,6 +27,16 @@
   "engines": {
     "node": ">=20"
   },
+  "keywords": [
+    "task-lifecycle",
+    "state-machine",
+    "event-sourcing",
+    "sla",
+    "webhooks",
+    "payments",
+    "typescript",
+    "zero-dependency"
+  ],
   "license": "MIT",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
