@@ -1189,7 +1189,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the eight hot
+`npm run bench` measures locally-observed throughput for the nine hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
@@ -1198,9 +1198,10 @@ build/verify, NDJSON history export/import (`historyToNdjson` /
 with a full hash-chain re-verification), payout reconciliation
 screening (`mismatchedPayouts` / `unreconciledPayouts` over a batch of
 tasks), payout webhook fan-out delivery
-(`deliverPayoutWebhookToMany` to 4 endpoints), and receiver-side
+(`deliverPayoutWebhookToMany` to 4 endpoints), receiver-side
 payout event dedupe (`PayoutEventDedupe.checkAndRecord` duplicate
-hits). Fixtures are
+hits), and batch payout webhook building (`buildPayoutWebhooks` over
+a batch of PAID tasks). Fixtures are
 deterministic — one task driven through the full
 `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a fixed
 webhook secret, payload timestamp, and `eventId`; the screening paths
@@ -1212,25 +1213,33 @@ sleep), so it measures this library's fan-out overhead — one shared
 endpoint's own secret — not network throughput. The dedupe path
 pre-records 1,000 fixed `eventId`s under an injected fixed clock (the
 clock never advances, so no entry expires or is evicted in the timed
-loop) and cycles steady-state duplicate hits over them. One real run on
+loop) and cycles steady-state duplicate hits over them. The batch-build
+path builds webhooks for a fixed batch of 12 PAID tasks (settled exactly
+as quoted, each with a `payoutRef`) under one shared payload timestamp,
+with per-task `eventId`s from an injected deterministic factory; its
+self-checks pin the result count and input order, verify every built
+webhook under the batch secret, and confirm — on a separate mixed
+batch, outside the timed loop — that one non-PAID task fails only
+itself and never blocks the batch. One real run on
 2026-10-12:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~9,300 ops/sec (~107 µs/op) |
-| replay (8-entry history) | ~7,300 ops/sec (~137 µs/op) |
-| fromHistory (8-entry history) | ~4,700 ops/sec (~215 µs/op) |
-| verifyHistoryChain (8 entries) | ~17,400 ops/sec (~57 µs/op) |
-| buildPayoutWebhook (sign) | ~35,900 ops/sec (~28 µs/op) |
-| verifyPayoutWebhook | ~91,800 ops/sec (~11 µs/op) |
-| historyToNdjson (8 entries) | ~11,700 ops/sec (~85 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~11,200 ops/sec (~89 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~39,300 ops/sec (~25 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~61,100 ops/sec (~16 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~4,500 ops/sec (~225 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,965,000 ops/sec (~0.51 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~6,200 ops/sec (~161 µs/op) |
+| replay (8-entry history) | ~7,700 ops/sec (~130 µs/op) |
+| fromHistory (8-entry history) | ~3,900 ops/sec (~259 µs/op) |
+| verifyHistoryChain (8 entries) | ~15,500 ops/sec (~64 µs/op) |
+| buildPayoutWebhook (sign) | ~29,600 ops/sec (~34 µs/op) |
+| verifyPayoutWebhook | ~55,100 ops/sec (~18 µs/op) |
+| historyToNdjson (8 entries) | ~5,600 ops/sec (~179 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~7,100 ops/sec (~141 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~25,900 ops/sec (~39 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~40,000 ops/sec (~25 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~3,200 ops/sec (~316 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,521,000 ops/sec (~0.66 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,400 ops/sec (~156 µs/op) |
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
+Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.

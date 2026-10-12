@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the eight hot-path
+ * Measures real, locally-observed throughput for the nine hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -38,7 +38,16 @@
  *      advances, so no entry expires and none is evicted in the timed
  *      loop). This is the receiver-side counterpart of the sender
  *      paths above: every delivered payout notification pays this
- *      check before it may be processed.
+ *      check before it may be processed;
+ *   9. batch payout webhook building — `buildPayoutWebhooks()` over a
+ *      fixed batch of 12 PAID tasks under one shared payload timestamp,
+ *      with per-task `eventId`s from an injected deterministic factory
+ *      (a batch must never share one `eventId` across tasks). This is
+ *      the settlement-peak signing path: a whole settled batch signed
+ *      in one call, with per-task failure isolation (a non-PAID task
+ *      fails only itself) instead of the single-build throw aborting
+ *      the batch — the isolation rule is self-checked once, outside
+ *      the timed loop, on a mixed batch.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -52,6 +61,7 @@
 import { cpus } from "node:os";
 import {
   buildPayoutWebhook,
+  buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
   historyFromNdjson,
   historyToNdjson,
@@ -363,6 +373,113 @@ if (
 }
 let dedupeCursor = 0;
 
+// Batch-build fixture: 12 PAID tasks built with the same
+// `buildPaidTask` fixture as the screening batch (full 8-entry
+// history, settled exactly as quoted, each with a payoutRef). The
+// batch shares one fixed payload timestamp (`WEBHOOK_NOW`); per-task
+// `eventId`s come from an injected deterministic factory — a counter
+// modulo the batch size, so every call yields the same 12 distinct
+// ids in input order and nothing reads a random source.
+const BATCH_BUILD_SIZE = 12;
+const batchBuildTasks: TaskLifecycle[] = Array.from(
+  { length: BATCH_BUILD_SIZE },
+  (_, i) =>
+    buildPaidTask(`BENCH-BATCH-${String(i + 1).padStart(2, "0")}`, {
+      quotedAmount: 100 + i * 10,
+      payoutAmount: 100 + i * 10,
+      payoutRef: `bench-pay-batch-${String(i + 1).padStart(2, "0")}`,
+    }),
+);
+if (
+  batchBuildTasks.some((t) => t.state !== "PAID" || t.history.length !== 8)
+) {
+  throw new Error("benchmark fixture failed: batch-build batch shape");
+}
+const expectedBatchEventIds: string[] = Array.from(
+  { length: BATCH_BUILD_SIZE },
+  (_, i) => `bench-batch-event-${String(i).padStart(2, "0")}`,
+);
+let batchEventSeq = 0;
+const batchEventIdFactory = (): string => {
+  const id = expectedBatchEventIds[batchEventSeq % BATCH_BUILD_SIZE];
+  batchEventSeq++;
+  return id;
+};
+function runBatchBuild() {
+  batchEventSeq = 0;
+  const results = buildPayoutWebhooks(batchBuildTasks, WEBHOOK_SECRET, {
+    now: WEBHOOK_NOW,
+    eventIdFactory: batchEventIdFactory,
+  });
+  if (
+    results.length !== BATCH_BUILD_SIZE ||
+    results.some(
+      (r, i) =>
+        r.taskId !== batchBuildTasks[i].id ||
+        r.error !== undefined ||
+        r.webhook === undefined ||
+        r.webhook.payload.taskId !== batchBuildTasks[i].id ||
+        r.webhook.payload.eventId !== expectedBatchEventIds[i] ||
+        r.webhook.payload.at !== WEBHOOK_NOW.toISOString(),
+    ) ||
+    new Set(results.map((r) => r.webhook?.payload.eventId)).size !==
+      BATCH_BUILD_SIZE
+  ) {
+    throw new Error("benchmark self-check failed: buildPayoutWebhooks batch");
+  }
+  return results;
+}
+// One-time fixture validation (outside the timed loop): every webhook
+// in the batch verifies under the batch secret.
+for (const r of runBatchBuild()) {
+  if (
+    !r.webhook ||
+    !verifyPayoutWebhook(
+      JSON.stringify(r.webhook.payload),
+      r.webhook.signature,
+      WEBHOOK_SECRET,
+    )
+  ) {
+    throw new Error(
+      "benchmark fixture failed: batch-build webhook does not verify",
+    );
+  }
+}
+// Per-task isolation (outside the timed loop): one non-PAID task in a
+// mixed batch fails only itself and never blocks the PAID tasks
+// around it.
+const batchOpenTask = new TaskLifecycle("BENCH-BATCH-OPEN");
+batchOpenTask.dispatch("PUBLISH", {
+  actor: "researcher",
+  at: new Date(BASE_MS).toISOString(),
+});
+batchEventSeq = 0;
+const mixedBatch = buildPayoutWebhooks(
+  [batchBuildTasks[0], batchOpenTask, batchBuildTasks[1]],
+  WEBHOOK_SECRET,
+  { now: WEBHOOK_NOW, eventIdFactory: batchEventIdFactory },
+);
+if (
+  mixedBatch.length !== 3 ||
+  mixedBatch[0].taskId !== batchBuildTasks[0].id ||
+  mixedBatch[0].webhook === undefined ||
+  mixedBatch[1].taskId !== "BENCH-BATCH-OPEN" ||
+  mixedBatch[1].webhook !== undefined ||
+  typeof mixedBatch[1].error !== "string" ||
+  !mixedBatch[1].error.includes("state OPEN") ||
+  mixedBatch[2].taskId !== batchBuildTasks[1].id ||
+  mixedBatch[2].webhook === undefined ||
+  !verifyPayoutWebhook(
+    JSON.stringify(mixedBatch[2].webhook.payload),
+    mixedBatch[2].webhook.signature,
+    WEBHOOK_SECRET,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: buildPayoutWebhooks per-task isolation",
+  );
+}
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -479,6 +596,12 @@ function benchPayoutEventDedupe(): number {
   return ops;
 }
 
+function benchBuildPayoutWebhooks(): number {
+  return measure(() => {
+    runBatchBuild();
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -495,7 +618,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -513,6 +636,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids)", ops: benchPayoutEventDedupe() },
+  { path: "buildPayoutWebhooks (batch of 12 PAID tasks)", ops: benchBuildPayoutWebhooks() },
 ];
 
 console.log("path                                              throughput");
