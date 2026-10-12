@@ -24,7 +24,14 @@
  *      history for its `ACCEPT` quote / `PAYOUT_COMPLETE` settlement
  *      evidence. This is the batch pass finance reconciliation runs
  *      over a whole task set, as opposed to the per-task webhook paths
- *      above.
+ *      above;
+ *   7. payout webhook fan-out delivery — `deliverPayoutWebhookToMany()`
+ *      delivering one PAID task's settlement event to 4 endpoints at
+ *      once (one shared `eventId`, one byte-identical body, each copy
+ *      signed with its endpoint's own secret) through an injected
+ *      deterministic fake fetch that answers 200 immediately. No real
+ *      network, retries, or sleeps are involved, so this measures this
+ *      library's fan-out overhead only — not network throughput.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -38,6 +45,7 @@
 import { cpus } from "node:os";
 import {
   buildPayoutWebhook,
+  deliverPayoutWebhookToMany,
   historyFromNdjson,
   historyToNdjson,
   mismatchedPayouts,
@@ -46,6 +54,8 @@ import {
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
+  type PayoutWebhookEndpoint,
+  type PayoutWebhookFetchImpl,
   type TaskEvent,
   type TaskHistoryEntry,
 } from "../src/index.js";
@@ -127,6 +137,17 @@ function measure(fn: () => void, iterations: number): number {
   for (let i = 0; i < WARMUP; i++) fn(); // warmup: JIT, module caches
   const start = process.hrtime.bigint();
   for (let i = 0; i < iterations; i++) fn();
+  const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
+  return iterations / elapsedSec;
+}
+
+async function measureAsync(
+  fn: () => Promise<void>,
+  iterations: number,
+): Promise<number> {
+  for (let i = 0; i < WARMUP; i++) await fn(); // warmup: JIT, module caches
+  const start = process.hrtime.bigint();
+  for (let i = 0; i < iterations; i++) await fn();
   const elapsedSec = Number(process.hrtime.bigint() - start) / 1e9;
   return iterations / elapsedSec;
 }
@@ -233,6 +254,63 @@ if (
   );
 }
 
+// Fan-out delivery fixture: the same PAID task fanned out to 4 fixed
+// endpoints, each with its own signing secret, under the shared fixed
+// `WEBHOOK_NOW` / `WEBHOOK_EVENT_ID` above. The injected fetch is fully
+// deterministic: it records the calls of the current fan-out, then
+// answers 200 immediately — no network, no randomness, no real sleep
+// (the injected sleep is a no-op and is never reached on a 200).
+const FANOUT_ENDPOINTS: PayoutWebhookEndpoint[] = [
+  { url: "https://billing.example.com/hooks/payout", secret: "bench-fanout-secret-billing" },
+  { url: "https://risk.example.com/hooks/payout", secret: "bench-fanout-secret-risk" },
+  { url: "https://notifications.example.com/hooks/payout", secret: "bench-fanout-secret-notifications" },
+  { url: "https://ledger.example.com/hooks/payout", secret: "bench-fanout-secret-ledger" },
+];
+let fanoutCalls: Array<{ url: string; body: string; signature: string }> = [];
+const fanoutFetch: PayoutWebhookFetchImpl = async (url, init) => {
+  fanoutCalls.push({
+    url,
+    body: String(init.body),
+    signature: String(new Headers(init.headers).get("x-hub-signature-256")),
+  });
+  return new Response("{}", { status: 200 });
+};
+const fanoutNoSleep = async () => {};
+
+async function runFanout() {
+  fanoutCalls = [];
+  const out = await deliverPayoutWebhookToMany(paidTask, FANOUT_ENDPOINTS, {
+    fetchImpl: fanoutFetch,
+    sleepImpl: fanoutNoSleep,
+    now: WEBHOOK_NOW,
+    eventId: WEBHOOK_EVENT_ID,
+  });
+  if (
+    out.results.length !== FANOUT_ENDPOINTS.length ||
+    out.delivered !== FANOUT_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results.some((r) => !r.ok || r.attempts !== 1 || r.status !== 200) ||
+    fanoutCalls.length !== FANOUT_ENDPOINTS.length ||
+    fanoutCalls.some((c) => c.body !== fanoutCalls[0].body) ||
+    JSON.parse(fanoutCalls[0].body).eventId !== WEBHOOK_EVENT_ID
+  ) {
+    throw new Error("benchmark self-check failed: deliverPayoutWebhookToMany");
+  }
+  return out;
+}
+
+// One-time fixture validation (outside the timed loop): every endpoint
+// received a copy signed with its OWN secret.
+await runFanout();
+for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
+  const call = fanoutCalls.find((c) => c.url === endpoint.url);
+  if (!call || !verifyPayoutWebhook(call.body, call.signature, endpoint.secret)) {
+    throw new Error(
+      `benchmark fixture failed: fan-out endpoint ${i} signature does not verify`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -320,6 +398,12 @@ function benchMismatchedPayouts(): number {
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToMany(): Promise<number> {
+  return measureAsync(async () => {
+    await runFanout();
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -336,7 +420,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -352,6 +436,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
+  { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
 ];
 
 console.log("path                                              throughput");

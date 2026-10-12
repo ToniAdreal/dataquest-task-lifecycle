@@ -46,6 +46,15 @@ change type; no entry describes a feature that is not in the history.
   12 PAID tasks (hand-counted screening expectations as bench
   self-checks) now appear in `npm run bench`, with the README
   Benchmarks table refreshed from one real run.
+- Benchmark coverage for payout webhook fan-out delivery:
+  `deliverPayoutWebhookToMany` to 4 endpoints through an injected
+  deterministic fake fetch (immediate 200 — no network, no real sleep;
+  per-iteration self-checks pin one result per endpoint, all
+  delivered, one shared `eventId`, and one byte-identical body, with a
+  one-time check that each copy verifies under its endpoint's own
+  secret) now appears in `npm run bench`, with the README Benchmarks
+  table refreshed from one real run. This measures the library's
+  fan-out overhead only, not network throughput.
 
 ### Fixed
 

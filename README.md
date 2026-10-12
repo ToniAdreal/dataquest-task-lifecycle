@@ -1157,33 +1157,40 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the six hot
+`npm run bench` measures locally-observed throughput for the seven hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
 build/verify, NDJSON history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
-with a full hash-chain re-verification), and payout reconciliation
+with a full hash-chain re-verification), payout reconciliation
 screening (`mismatchedPayouts` / `unreconciledPayouts` over a batch of
-tasks). Fixtures are deterministic — one task driven through the full
+tasks), and payout webhook fan-out delivery
+(`deliverPayoutWebhookToMany` to 4 endpoints). Fixtures are
+deterministic — one task driven through the full
 `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a fixed
 webhook secret, payload timestamp, and `eventId`; the screening paths
 use a fixed batch of 12 PAID tasks (settled exactly as quoted or for a
-different amount, with or without a `payoutRef`). One real run on
-2026-10-11:
+different amount, with or without a `payoutRef`). The fan-out path
+injects a deterministic fake fetch (immediate 200, no network, no real
+sleep), so it measures this library's fan-out overhead — one shared
+`eventId`, one byte-identical body, each copy signed with its
+endpoint's own secret — not network throughput. One real run on
+2026-10-12:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~6,200 ops/sec (~162 µs/op) |
-| replay (8-entry history) | ~10,900 ops/sec (~92 µs/op) |
-| fromHistory (8-entry history) | ~5,700 ops/sec (~175 µs/op) |
-| verifyHistoryChain (8 entries) | ~10,700 ops/sec (~93 µs/op) |
-| buildPayoutWebhook (sign) | ~26,900 ops/sec (~37 µs/op) |
-| verifyPayoutWebhook | ~45,400 ops/sec (~22 µs/op) |
-| historyToNdjson (8 entries) | ~6,500 ops/sec (~153 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~13,300 ops/sec (~75 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~23,400 ops/sec (~43 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~22,000 ops/sec (~45 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~13,300 ops/sec (~75 µs/op) |
+| replay (8-entry history) | ~11,700 ops/sec (~86 µs/op) |
+| fromHistory (8-entry history) | ~7,000 ops/sec (~143 µs/op) |
+| verifyHistoryChain (8 entries) | ~18,900 ops/sec (~53 µs/op) |
+| buildPayoutWebhook (sign) | ~87,800 ops/sec (~11 µs/op) |
+| verifyPayoutWebhook | ~137,100 ops/sec (~7 µs/op) |
+| historyToNdjson (8 entries) | ~15,000 ops/sec (~67 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~13,900 ops/sec (~72 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~35,800 ops/sec (~28 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~78,700 ops/sec (~13 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~4,000 ops/sec (~247 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
