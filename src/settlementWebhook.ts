@@ -232,6 +232,130 @@ export function buildPayoutWebhook(
   return { payload, signature };
 }
 
+/** Options for {@link buildPayoutWebhooks}. All fields optional. */
+export interface BuildPayoutWebhooksOptions {
+  /**
+   * Payload `at` timestamp shared by every webhook in the batch.
+   * Resolved once per call (defaults to the real clock at call time,
+   * passed through to each single build) so a batch is a coherent
+   * snapshot point, not N builds with drifting timestamps. An invalid
+   * value is a call-level configuration error and throws for the whole
+   * batch, exactly as an empty secret does.
+   */
+  now?: Date | string;
+  /**
+   * Generation strategy for per-task `eventId`s: called once per task,
+   * in input order, and its return value becomes that task's
+   * `eventId`. Defaults to `crypto.randomUUID()` per task. This is
+   * deliberately a factory, not a fixed string: every task in the
+   * batch is a DISTINCT payout event, so — unlike the fan-out in
+   * {@link deliverPayoutWebhookToMany}, which shares one `eventId`
+   * for one logical event — a batch must never reuse one `eventId`
+   * across tasks, or receivers deduplicating on `eventId` would drop
+   * all but the first payout as apparent duplicates. A factory that
+   * returns a non-string or empty value fails only that task (the
+   * single-build validation runs per task); a non-function value is a
+   * call-level configuration error and throws.
+   */
+  eventIdFactory?: () => string;
+}
+
+/**
+ * Per-task outcome of {@link buildPayoutWebhooks}: exactly one of
+ * `webhook` / `error` is set (the escrow `SettlementReportResult`
+ * shape).
+ */
+export type BuildPayoutWebhooksResult =
+  | { taskId: string; webhook: PayoutWebhook; error?: undefined }
+  | { taskId: string; webhook?: undefined; error: string };
+
+/**
+ * Batch payout webhook building: build one signed webhook per task
+ * from a list of tasks — the dataquest-side peer of escrow's
+ * `buildSettlementReports` (#209).
+ *
+ * This exists because a hand-written loop over
+ * {@link buildPayoutWebhook} has the same trap that batch wrapper
+ * fixed: the single-task function throws on the first non-PAID task,
+ * aborting the whole batch and leaving the caller to re-implement
+ * per-item isolation. Here each task is attempted independently: a
+ * failure is recorded as `{ taskId, error }` (the caught error's
+ * message) and never blocks later tasks. The result has one entry
+ * per input, in input order, each carrying that task's `id`.
+ *
+ * Call-level configuration errors DO throw before any task is
+ * attempted — those are caller bugs, not per-task outcomes: a
+ * non-array `tasks`, an empty secret (validated with the single
+ * build's rules, never swallowed per task), an invalid shared `now`,
+ * or a non-function `eventIdFactory`.
+ *
+ * `eventId` semantics: one DISTINCT `eventId` per task (see
+ * {@link BuildPayoutWebhooksOptions.eventIdFactory}); the shared
+ * element is the generation strategy and the `now` timestamp, never
+ * the value. Each built webhook verifies under the batch secret
+ * exactly as a single build does.
+ *
+ * Pure: building never mutates any task, and this wrapper adds no
+ * mutation of its own — the input list and its tasks are only read.
+ *
+ * Honest limit: this builds signed payloads only. It is a signing
+ * primitive, not delivery — nothing is POSTed, queued, or retried
+ * here; use {@link deliverPayoutWebhook} /
+ * {@link deliverPayoutWebhookToMany} per built webhook for that.
+ */
+export function buildPayoutWebhooks(
+  tasks: readonly TaskLifecycle[],
+  secret: string | Buffer,
+  options: BuildPayoutWebhooksOptions = {},
+): BuildPayoutWebhooksResult[] {
+  if (!Array.isArray(tasks)) {
+    throw new Error(
+      "cannot build payout webhooks: tasks must be an array",
+    );
+  }
+  // Call-level configuration, validated once up front: an empty
+  // secret would fail every task identically, so it throws for the
+  // whole batch instead of being recorded per task.
+  assertSecret(secret);
+  if (
+    options.eventIdFactory !== undefined &&
+    typeof options.eventIdFactory !== "function"
+  ) {
+    throw new Error(
+      "cannot build payout webhooks: 'eventIdFactory' must be a function",
+    );
+  }
+  if (
+    options.now !== undefined &&
+    Number.isNaN(new Date(options.now).getTime())
+  ) {
+    throw new Error(
+      "cannot build payout webhooks: invalid 'now' timestamp",
+    );
+  }
+  const eventIdFactory = options.eventIdFactory ?? randomUUID;
+  return tasks.map((task) => {
+    const taskId =
+      task !== null &&
+      typeof task === "object" &&
+      typeof (task as TaskLifecycle).id === "string"
+        ? (task as TaskLifecycle).id
+        : "unknown";
+    try {
+      const webhook = buildPayoutWebhook(task, secret, {
+        now: options.now,
+        eventId: eventIdFactory(),
+      });
+      return { taskId, webhook };
+    } catch (err) {
+      return {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+}
+
 /** Options for {@link verifyPayoutWebhook}. All fields optional. */
 export interface VerifyPayoutWebhookOptions {
   /**

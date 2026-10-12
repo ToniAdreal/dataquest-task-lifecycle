@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Batch payout webhook building: `buildPayoutWebhooks(tasks, secret, opts?)`
+  returns one `{ taskId, webhook }` / `{ taskId, error }` result per
+  input task, in input order — a non-PAID task fails only itself and
+  never blocks later tasks, while call-level configuration errors
+  (empty secret, invalid shared `now`, non-function `eventIdFactory`,
+  non-array `tasks`) throw for the whole batch. The batch shares the
+  `now` timestamp and the `eventId` generation strategy
+  (`eventIdFactory`, default `crypto.randomUUID()`), never the
+  `eventId` value: each task is a distinct payout with its own
+  `eventId`, and each built webhook verifies exactly as a single
+  `buildPayoutWebhook` build does. Building is a signing primitive
+  only — no delivery, queueing, or retry is added.
 - A payout webhook field-set audit (README "Payout webhooks"): the
   payload's fields were checked one by one against the audit history
   and escrow's settlement payload — every identifier/settlement

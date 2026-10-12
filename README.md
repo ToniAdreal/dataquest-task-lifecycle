@@ -518,6 +518,31 @@ annotation, not settlement data; `seq` / `from` / `to` / `prevHash` /
 ledger has no dataquest counterpart to derive from — the history
 records no per-party inflow/outflow — so none is invented here.
 
+For a batch of tasks — a reconciliation run that owes one signed
+notification per settled task — `buildPayoutWebhooks(tasks, secret, opts?)`
+builds them all without a hand-written try/catch loop:
+
+```ts
+import { buildPayoutWebhooks } from "dataquest-task-lifecycle";
+
+const results = buildPayoutWebhooks(tasks, webhookSecret, { now: new Date() });
+// results[i]: { taskId, webhook } | { taskId, error } — one per input, in input order
+```
+
+Each task is attempted independently: a non-`PAID` task records its
+single-build error as `{ taskId, error }` and never blocks later
+tasks. Call-level configuration errors throw for the whole batch
+instead — an empty secret, an invalid shared `now`, or a non-array
+`tasks`. The batch shares the `now` timestamp and the `eventId`
+generation strategy (`opts.eventIdFactory`, called once per task;
+default `crypto.randomUUID()`), never the `eventId` value itself:
+each task is a distinct payout, so each built webhook carries its
+own `eventId` and verifies under the batch secret exactly as a
+single build does. Honest limit: building is a signing primitive,
+not delivery — nothing is POSTed, queued, or retried here; deliver
+each built webhook with `deliverPayoutWebhook` (or fan one task out
+with `deliverPayoutWebhookToMany`).
+
 `eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
 on it, because a retried delivery would otherwise look like a second
 payout. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
@@ -1020,7 +1045,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 485 tests covering the happy path, reject→resubmit
+`npm test` runs 495 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -1140,6 +1165,13 @@ single-endpoint equivalence with `deliverPayoutWebhook`, per-endpoint
 retry counting and `maxAttempts`/`fetchImpl` overrides, an invalid-URL
 or network-error endpoint failing only itself, and empty-endpoints /
 invalid-global-option configuration errors thrown before any request),
+and payout webhook batch building (`buildPayoutWebhooks`: mixed
+PAID/non-PAID batches with input-ordered per-task results, a bad item
+first never blocking later items, distinct per-task `eventId`s under
+a shared `now` with each webhook verifying under the batch secret,
+empty-secret and invalid-shared-option configuration errors thrown
+for the whole batch, and one-item equivalence with
+`buildPayoutWebhook`),
 and payout webhook receiver deduplication (`PayoutEventDedupe`:
 first-sighting `false` / duplicate `true` semantics, TTL expiry with
 an age of exactly `ttlMs` counting as unseen, duplicate hits not
