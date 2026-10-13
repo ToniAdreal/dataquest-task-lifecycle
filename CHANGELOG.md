@@ -67,6 +67,32 @@ change type; no entry describes a feature that is not in the history.
   secret) now appears in `npm run bench`, with the README Benchmarks
   table refreshed from one real run. This measures the library's
   fan-out overhead only, not network throughput.
+- A `package.json` `exports` map for the package root
+  (`.` → `types`/`import`/`default` under `dist/src/`), alongside a
+  correction of `main`/`types`, which previously pointed at a
+  non-existent `dist/index.js` instead of the real `dist/src/` build
+  layout. Package self-reference import smoke tests pin the declared
+  shape, the consistency with `main`/`types`, and that every declared
+  entry file exists after a build.
+- Continuous integration: a GitHub Actions workflow runs the test
+  suite on push and on pull requests, on Node 20 and 22.
+- The CLI demo (`npm run demo`) now continues past the PAID state:
+  it builds the signed payout webhook for the settled task with a
+  clearly labelled demo-only secret (not a real credential), prints
+  the payload fields and signature a receiver would see, and verifies
+  it with `verifyPayoutWebhook`, printing the verification result.
+  Demo tests pin the new output lines.
+- Benchmark coverage for the `PayoutEventDedupe` duplicate-hit hot
+  path (repeat `check`/`record` on an already-seen `eventId`) now
+  appears in `npm run bench`, with the README Benchmarks table
+  refreshed from one real run.
+- Benchmark coverage for batch payout webhook building:
+  `buildPayoutWebhooks()` over a batch of tasks now appears in
+  `npm run bench` alongside the single-build path, with the README
+  Benchmarks table refreshed from one real run.
+- Package discoverability metadata: `package.json` now declares
+  `keywords` (`task-lifecycle`, `state-machine`, `event-sourcing`,
+  `sla`, `webhooks`, `payments`, `typescript`, `zero-dependency`).
 
 ### Fixed
 
@@ -82,6 +108,33 @@ change type; no entry describes a feature that is not in the history.
   and `deliverPayoutWebhookToMany` fan-out re-POST the same logical event
   under the same `eventId` today, and receivers deduplicate on it (see
   `PayoutEventDedupe`). Documentation only; no behavior change.
+- De-flaked the replay equal-timestamp test: it previously rewrote an
+  already-chained history entry's `at` to match its predecessor without
+  recomputing the hash chain (`at` is part of the canonical hash
+  input), so it only passed when the first two wall-clock dispatches
+  happened to land in the same millisecond. The equal timestamps are
+  now built through dispatch's `at` injection so the entries are
+  chained consistently from birth, and the decreasing-timestamp case
+  is built on a hashless legacy history so only the non-decreasing
+  rule can reject it. Tests only; no behavior change.
+- De-flaked the payout webhook `AbortSignal` tests: aborts are now
+  triggered from injected stub events (the stub fetch / sleep being
+  called) instead of wall-clock timers racing the delivery attempts.
+  Tests only; no behavior change.
+
+### Tests
+
+- Package entry smoke tests: `package.json` `main`/`types` are pinned
+  to the real `dist/src/` build layout, every declared entry file is
+  asserted to exist after a build, importing through the declared
+  main entry is asserted to expose a usable core API, and the README
+  Quickstart is asserted to import from that same entry path.
+
+### Documentation
+
+- A `CONTRIBUTING.md` covering prerequisites (Node ≥ 20, npm only),
+  setup, the build-then-test flow, the demo/diagram/bench entry
+  points, the repository's hard rules, and the pre-submit checks.
 
 ## [0.1.0]
 
