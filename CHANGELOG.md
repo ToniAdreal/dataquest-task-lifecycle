@@ -89,6 +89,17 @@ change type; no entry describes a feature that is not in the history.
   the payload fields and signature a receiver would see, and verifies
   it with `verifyPayoutWebhook`, printing the verification result.
   Demo tests pin the new output lines.
+- The CLI demo (`npm run demo`) now includes an SLA watchdog branch:
+  a second task (DEMO-002) whose ACCEPTED-state SLA deadline is
+  already past at a fixed screening instant is found by
+  `expiredTasks()` screening over both demo tasks, shown to still be
+  ACCEPTED (the deadline is advisory and never expires a task by
+  itself), and then explicitly dispatched `EXPIRE` by a watchdog
+  actor into the EXPIRED terminal state, with its audit history
+  printed. Every branch timestamp is a fixed literal or the injected
+  screening `now` — the branch reads no wall clock. Demo tests pin
+  the screening line, the EXPIRE transition, the fixed timestamps,
+  and the EXPIRED end state. Demo and tests only; no behavior change.
 - Benchmark coverage for the `PayoutEventDedupe` duplicate-hit hot
   path (repeat `check`/`record` on an already-seen `eventId`) now
   appears in `npm run bench`, with the README Benchmarks table

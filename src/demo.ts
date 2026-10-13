@@ -1,8 +1,12 @@
 /**
  * Demo: drive one task from DRAFT to PAID — its first submission is
  * REJECTed in QA and RESUBMITted before it passes on re-review — print
- * the append-only audit history, then build the signed payout webhook
- * for the settled task and verify it the way a receiver would.
+ * the append-only audit history, run a second task through the SLA
+ * watchdog branch (an advisory deadline passes, `expiredTasks()`
+ * screening finds the task, and a watchdog explicitly dispatches
+ * EXPIRE into the EXPIRED terminal state), then build the signed
+ * payout webhook for the settled task and verify it the way a
+ * receiver would.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -12,6 +16,7 @@
 import {
   TaskLifecycle,
   buildPayoutWebhook,
+  expiredTasks,
   verifyPayoutWebhook,
   type TaskEvent,
 } from "./index.js";
@@ -82,6 +87,56 @@ function main(): void {
   console.log("History (append-only audit trail):");
   console.log("  seq  event            from          -> to             actor        at");
   for (const h of task.history) {
+    console.log(
+      `  ${String(h.seq).padStart(3)}  ${h.event.padEnd(16)} ${h.from.padEnd(13)} -> ${h.to.padEnd(13)} ${String(h.actor ?? "-").padEnd(12)} ${h.at}`,
+    );
+  }
+
+  // SLA watchdog branch: a second task whose ACCEPTED-state SLA
+  // deadline has already passed at the screening instant. The deadline
+  // is advisory only — it never moves the task by itself — so the
+  // branch first screens the batch with expiredTasks() under a fixed
+  // `now`, shows the task is still ACCEPTED, and only then does the
+  // watchdog explicitly dispatch EXPIRE, exactly the wiring the README
+  // FAQ describes. Every timestamp in this branch is a fixed literal
+  // or the injected screening `now`: no wall clock is read here.
+  const SLA_BRANCH_NOW = new Date("2026-03-06T09:00:00.000Z");
+  const overdueTask = new TaskLifecycle("DEMO-002");
+  console.log("\nSLA watchdog branch (second task, advisory deadline):");
+  console.log(`Task ${overdueTask.id}: ${overdueTask.state}`);
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-01T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-01T09:05:00.000Z"],
+  ] as const) {
+    const from = overdueTask.state;
+    const to = overdueTask.dispatch(event, { actor, at });
+    console.log(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  overdueTask.setSlaDeadline("2026-03-03T09:00:00.000Z");
+  console.log(
+    `  SLA deadline (ACCEPTED): ${overdueTask.getSlaDeadline("ACCEPTED")}`,
+  );
+  const overdueFound = expiredTasks([task, overdueTask], SLA_BRANCH_NOW);
+  console.log(
+    `  expiredTasks([${task.id}, ${overdueTask.id}], ${SLA_BRANCH_NOW.toISOString()}): ${overdueFound.map((t) => t.id).join(", ")} (${overdueFound.length} overdue)`,
+  );
+  console.log(
+    `  ${overdueTask.id} still ${overdueTask.state}: the deadline alone never expires a task`,
+  );
+  for (const found of overdueFound) {
+    const from = found.state;
+    const to = found.dispatch("EXPIRE", {
+      actor: "watchdog",
+      at: SLA_BRANCH_NOW.toISOString(),
+    });
+    console.log(`  ${"EXPIRE".padEnd(15)} ${from.padEnd(12)} -> ${to}  (watchdog)`);
+  }
+  console.log(
+    `\nFinal state (SLA branch): ${overdueTask.state} (terminal: ${overdueTask.isTerminal})`,
+  );
+  console.log("History (SLA branch, append-only audit trail):");
+  console.log("  seq  event            from          -> to             actor        at");
+  for (const h of overdueTask.history) {
     console.log(
       `  ${String(h.seq).padStart(3)}  ${h.event.padEnd(16)} ${h.from.padEnd(13)} -> ${h.to.padEnd(13)} ${String(h.actor ?? "-").padEnd(12)} ${h.at}`,
     );

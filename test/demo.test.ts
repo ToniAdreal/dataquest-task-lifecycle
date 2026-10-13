@@ -45,10 +45,12 @@ test("demo script runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop an
   assert.ok(approveAt > resubmitAt, "APPROVE must follow the RESUBMIT loop");
   // Final state + terminal flag
   assert.match(out, /Final state: PAID \(terminal: true\)/);
-  // Audit trail has exactly 12 numbered history entries
-  // (8-step happy path + REJECT + RESUBMIT + second SUBMIT + second BEGIN_REVIEW)
+  // Numbered history rows across both printed audit trails: the main
+  // task has exactly 12 entries (8-step happy path + REJECT + RESUBMIT
+  // + second SUBMIT + second BEGIN_REVIEW) and the SLA branch task
+  // printed below it has exactly 3 (PUBLISH + ACCEPT + EXPIRE).
   const seqRows = out.match(/^\s+\d+  /gm) ?? [];
-  assert.equal(seqRows.length, 12);
+  assert.equal(seqRows.length, 15);
 });
 
 test("demo builds the payout webhook from the settled task and verifies it", () => {
@@ -72,5 +74,46 @@ test("demo builds the payout webhook from the settled task and verifies it", () 
   );
   assert.match(out, /signature:\s+sha256=[0-9a-f]{64}/);
   // The demo self-verifies with the (clearly labelled) demo secret
+  assert.match(out, /verifyPayoutWebhook: ok/);
+});
+
+test("demo shows the SLA watchdog branch: screening finds the overdue task, then EXPIRE lands it in EXPIRED", () => {
+  const out = execFileSync(
+    "node",
+    [path.join(repoRoot, "dist", "src", "demo.js")],
+    { encoding: "utf8" },
+  );
+
+  // Branch header and the second task's fixed-timestamp setup steps
+  assert.match(out, /SLA watchdog branch \(second task, advisory deadline\):/);
+  assert.match(out, /Task DEMO-002: DRAFT/);
+  // The ACCEPTED-state SLA deadline is printed verbatim (fixed literal)
+  assert.match(out, /SLA deadline \(ACCEPTED\): 2026-03-03T09:00:00\.000Z/);
+  // Screening under the injected fixed now finds exactly DEMO-002:
+  // DEMO-001 is PAID (terminal) and carries no deadline
+  assert.match(
+    out,
+    /expiredTasks\(\[DEMO-001, DEMO-002\], 2026-03-06T09:00:00\.000Z\): DEMO-002 \(1 overdue\)/,
+  );
+  // The deadline is advisory: the task is still ACCEPTED after screening
+  assert.match(out, /DEMO-002 still ACCEPTED: the deadline alone never expires a task/);
+  // The watchdog's explicit EXPIRE dispatch and the terminal end state
+  assert.ok(
+    out.includes("EXPIRE") && out.includes("ACCEPTED") && out.includes("EXPIRED"),
+    "missing EXPIRE transition ACCEPTED -> EXPIRED",
+  );
+  assert.match(out, /Final state \(SLA branch\): EXPIRED \(terminal: true\)/);
+  // Ordering: screening is printed before the EXPIRE dispatch, and the
+  // branch history carries the fixed dispatch timestamps (no wall clock)
+  const screenAt = out.indexOf("expiredTasks([DEMO-001, DEMO-002]");
+  const expireAt = out.indexOf("EXPIRE", screenAt);
+  assert.ok(screenAt >= 0 && expireAt > screenAt, "EXPIRE must follow the screening line");
+  assert.match(out, /PUBLISH\s+DRAFT\s+-> OPEN\s+researcher\s+2026-03-01T09:00:00\.000Z/);
+  assert.match(out, /EXPIRE\s+ACCEPTED\s+-> EXPIRED\s+watchdog\s+2026-03-06T09:00:00\.000Z/);
+  // The main line still finishes PAID with the webhook verification after
+  // the branch section
+  const branchAt = out.indexOf("SLA watchdog branch");
+  const webhookAt = out.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):");
+  assert.ok(webhookAt > branchAt, "payout webhook section must follow the SLA branch");
   assert.match(out, /verifyPayoutWebhook: ok/);
 });

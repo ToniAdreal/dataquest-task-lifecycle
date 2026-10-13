@@ -15,16 +15,21 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 496 tests, all local
+npm test   # 497 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
 through the full `DRAFT → PAID` chain, including a first submission that is
 rejected in QA and resubmitted (the demo sets `maxResubmits: 2` and uses 1 of
 the 2; the library default is unlimited) before passing on re-review, with
-the append-only audit history printed to stdout, then the signed payout
-webhook for the settled task built from that history and verified with the
-demo secret.
+the append-only audit history printed to stdout, then a second task running
+the SLA watchdog branch (its ACCEPTED-state deadline is already past at a
+fixed screening instant, `expiredTasks()` finds it while it is still
+ACCEPTED — the deadline alone never expires a task — and a watchdog
+explicitly dispatches `EXPIRE` into the EXPIRED terminal state; every
+branch timestamp is a fixed literal or the injected screening `now`), and
+finally the signed payout webhook for the settled task built from that
+history and verified with the demo secret.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1049,7 +1054,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 496 tests covering the happy path, reject→resubmit
+`npm test` runs 497 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
