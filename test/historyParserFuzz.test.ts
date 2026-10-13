@@ -31,8 +31,19 @@ import {
  * seq/from-to chain is intact), or it is rejected with a plain `Error`
  * whose message starts with the parser's documented `invalid …` prefix.
  * A TypeError / ReferenceError / SyntaxError escaping, or a silently
- * accepted chain break, fails the run. A 50ms per-call budget (the
- * rfc9421 paradigm's bound) guards against pathological slowdowns.
+ * accepted chain break, fails the run.
+ *
+ * Timing guard (backlog #241, de-flaked): the original per-call 50ms
+ * wall-clock assertion was load-sensitive — a single scheduler/GC pause
+ * under a parallel full-suite run measured 101.6ms for work that takes
+ * well under 1ms unloaded, failing ~1 in 11 runs. The guard now uses
+ * the corpus MEDIAN against the same 50ms budget (a median is immune
+ * to a handful of paused samples, but a systematic per-call slowdown
+ * of that magnitude moves every sample and still trips it), plus a
+ * separate catastrophic worst-case bound of 20x the budget so one
+ * pathological input cannot hide behind the median either. It is not
+ * a simple budget widening: an injected fixed 60ms per-call delay
+ * raises the median above 50ms and fails (mutation-verified).
  */
 
 function mulberry32(seed: number): () => number {
@@ -51,6 +62,32 @@ const MAX_MS = 50;
 const PARSE_HISTORY_CASES = 600; // per golden variant (chained + hashless)
 const NDJSON_CASES = 400;
 const SNAPSHOT_CASES = 300;
+/** Catastrophic single-case bound: 20x the median budget (see header). */
+const CATASTROPHIC_MS = MAX_MS * 20;
+
+/**
+ * Load-insensitive timing guard (backlog #241): assert the median
+ * per-call time stays under MAX_MS and no single case exceeds
+ * CATASTROPHIC_MS. Returns the stats for the run log.
+ */
+function assertTimingGuard(
+  label: string,
+  dts: readonly number[],
+): { median: number; worst: number } {
+  assert.ok(dts.length > 0, `${label}: no timing samples collected`);
+  const sorted = [...dts].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const worst = sorted[sorted.length - 1];
+  assert.ok(
+    median < MAX_MS,
+    `${label} median took ${median.toFixed(1)}ms (budget ${MAX_MS}ms)`,
+  );
+  assert.ok(
+    worst < CATASTROPHIC_MS,
+    `${label} worst case took ${worst.toFixed(1)}ms (catastrophic budget ${CATASTROPHIC_MS}ms)`,
+  );
+  return { median, worst };
+}
 
 /** Deterministic golden task: full DRAFT→PAID chain, injected timestamps. */
 function goldenTask(): TaskLifecycle {
@@ -403,7 +440,7 @@ test("fuzz: parseHistory never throws a non-Error and never accepts a broken cha
   const { chained } = buildCorpora();
   let accepted = 0;
   let rejected = 0;
-  let worst = 0;
+  const dts: number[] = [];
   for (const mutated of chained) {
     const t0 = performance.now();
     try {
@@ -414,13 +451,12 @@ test("fuzz: parseHistory never throws a non-Error and never accepts a broken cha
       rejected++;
       assertPlainInvalid(err, ["invalid history:"]);
     }
-    const dt = performance.now() - t0;
-    if (dt > worst) worst = dt;
-    assert.ok(dt < MAX_MS, `parseHistory took ${dt.toFixed(1)}ms`);
+    dts.push(performance.now() - t0);
   }
+  const { median, worst } = assertTimingGuard("parseHistory", dts);
   assert.ok(accepted > 0 && rejected > 0, `accepted=${accepted} rejected=${rejected}`);
   console.log(
-    `fuzz parseHistory(chained): ${chained.length} cases, ${accepted} accepted, ${rejected} rejected, worst ${worst.toFixed(1)}ms`,
+    `fuzz parseHistory(chained): ${chained.length} cases, ${accepted} accepted, ${rejected} rejected, median ${median.toFixed(2)}ms, worst ${worst.toFixed(1)}ms`,
   );
 });
 
@@ -460,7 +496,7 @@ test("fuzz: historyFromNdjson never throws a non-Error and never accepts a broke
   const { ndjson } = buildCorpora();
   let accepted = 0;
   let rejected = 0;
-  let worst = 0;
+  const dts: number[] = [];
   for (const mutated of ndjson) {
     const t0 = performance.now();
     try {
@@ -473,13 +509,12 @@ test("fuzz: historyFromNdjson never throws a non-Error and never accepts a broke
       rejected++;
       assertPlainInvalid(err, ["invalid ndjson:", "invalid history:"]);
     }
-    const dt = performance.now() - t0;
-    if (dt > worst) worst = dt;
-    assert.ok(dt < MAX_MS, `historyFromNdjson took ${dt.toFixed(1)}ms`);
+    dts.push(performance.now() - t0);
   }
+  const { median, worst } = assertTimingGuard("historyFromNdjson", dts);
   assert.ok(accepted > 0 && rejected > 0, `accepted=${accepted} rejected=${rejected}`);
   console.log(
-    `fuzz historyFromNdjson: ${ndjson.length} cases, ${accepted} accepted, ${rejected} rejected, worst ${worst.toFixed(1)}ms`,
+    `fuzz historyFromNdjson: ${ndjson.length} cases, ${accepted} accepted, ${rejected} rejected, median ${median.toFixed(2)}ms, worst ${worst.toFixed(1)}ms`,
   );
 });
 
@@ -504,7 +539,7 @@ test("fuzz: TaskLifecycle.fromJSON never throws a non-Error and accepted snapsho
   const { snapshots } = buildCorpora();
   let accepted = 0;
   let rejected = 0;
-  let worst = 0;
+  const dts: number[] = [];
   for (const mutated of snapshots) {
     const t0 = performance.now();
     try {
@@ -519,12 +554,11 @@ test("fuzz: TaskLifecycle.fromJSON never throws a non-Error and accepted snapsho
       rejected++;
       assertPlainInvalid(err, ["invalid snapshot:", "invalid history:"]);
     }
-    const dt = performance.now() - t0;
-    if (dt > worst) worst = dt;
-    assert.ok(dt < MAX_MS, `fromJSON took ${dt.toFixed(1)}ms`);
+    dts.push(performance.now() - t0);
   }
+  const { median, worst } = assertTimingGuard("fromJSON", dts);
   assert.ok(accepted > 0 && rejected > 0, `accepted=${accepted} rejected=${rejected}`);
   console.log(
-    `fuzz fromJSON: ${snapshots.length} cases, ${accepted} accepted, ${rejected} rejected, worst ${worst.toFixed(1)}ms`,
+    `fuzz fromJSON: ${snapshots.length} cases, ${accepted} accepted, ${rejected} rejected, median ${median.toFixed(2)}ms, worst ${worst.toFixed(1)}ms`,
   );
 });

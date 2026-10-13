@@ -70,6 +70,13 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- De-flaked the history parser fuzz timing guard: the per-call 50ms
+  wall-clock assertion in `historyParserFuzz` could fail under parallel
+  load (a 101.6ms scheduler pause on sub-millisecond work). The guard
+  now asserts the corpus median against the same 50ms budget, plus a
+  1000ms catastrophic worst-case bound, so a systematic per-call
+  slowdown still fails while a single pause does not. Tests only; no
+  behavior change.
 - Corrected the `PayoutWebhookPayload.eventId` JSDoc, which still described
   the retrying delivery layer as future work: `deliverPayoutWebhook` retries
   and `deliverPayoutWebhookToMany` fan-out re-POST the same logical event
