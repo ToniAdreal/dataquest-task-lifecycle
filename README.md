@@ -19,9 +19,12 @@ npm test   # 496 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
-through the full `DRAFT → PAID` chain with the append-only audit history
-printed to stdout, then the signed payout webhook for the settled task
-built from that history and verified with the demo secret.
+through the full `DRAFT → PAID` chain, including a first submission that is
+rejected in QA and resubmitted (the demo sets `maxResubmits: 2` and uses 1 of
+the 2; the library default is unlimited) before passing on re-review, with
+the append-only audit history printed to stdout, then the signed payout
+webhook for the settled task built from that history and verified with the
+demo secret.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are

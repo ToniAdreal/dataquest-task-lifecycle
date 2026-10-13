@@ -76,6 +76,13 @@ change type; no entry describes a feature that is not in the history.
   entry file exists after a build.
 - Continuous integration: a GitHub Actions workflow runs the test
   suite on push and on pull requests, on Node 20 and 22.
+- The CLI demo (`npm run demo`) now exercises the reject→resubmit
+  loop: the first submission is REJECTed in QA and RESUBMITted (the
+  demo task is constructed with `maxResubmits: 2` and uses 1 of the 2;
+  the library default remains unlimited), then passes on re-review
+  and continues to PAID. Demo tests pin the new transition lines, the
+  REJECT-before-RESUBMIT-before-APPROVE ordering, and the 12-entry
+  audit history. Demo and documentation only; no behavior change.
 - The CLI demo (`npm run demo`) now continues past the PAID state:
   it builds the signed payout webhook for the settled task with a
   clearly labelled demo-only secret (not a real credential), prints

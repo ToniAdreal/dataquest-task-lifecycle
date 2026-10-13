@@ -8,7 +8,7 @@ const repoRoot = path.dirname(
   path.dirname(path.dirname(fileURLToPath(import.meta.url))),
 ); // dist/test/*.test.js -> repo root
 
-test("demo script runs the full DRAFT -> PAID chain and prints the audit history", () => {
+test("demo script runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop and prints the audit history", () => {
   const out = execFileSync(
     "node",
     [path.join(repoRoot, "dist", "src", "demo.js")],
@@ -17,13 +17,16 @@ test("demo script runs the full DRAFT -> PAID chain and prints the audit history
 
   // Header shows the task starting in DRAFT
   assert.match(out, /Task DEMO-001: DRAFT/);
-  // Every transition of the happy path is logged
+  // Every transition of the script is logged, including the
+  // REJECT -> RESUBMIT loop and the second submission round
   for (const [event, from, to] of [
     ["PUBLISH", "DRAFT", "OPEN"],
     ["ACCEPT", "OPEN", "ACCEPTED"],
     ["START_CAPTURE", "ACCEPTED", "CAPTURING"],
     ["SUBMIT", "CAPTURING", "SUBMITTED"],
     ["BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW"],
+    ["REJECT", "IN_REVIEW", "REJECTED"],
+    ["RESUBMIT", "REJECTED", "CAPTURING"],
     ["APPROVE", "IN_REVIEW", "APPROVED"],
     ["REQUEST_PAYOUT", "APPROVED", "PAYOUT_PENDING"],
     ["PAYOUT_COMPLETE", "PAYOUT_PENDING", "PAID"],
@@ -33,11 +36,19 @@ test("demo script runs the full DRAFT -> PAID chain and prints the audit history
       `missing chain step ${event}: ${from} -> ${to}`,
     );
   }
+  // The loop is ordered: REJECT comes before RESUBMIT, and RESUBMIT
+  // comes before the eventual APPROVE / PAID finish
+  const rejectAt = out.indexOf("REJECT");
+  const resubmitAt = out.indexOf("RESUBMIT");
+  const approveAt = out.indexOf("APPROVE");
+  assert.ok(rejectAt >= 0 && resubmitAt > rejectAt, "RESUBMIT must follow REJECT");
+  assert.ok(approveAt > resubmitAt, "APPROVE must follow the RESUBMIT loop");
   // Final state + terminal flag
   assert.match(out, /Final state: PAID \(terminal: true\)/);
-  // Audit trail has exactly 8 numbered history entries
+  // Audit trail has exactly 12 numbered history entries
+  // (8-step happy path + REJECT + RESUBMIT + second SUBMIT + second BEGIN_REVIEW)
   const seqRows = out.match(/^\s+\d+  /gm) ?? [];
-  assert.equal(seqRows.length, 8);
+  assert.equal(seqRows.length, 12);
 });
 
 test("demo builds the payout webhook from the settled task and verifies it", () => {

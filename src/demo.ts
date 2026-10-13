@@ -1,5 +1,6 @@
 /**
- * Demo: drive one task through the full happy path DRAFT -> PAID, print
+ * Demo: drive one task from DRAFT to PAID — its first submission is
+ * REJECTed in QA and RESUBMITted before it passes on re-review — print
  * the append-only audit history, then build the signed payout webhook
  * for the settled task and verify it the way a receiver would.
  *
@@ -34,7 +35,15 @@ const steps: Array<{
   { event: "START_CAPTURE", actor: "contributor", note: "Data capture begins" },
   { event: "SUBMIT", actor: "contributor", note: "Batch uploaded for QA" },
   { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist starts review" },
-  { event: "APPROVE", actor: "reviewer", note: "Sample passes QA" },
+  { event: "REJECT", actor: "reviewer", note: "Sample fails QA: gaps in the capture" },
+  {
+    event: "RESUBMIT",
+    actor: "contributor",
+    note: "Contributor fixes the batch and resubmits (uses 1 of the demo's 2 allowed RESUBMITs)",
+  },
+  { event: "SUBMIT", actor: "contributor", note: "Revised batch uploaded for QA" },
+  { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist re-reviews the revised batch" },
+  { event: "APPROVE", actor: "reviewer", note: "Revised sample passes QA" },
   { event: "REQUEST_PAYOUT", actor: "contributor", note: "Contributor requests payout" },
   {
     event: "PAYOUT_COMPLETE",
@@ -49,7 +58,13 @@ const steps: Array<{
 ];
 
 function main(): void {
-  const task = new TaskLifecycle("DEMO-001");
+  // The demo sets an explicit resubmit budget of 2 so the REJECT ->
+  // RESUBMIT loop below shows the budget being consumed (this script
+  // uses 1 of the 2). The library default for `maxResubmits` is
+  // unlimited — the budget here is a demo policy choice, not a
+  // built-in cap, and a third RESUBMIT on this task would throw
+  // "resubmit budget exhausted".
+  const task = new TaskLifecycle("DEMO-001", { maxResubmits: 2 });
   console.log(`Task ${task.id}: ${task.state}`);
 
   for (const { event, actor, note, payoutRef, payoutAmount } of steps) {
