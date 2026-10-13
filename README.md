@@ -1245,24 +1245,24 @@ derived from the helpers themselves. One real run on
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~4,200 ops/sec (~239 µs/op) |
-| replay (8-entry history) | ~5,900 ops/sec (~170 µs/op) |
-| fromHistory (8-entry history) | ~2,700 ops/sec (~373 µs/op) |
-| verifyHistoryChain (8 entries) | ~13,400 ops/sec (~74 µs/op) |
-| buildPayoutWebhook (sign) | ~23,200 ops/sec (~43 µs/op) |
-| verifyPayoutWebhook | ~43,400 ops/sec (~23 µs/op) |
-| historyToNdjson (8 entries) | ~14,000 ops/sec (~72 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~10,800 ops/sec (~92 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~14,100 ops/sec (~71 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~22,900 ops/sec (~44 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~32,100 ops/sec (~31 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~1,700 ops/sec (~598 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,204,000 ops/sec (~0.83 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~5,300 ops/sec (~189 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~82,800 ops/sec (~12.08 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~67,400 ops/sec (~14.84 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~12,400 ops/sec (~80 µs/op) |
+| replay (8-entry history) | ~10,300 ops/sec (~97 µs/op) |
+| fromHistory (8-entry history) | ~6,500 ops/sec (~153 µs/op) |
+| verifyHistoryChain (8 entries) | ~31,600 ops/sec (~32 µs/op) |
+| buildPayoutWebhook (sign) | ~72,000 ops/sec (~14 µs/op) |
+| verifyPayoutWebhook | ~122,300 ops/sec (~8.18 µs/op) |
+| historyToNdjson (8 entries) | ~13,700 ops/sec (~73 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~13,800 ops/sec (~72 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~62,600 ops/sec (~16 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~78,900 ops/sec (~13 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~93,200 ops/sec (~11 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~6,100 ops/sec (~165 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,529,000 ops/sec (~0.65 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,800 ops/sec (~148 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~169,500 ops/sec (~5.90 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~93,800 ops/sec (~10.66 µs/op) |
 
-Environment: Node v22.23.1, linux/x64, AMD EPYC 9D25 (virtualized;
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.
