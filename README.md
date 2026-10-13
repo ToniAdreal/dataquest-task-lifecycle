@@ -1197,8 +1197,8 @@ version and CPU): hash-chained `dispatch`, event-sourced
 build/verify, NDJSON history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
 with a full hash-chain re-verification), payout reconciliation
-screening (`mismatchedPayouts` / `unreconciledPayouts` over a batch of
-tasks), payout webhook fan-out delivery
+screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut`
+over a batch of tasks), payout webhook fan-out delivery
 (`deliverPayoutWebhookToMany` to 4 endpoints), receiver-side
 payout event dedupe (`PayoutEventDedupe.checkAndRecord` duplicate
 hits), and batch payout webhook building (`buildPayoutWebhooks` over
@@ -1221,26 +1221,32 @@ with per-task `eventId`s from an injected deterministic factory; its
 self-checks pin the result count and input order, verify every built
 webhook under the batch secret, and confirm — on a separate mixed
 batch, outside the timed loop — that one non-PAID task fails only
-itself and never blocks the batch. One real run on
-2026-10-12:
+itself and never blocks the batch. The `totalPaidOut` path reuses the
+same 12-task screening batch; its per-iteration self-check pins the
+returned total to the hand-computed sum of the batch's recorded
+`payoutAmount`s (100 + 80 + 150 + 200 + 132 + 75 + 300 + 200 + 175 +
+80 + 440 + 54 = 1986), written out in the bench comments rather than
+derived from the implementation itself. One real run on
+2026-10-13:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~6,200 ops/sec (~161 µs/op) |
-| replay (8-entry history) | ~7,700 ops/sec (~130 µs/op) |
-| fromHistory (8-entry history) | ~3,900 ops/sec (~259 µs/op) |
-| verifyHistoryChain (8 entries) | ~15,500 ops/sec (~64 µs/op) |
-| buildPayoutWebhook (sign) | ~29,600 ops/sec (~34 µs/op) |
-| verifyPayoutWebhook | ~55,100 ops/sec (~18 µs/op) |
-| historyToNdjson (8 entries) | ~5,600 ops/sec (~179 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~7,100 ops/sec (~141 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~25,900 ops/sec (~39 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~40,000 ops/sec (~25 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~3,200 ops/sec (~316 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,521,000 ops/sec (~0.66 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,400 ops/sec (~156 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~4,200 ops/sec (~238 µs/op) |
+| replay (8-entry history) | ~5,800 ops/sec (~172 µs/op) |
+| fromHistory (8-entry history) | ~2,700 ops/sec (~373 µs/op) |
+| verifyHistoryChain (8 entries) | ~12,000 ops/sec (~83 µs/op) |
+| buildPayoutWebhook (sign) | ~22,600 ops/sec (~44 µs/op) |
+| verifyPayoutWebhook | ~45,500 ops/sec (~22 µs/op) |
+| historyToNdjson (8 entries) | ~14,900 ops/sec (~67 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~10,800 ops/sec (~93 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~13,000 ops/sec (~77 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~20,900 ops/sec (~48 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~30,600 ops/sec (~33 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~1,700 ops/sec (~592 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,086,000 ops/sec (~0.92 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~5,400 ops/sec (~184 µs/op) |
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized;
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.

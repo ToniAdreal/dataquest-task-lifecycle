@@ -90,6 +90,13 @@ change type; no entry describes a feature that is not in the history.
   `buildPayoutWebhooks()` over a batch of tasks now appears in
   `npm run bench` alongside the single-build path, with the README
   Benchmarks table refreshed from one real run.
+- Benchmark coverage for the payout reconciliation total:
+  `totalPaidOut()` over the same fixed batch of 12 PAID tasks as the
+  screening paths now appears in `npm run bench`, with a per-iteration
+  self-check pinning the returned total to the hand-computed sum of
+  the batch's recorded `payoutAmount`s (1986, written out in the bench
+  comments), and the README Benchmarks table refreshed from one real
+  run.
 - Package discoverability metadata: `package.json` now declares
   `keywords` (`task-lifecycle`, `state-machine`, `event-sourcing`,
   `sla`, `webhooks`, `payments`, `typescript`, `zero-dependency`).

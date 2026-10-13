@@ -18,13 +18,16 @@
  *      parsing interleaved with a full `parseHistory` hash-chain
  *      re-verification — a differently-shaped cost from the standalone
  *      `verifyHistoryChain` path above);
- *   6. payout reconciliation screening — `mismatchedPayouts(tasks)` and
- *      `unreconciledPayouts(tasks)` over a fixed batch of 12 PAID tasks
- *      (each with the full 8-entry history), scanning every task's
- *      history for its `ACCEPT` quote / `PAYOUT_COMPLETE` settlement
- *      evidence. This is the batch pass finance reconciliation runs
- *      over a whole task set, as opposed to the per-task webhook paths
- *      above;
+ *   6. payout reconciliation screening — `mismatchedPayouts(tasks)`,
+ *      `unreconciledPayouts(tasks)`, and `totalPaidOut(tasks)` over a
+ *      fixed batch of 12 PAID tasks (each with the full 8-entry
+ *      history), scanning every task's history for its `ACCEPT` quote /
+ *      `PAYOUT_COMPLETE` settlement evidence. `totalPaidOut` is the
+ *      summary counterpart of the two screening helpers: it sums the
+ *      recorded `payoutAmount`s across the batch, the day-end total
+ *      finance reconciliation checks the screened set against. This is
+ *      the batch pass finance reconciliation runs over a whole task
+ *      set, as opposed to the per-task webhook paths above;
  *   7. payout webhook fan-out delivery — `deliverPayoutWebhookToMany()`
  *      delivering one PAID task's settlement event to 4 endpoints at
  *      once (one shared `eventId`, one byte-identical body, each copy
@@ -69,6 +72,7 @@ import {
   PayoutEventDedupe,
   replay,
   TaskLifecycle,
+  totalPaidOut,
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
@@ -269,6 +273,17 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: screening counts differ from the hand-computed expectations",
+  );
+}
+// Hand-computed totalPaidOut expectation: it sums every task's
+// recorded payoutAmount (all 12 are PAID and carry one):
+// 100 + 80 + 150 + 200 + 132 + 75 + 300 + 200 + 175 + 80 + 440 + 54
+// = 1986. The expectation is written out by hand here — it is never
+// derived by calling totalPaidOut itself.
+const expectedTotalPaidOut = 1986;
+if (totalPaidOut(screeningBatch) !== expectedTotalPaidOut) {
+  throw new Error(
+    "benchmark fixture failed: totalPaidOut differs from the hand-computed expectation",
   );
 }
 
@@ -602,6 +617,14 @@ function benchBuildPayoutWebhooks(): number {
   }, ITERATIONS);
 }
 
+function benchTotalPaidOut(): number {
+  return measure(() => {
+    if (totalPaidOut(screeningBatch) !== expectedTotalPaidOut) {
+      throw new Error("benchmark self-check failed: totalPaidOut");
+    }
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -618,7 +641,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -634,6 +657,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
+  { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids)", ops: benchPayoutEventDedupe() },
   { path: "buildPayoutWebhooks (batch of 12 PAID tasks)", ops: benchBuildPayoutWebhooks() },
