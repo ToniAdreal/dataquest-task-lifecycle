@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- The CLI demo is now an importable `runDemo()` (same shape as the
+  sibling demos): it returns both demo tasks, the SLA screening
+  result, the built payout webhook with its verification outcome,
+  and the exact printed `lines`, with printing kept behind the
+  direct-execution guard. `npm run demo` output is unchanged — a
+  golden test pins the pre-refactor output line for line, normalizing
+  only the values that already varied between any two runs (the main
+  task's wall-clock timestamps and the webhook `at` / `eventId` /
+  signature derived from them) — and the demo tests now assert the
+  structured payload/history values in-process, keeping one
+  subprocess smoke test for the CLI entry point. Refactor and tests
+  only; no library behavior change.
 - Batch payout webhook building: `buildPayoutWebhooks(tasks, secret, opts?)`
   returns one `{ taskId, webhook }` / `{ taskId, error }` result per
   input task, in input order — a non-PAID task fails only itself and
