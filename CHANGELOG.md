@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for watchdog execution: `expireOverdueTasks()`
+  and `actOnStaleTasks()` (with its default ABANDON action) over the
+  same fixed batch of 12 mixed-state tasks as the watchdog screening
+  paths now appear in `npm run bench`. Both executors dispatch and
+  mutate the tasks they act on, so every timed iteration rebuilds the
+  batch fresh — the reported numbers include that rebuild cost and
+  are a conservative floor for the pure executor cost. Per-iteration
+  self-checks pin the hand-counted outcomes written out in the bench
+  comments (3 of the 4 overdue tasks expire, the IN_REVIEW one fails
+  in isolation; 1 of the 4 stale actions succeeds, the rest fail in
+  isolation) and the resulting task states, and the README
+  Benchmarks table is refreshed from one real run. Benchmark only;
+  no library behavior change.
 - The CLI demo is now an importable `runDemo()` (same shape as the
   sibling demos): it returns both demo tasks, the SLA screening
   result, the built payout webhook with its verification outcome,

@@ -1198,7 +1198,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the ten hot
+`npm run bench` measures locally-observed throughput for the eleven hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
@@ -1210,8 +1210,10 @@ over a batch of tasks), payout webhook fan-out delivery
 (`deliverPayoutWebhookToMany` to 4 endpoints), receiver-side
 payout event dedupe (`PayoutEventDedupe.checkAndRecord` duplicate
 hits), batch payout webhook building (`buildPayoutWebhooks` over
-a batch of PAID tasks), and watchdog screening (`expiredTasks` /
-`staleTasks` over a batch of mixed-state tasks). Fixtures are
+a batch of PAID tasks), watchdog screening (`expiredTasks` /
+`staleTasks` over a batch of mixed-state tasks), and watchdog
+execution (`expireOverdueTasks` / `actOnStaleTasks` over the same
+batch). Fixtures are
 deterministic — one task driven through the full
 `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a fixed
 webhook secret, payload timestamp, and `eventId`; the screening paths
@@ -1245,29 +1247,41 @@ injected fixed `now` (`BASE + 40 days`) with budgets
 per-iteration self-checks pin both selections to the hand-counted
 expectations written out in the bench comments (expired: WD-01,
 WD-06, WD-10, WD-12; stale: WD-01, WD-04, WD-06, WD-08), never
-derived from the helpers themselves. One real run on
-2026-10-13:
+derived from the helpers themselves. The watchdog execution paths
+act on the same 12-task batch but rebuild it fresh on every
+iteration — both executors dispatch (`EXPIRE`, or the default
+`ABANDON` action) and so mutate the tasks they act on — which makes
+their numbers include the fixture-rebuild cost: a conservative
+floor for the pure executor cost, not the pure cost itself. Their
+per-iteration self-checks pin the hand-counted outcomes (expire:
+WD-01, WD-10 and WD-12 expire, WD-06 — IN_REVIEW, which has no
+`EXPIRE` edge — fails in isolation; stale action: only WD-04 —
+ACCEPTED — is abandoned, WD-01 / WD-08 (OPEN) and WD-06 (IN_REVIEW)
+fail in isolation) and the resulting task states. One real run on
+2026-10-14:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~12,400 ops/sec (~80 µs/op) |
-| replay (8-entry history) | ~10,300 ops/sec (~97 µs/op) |
-| fromHistory (8-entry history) | ~6,500 ops/sec (~153 µs/op) |
-| verifyHistoryChain (8 entries) | ~31,600 ops/sec (~32 µs/op) |
-| buildPayoutWebhook (sign) | ~72,000 ops/sec (~14 µs/op) |
-| verifyPayoutWebhook | ~122,300 ops/sec (~8.18 µs/op) |
-| historyToNdjson (8 entries) | ~13,700 ops/sec (~73 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~13,800 ops/sec (~72 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~62,600 ops/sec (~16 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~78,900 ops/sec (~13 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~93,200 ops/sec (~11 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~6,100 ops/sec (~165 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,529,000 ops/sec (~0.65 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,800 ops/sec (~148 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~169,500 ops/sec (~5.90 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~93,800 ops/sec (~10.66 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~5,400 ops/sec (~187 µs/op) |
+| replay (8-entry history) | ~8,900 ops/sec (~112 µs/op) |
+| fromHistory (8-entry history) | ~6,200 ops/sec (~162 µs/op) |
+| verifyHistoryChain (8 entries) | ~34,400 ops/sec (~29 µs/op) |
+| buildPayoutWebhook (sign) | ~69,100 ops/sec (~14 µs/op) |
+| verifyPayoutWebhook | ~106,900 ops/sec (~9.35 µs/op) |
+| historyToNdjson (8 entries) | ~15,100 ops/sec (~66 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~10,400 ops/sec (~96 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~50,900 ops/sec (~20 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~57,000 ops/sec (~18 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~70,700 ops/sec (~14 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~4,300 ops/sec (~234 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,670,000 ops/sec (~0.60 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~7,400 ops/sec (~135 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~245,800 ops/sec (~4.07 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~112,900 ops/sec (~8.85 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~2,800 ops/sec (~356 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~2,600 ops/sec (~392 µs/op) |
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
+Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized;
 shared host, so numbers vary run to run). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.
