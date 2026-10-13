@@ -39,3 +39,27 @@ test("demo script runs the full DRAFT -> PAID chain and prints the audit history
   const seqRows = out.match(/^\s+\d+  /gm) ?? [];
   assert.equal(seqRows.length, 8);
 });
+
+test("demo builds the payout webhook from the settled task and verifies it", () => {
+  const out = execFileSync(
+    "node",
+    [path.join(repoRoot, "dist", "src", "demo.js")],
+    { encoding: "utf8" },
+  );
+
+  // Webhook section appears after the audit history
+  assert.match(out, /Payout webhook \(signed PAYOUT_COMPLETE notification\):/);
+  // Payload fields derive from the PAYOUT_COMPLETE audit entry
+  assert.match(out, /event:\s+PAYOUT_COMPLETE/);
+  assert.match(out, /taskId:\s+DEMO-001/);
+  assert.match(out, /payoutRef:\s+xfer-88f2/);
+  assert.match(out, /payoutAmount:\s+10098\.5/);
+  // eventId is a UUID v4 and the signature is a sha256= HMAC hex digest
+  assert.match(
+    out,
+    /eventId:\s+[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/,
+  );
+  assert.match(out, /signature:\s+sha256=[0-9a-f]{64}/);
+  // The demo self-verifies with the (clearly labelled) demo secret
+  assert.match(out, /verifyPayoutWebhook: ok/);
+});
