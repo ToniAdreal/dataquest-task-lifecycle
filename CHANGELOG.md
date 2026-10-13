@@ -104,6 +104,13 @@ change type; no entry describes a feature that is not in the history.
   the batch's recorded `payoutAmount`s (1986, written out in the bench
   comments), and the README Benchmarks table refreshed from one real
   run.
+- Benchmark coverage for watchdog screening: `expiredTasks()` and
+  `staleTasks()` over a fixed batch of 12 mixed-state tasks under one
+  injected fixed `now` (with per-state dwell budgets) now appear in
+  `npm run bench`, with per-iteration self-checks pinning both
+  selections to the hand-counted expectations written out in the bench
+  comments (4 expired, 4 stale), and the README Benchmarks table
+  refreshed from one real run.
 - Package discoverability metadata: `package.json` now declares
   `keywords` (`task-lifecycle`, `state-machine`, `event-sourcing`,
   `sla`, `webhooks`, `payments`, `typescript`, `zero-dependency`).

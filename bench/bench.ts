@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the nine hot-path
+ * Measures real, locally-observed throughput for the ten hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -52,6 +52,15 @@
  *      the batch — the isolation rule is self-checked once, outside
  *      the timed loop, on a mixed batch.
  *
+ *  10. watchdog screening — `expiredTasks(tasks, now)` (SLA-overdue
+ *      screening) and `staleTasks(tasks, maxAgeByState, now)`
+ *      (per-state dwell screening) over a fixed batch of 12 tasks in
+ *      mixed states (see the watchdog fixture below for the per-task
+ *      composition and the hand-counted expectations), both under one
+ *      injected fixed `now`. This is the batch pass a watchdog polls
+ *      on every tick before dispatching EXPIRE / paging a human, as
+ *      opposed to the reconciliation passes above.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -66,11 +75,13 @@ import {
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
+  expiredTasks,
   historyFromNdjson,
   historyToNdjson,
   mismatchedPayouts,
   PayoutEventDedupe,
   replay,
+  staleTasks,
   TaskLifecycle,
   totalPaidOut,
   unreconciledPayouts,
@@ -284,6 +295,158 @@ const expectedTotalPaidOut = 1986;
 if (totalPaidOut(screeningBatch) !== expectedTotalPaidOut) {
   throw new Error(
     "benchmark fixture failed: totalPaidOut differs from the hand-computed expectation",
+  );
+}
+
+// Watchdog-screening batch: 12 tasks in mixed states, built with
+// fixed dispatch timestamps relative to BASE_MS (DAY = 86,400,000 ms).
+// The screening instant and budgets are fixed:
+//   WATCHDOG_NOW = BASE + 40 days (2026-02-10T00:00:00.000Z)
+//   maxAgeByState = { OPEN: 30 days, ACCEPTED: 7 days, IN_REVIEW: 7 days }
+// Per-task composition (deadline = SLA deadline on the CURRENT state;
+// dwell = WATCHDOG_NOW minus the last history entry's timestamp):
+//   WD-01 OPEN,      entered BASE+0d,  deadline BASE+10d (past)
+//                    -> expired YES; dwell 40d > 30d -> stale YES
+//   WD-02 OPEN,      entered BASE+35d, deadline BASE+50d (future)
+//                    -> expired no;  dwell 5d <= 30d -> stale no
+//   WD-03 PAID (terminal, full lifecycle), deadline on PAID BASE+10d
+//                    -> expired no (terminal); stale no (terminal)
+//   WD-04 ACCEPTED,  entered BASE+1d,  NO deadline
+//                    -> expired no;  dwell 39d > 7d -> stale YES
+//   WD-05 ACCEPTED,  entered BASE+38d, NO deadline
+//                    -> expired no;  dwell 2d <= 7d -> stale no
+//   WD-06 IN_REVIEW, entered BASE+2d,  deadline BASE+20d (past)
+//                    -> expired YES; dwell 38d > 7d -> stale YES
+//   WD-07 IN_REVIEW, entered BASE+39d, deadline BASE+60d (future)
+//                    -> expired no;  dwell 1d <= 7d -> stale no
+//   WD-08 OPEN,      entered BASE+5d,  NO deadline
+//                    -> expired no;  dwell 35d > 30d -> stale YES
+//   WD-09 DRAFT,     no history, NO deadline
+//                    -> expired no;  stale no (no measurable dwell)
+//   WD-10 CAPTURING, entered BASE+3d,  deadline BASE+15d (past)
+//                    -> expired YES; stale no (CAPTURING has no budget)
+//   WD-11 SUBMITTED, entered BASE+36d, deadline BASE+50d (future)
+//                    -> expired no;  stale no (SUBMITTED has no budget)
+//   WD-12 OPEN,      entered BASE+10d, deadline exactly WATCHDOG_NOW
+//                    -> expired YES (isOverdue is >= the deadline);
+//                       dwell exactly 30d -> stale no (stale is
+//                       strictly > the budget)
+// Hand-computed expectations, in batch order — written out here from
+// the composition above, never derived by calling the helpers:
+//   expiredTasks selects 4: WD-01, WD-06, WD-10, WD-12
+//   staleTasks   selects 4: WD-01, WD-04, WD-06, WD-08
+const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const WATCHDOG_NOW = new Date(BASE_MS + 40 * DAY_MS);
+const WATCHDOG_MAX_AGE = {
+  OPEN: 30 * DAY_MS,
+  ACCEPTED: 7 * DAY_MS,
+  IN_REVIEW: 7 * DAY_MS,
+};
+function buildWatchdogTask(
+  id: string,
+  steps: Array<{ event: TaskEvent; actor: string; atMs: number }>,
+  deadline?: { state: Parameters<TaskLifecycle["setSlaDeadline"]>[1]; atMs: number },
+): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  for (const step of steps) {
+    task.dispatch(step.event, {
+      actor: step.actor,
+      at: new Date(step.atMs).toISOString(),
+    });
+  }
+  if (deadline !== undefined) {
+    task.setSlaDeadline(new Date(deadline.atMs), deadline.state);
+  }
+  return task;
+}
+const watchdogPaidTask = buildPaidTask("BENCH-WD-03", {
+  quotedAmount: 100,
+  payoutAmount: 100,
+  payoutRef: "bench-pay-wd-03",
+});
+watchdogPaidTask.setSlaDeadline(new Date(BASE_MS + 10 * DAY_MS), "PAID");
+const watchdogBatch: TaskLifecycle[] = [
+  buildWatchdogTask("BENCH-WD-01", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS },
+  ], { state: "OPEN", atMs: BASE_MS + 10 * DAY_MS }),
+  buildWatchdogTask("BENCH-WD-02", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 35 * DAY_MS },
+  ], { state: "OPEN", atMs: BASE_MS + 50 * DAY_MS }),
+  watchdogPaidTask,
+  buildWatchdogTask("BENCH-WD-04", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 1 * DAY_MS },
+  ]),
+  buildWatchdogTask("BENCH-WD-05", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 37 * DAY_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 38 * DAY_MS },
+  ]),
+  buildWatchdogTask("BENCH-WD-06", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 1 * HOUR_MS },
+    { event: "START_CAPTURE", actor: "contributor", atMs: BASE_MS + 2 * HOUR_MS },
+    { event: "SUBMIT", actor: "contributor", atMs: BASE_MS + 3 * HOUR_MS },
+    { event: "BEGIN_REVIEW", actor: "reviewer", atMs: BASE_MS + 2 * DAY_MS },
+  ], { state: "IN_REVIEW", atMs: BASE_MS + 20 * DAY_MS }),
+  buildWatchdogTask("BENCH-WD-07", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 38 * DAY_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 38 * DAY_MS + 1 * HOUR_MS },
+    { event: "START_CAPTURE", actor: "contributor", atMs: BASE_MS + 38 * DAY_MS + 2 * HOUR_MS },
+    { event: "SUBMIT", actor: "contributor", atMs: BASE_MS + 38 * DAY_MS + 3 * HOUR_MS },
+    { event: "BEGIN_REVIEW", actor: "reviewer", atMs: BASE_MS + 39 * DAY_MS },
+  ], { state: "IN_REVIEW", atMs: BASE_MS + 60 * DAY_MS }),
+  buildWatchdogTask("BENCH-WD-08", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 5 * DAY_MS },
+  ]),
+  buildWatchdogTask("BENCH-WD-09", []),
+  buildWatchdogTask("BENCH-WD-10", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 1 * DAY_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 2 * DAY_MS },
+    { event: "START_CAPTURE", actor: "contributor", atMs: BASE_MS + 3 * DAY_MS },
+  ], { state: "CAPTURING", atMs: BASE_MS + 15 * DAY_MS }),
+  buildWatchdogTask("BENCH-WD-11", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 33 * DAY_MS },
+    { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 34 * DAY_MS },
+    { event: "START_CAPTURE", actor: "contributor", atMs: BASE_MS + 35 * DAY_MS },
+    { event: "SUBMIT", actor: "contributor", atMs: BASE_MS + 36 * DAY_MS },
+  ], { state: "SUBMITTED", atMs: BASE_MS + 50 * DAY_MS }),
+  buildWatchdogTask("BENCH-WD-12", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS + 10 * DAY_MS },
+  ], { state: "OPEN", atMs: BASE_MS + 40 * DAY_MS }),
+];
+const expectedWatchdogStates = [
+  "OPEN", "OPEN", "PAID", "ACCEPTED", "ACCEPTED", "IN_REVIEW",
+  "IN_REVIEW", "OPEN", "DRAFT", "CAPTURING", "SUBMITTED", "OPEN",
+];
+if (
+  watchdogBatch.length !== 12 ||
+  watchdogBatch.some((t, i) => t.state !== expectedWatchdogStates[i])
+) {
+  throw new Error("benchmark fixture failed: watchdog batch shape");
+}
+const expectedExpired = [
+  watchdogBatch[0],
+  watchdogBatch[5],
+  watchdogBatch[9],
+  watchdogBatch[11],
+];
+const expectedStale = [
+  watchdogBatch[0],
+  watchdogBatch[3],
+  watchdogBatch[5],
+  watchdogBatch[7],
+];
+const expectedExpiredIds = ["BENCH-WD-01", "BENCH-WD-06", "BENCH-WD-10", "BENCH-WD-12"];
+const expectedStaleIds = ["BENCH-WD-01", "BENCH-WD-04", "BENCH-WD-06", "BENCH-WD-08"];
+if (
+  expiredTasks(watchdogBatch, WATCHDOG_NOW).map((t) => t.id).join(",") !==
+    expectedExpiredIds.join(",") ||
+  staleTasks(watchdogBatch, WATCHDOG_MAX_AGE, WATCHDOG_NOW).map((t) => t.id).join(",") !==
+    expectedStaleIds.join(",")
+) {
+  throw new Error(
+    "benchmark fixture failed: watchdog counts differ from the hand-computed expectations",
   );
 }
 
@@ -625,6 +788,30 @@ function benchTotalPaidOut(): number {
   }, ITERATIONS);
 }
 
+function benchExpiredTasks(): number {
+  return measure(() => {
+    const out = expiredTasks(watchdogBatch, WATCHDOG_NOW);
+    if (
+      out.length !== expectedExpired.length ||
+      out.some((t, i) => t !== expectedExpired[i])
+    ) {
+      throw new Error("benchmark self-check failed: expiredTasks");
+    }
+  }, ITERATIONS);
+}
+
+function benchStaleTasks(): number {
+  return measure(() => {
+    const out = staleTasks(watchdogBatch, WATCHDOG_MAX_AGE, WATCHDOG_NOW);
+    if (
+      out.length !== expectedStale.length ||
+      out.some((t, i) => t !== expectedStale[i])
+    ) {
+      throw new Error("benchmark self-check failed: staleTasks");
+    }
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -641,7 +828,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -661,6 +848,8 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids)", ops: benchPayoutEventDedupe() },
   { path: "buildPayoutWebhooks (batch of 12 PAID tasks)", ops: benchBuildPayoutWebhooks() },
+  { path: "expiredTasks (12 mixed-state tasks)", ops: benchExpiredTasks() },
+  { path: "staleTasks (12 mixed-state tasks)", ops: benchStaleTasks() },
 ];
 
 console.log("path                                              throughput");
