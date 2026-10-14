@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A batch payout webhook segment in the CLI demo: after the
+  single-build webhook section, the demo runs `buildPayoutWebhooks`
+  over all three demo tasks (the PAID main task plus the EXPIRED SLA
+  branch task and the REJECTED dispute branch task) under the shared
+  demo secret, one shared fixed `now`, and a deterministic
+  `eventId` factory, so the segment is byte-identical on every run.
+  The PAID task's webhook is printed with its per-item `eventId` and
+  verified with `verifyPayoutWebhook`; each non-PAID task prints
+  only `{ taskId, error }`, and the closing summary states the
+  per-item isolation rule — a non-PAID task fails only itself and
+  never blocks later tasks (the third task is still attempted after
+  the second errors). `runDemo()` returns the batch results and
+  their per-item verification outcomes, and the demo tests pin the
+  structured results, the exact error text, and the segment's
+  determinism across two runs. Demo and tests only; no library
+  behavior change.
+
 - A DISPUTE appeal branch in the CLI demo: a third task (`DEMO-003`)
   is rejected in QA, the contributor DISPUTEs the rejection into
   DISPUTED, and a moderator's ARBITRATE_REJECT lands it back in

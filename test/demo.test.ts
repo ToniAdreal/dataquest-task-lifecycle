@@ -108,11 +108,18 @@ Payout webhook (signed PAYOUT_COMPLETE notification):
   at:           <timestamp>
   eventId:      <uuid>
   signature:    sha256=<signature>
-  verifyPayoutWebhook: ok`;
+  verifyPayoutWebhook: ok
+
+Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):
+  shared now: <timestamp> (eventIds from a deterministic factory)
+  DEMO-001: webhook eventId=evt_demo_batch_001 payoutRef=xfer-88f2 payoutAmount=10098.5 verifyPayoutWebhook: ok
+  DEMO-002: error: cannot build payout webhook: task DEMO-002 is in state EXPIRED, only PAID tasks have a completed settlement to announce
+  DEMO-003: error: cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce
+  batch: 1 webhook(s) built, 2 error(s) — a non-PAID task fails only itself and never blocks later tasks`;
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 79);
+  assert.equal(lines.length, 86);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -266,7 +273,7 @@ test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in
   assert.equal(disputeTask.state, "REJECTED");
   assert.equal(disputeTask.history.length, 8);
   // The dispute branch is printed after the SLA branch and before the
-  // payout webhook section, which still closes the demo.
+  // payout webhook section (the batch section now closes the demo).
   const disputeAt = text.indexOf("DISPUTE appeal branch");
   assert.ok(
     disputeAt > text.indexOf("SLA watchdog branch"),
@@ -278,6 +285,70 @@ test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in
   );
 });
 
+test("demo builds the batch payout webhooks in-process: per-item isolation and per-item verification", () => {
+  const { batchResults, batchVerified, lines } = runDemo();
+  const text = lines.join("\n");
+
+  // One result per demo task, in input order.
+  assert.equal(batchResults.length, 3);
+  assert.deepEqual(
+    batchResults.map((r) => r.taskId),
+    ["DEMO-001", "DEMO-002", "DEMO-003"],
+  );
+  // The PAID main task builds, with the deterministic factory's first
+  // eventId, the shared fixed `now`, and the audit-derived settlement
+  // fields; it verifies under the demo secret.
+  const first = batchResults[0];
+  assert.ok(first.webhook);
+  assert.equal(first.error, undefined);
+  assert.equal(first.webhook.payload.eventId, "evt_demo_batch_001");
+  assert.equal(first.webhook.payload.at, "2026-03-13T09:00:00.000Z");
+  assert.equal(first.webhook.payload.payoutRef, "xfer-88f2");
+  assert.equal(first.webhook.payload.payoutAmount, 10098.5);
+  assert.deepEqual(batchVerified, [true, undefined, undefined]);
+  assert.equal(
+    verifyPayoutWebhook(first.webhook.payload, first.webhook.signature, DEMO_WEBHOOK_SECRET),
+    true,
+  );
+  // Each non-PAID branch task lands as { taskId, error } only — the
+  // single build's exact error — and DEMO-003 is still attempted
+  // after DEMO-002 errors (per-item isolation, never blocking).
+  assert.equal(batchResults[1].webhook, undefined);
+  assert.equal(
+    batchResults[1].error,
+    "cannot build payout webhook: task DEMO-002 is in state EXPIRED, only PAID tasks have a completed settlement to announce",
+  );
+  assert.equal(batchResults[2].webhook, undefined);
+  assert.equal(
+    batchResults[2].error,
+    "cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce",
+  );
+  // The batch section is printed after the single webhook section
+  // and closes the demo, with one line per result plus the summary.
+  const batchAt = text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):");
+  assert.ok(
+    batchAt > text.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):"),
+    "batch section must follow the single webhook section",
+  );
+  assert.match(
+    text,
+    /DEMO-001: webhook eventId=evt_demo_batch_001 payoutRef=xfer-88f2 payoutAmount=10098\.5 verifyPayoutWebhook: ok/,
+  );
+  assert.match(text, /batch: 1 webhook\(s\) built, 2 error\(s\)/);
+});
+
+test("demo batch segment is deterministic: two runs print byte-identical batch lines", () => {
+  const batchLines = (ls: string[]) =>
+    ls.slice(ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"));
+  const a = batchLines(runDemo().lines);
+  const b = batchLines(runDemo().lines);
+  assert.equal(a.length, 6);
+  assert.deepEqual(a, b);
+  // The fixed shared `now` is printed literally — no wall clock, no
+  // random eventId anywhere in the segment.
+  assert.match(a.join("\n"), /shared now: 2026-03-13T09:00:00\.000Z/);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", () => {
   const out = execFileSync(
     "node",
@@ -285,7 +356,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 79);
+  assert.equal(out.trimEnd().split("\n").length, 86);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -9,7 +9,10 @@
  * DISPUTED and an arbitrator's ARBITRATE_REJECT lands it back in
  * REJECTED, consuming the task's one demo dispute), then build the
  * signed payout webhook for the settled task and verify it the way
- * a receiver would.
+ * a receiver would, and finally run the batch builder
+ * (`buildPayoutWebhooks`) over all three demo tasks — the
+ * settlement-peak pipeline in which each non-PAID task fails only
+ * itself and every built webhook is verified in turn.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -34,8 +37,10 @@ import { fileURLToPath } from "node:url";
 import {
   TaskLifecycle,
   buildPayoutWebhook,
+  buildPayoutWebhooks,
   expiredTasks,
   verifyPayoutWebhook,
+  type BuildPayoutWebhooksResult,
   type PayoutWebhook,
   type TaskEvent,
 } from "./index.js";
@@ -88,14 +93,17 @@ export interface DemoResult {
   disputeTask: TaskLifecycle;
   webhook: PayoutWebhook;
   webhookVerified: boolean;
+  batchResults: BuildPayoutWebhooksResult[];
+  batchVerified: Array<boolean | undefined>;
   lines: string[];
 }
 
 /**
  * Run the demo lifecycle without printing anything, and return the
  * three tasks, the watchdog screening result, the built + verified
- * payout webhook, and the exact lines `main()` prints — so tests can
- * assert on the demo itself, not just on the library.
+ * payout webhook, the batch webhook results with their per-item
+ * verification outcomes, and the exact lines `main()` prints — so
+ * tests can assert on the demo itself, not just on the library.
  */
 export function runDemo(): DemoResult {
   // The demo sets an explicit resubmit budget of 2 so the REJECT ->
@@ -238,7 +246,53 @@ export function runDemo(): DemoResult {
   const webhookVerified = verifyPayoutWebhook(payload, signature, DEMO_WEBHOOK_SECRET);
   lines.push(`  verifyPayoutWebhook: ${webhookVerified ? "ok" : "FAILED"}`);
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, lines };
+  // Batch payout webhook segment: the settlement-peak pipeline. A
+  // single build handles one settled task; at settlement time the
+  // norm is a batch — every demo task at once — built with
+  // buildPayoutWebhooks under the shared demo secret, one shared
+  // fixed `now`, and a deterministic eventId factory, so this whole
+  // segment is byte-identical on every run (no network, no
+  // randomness, no wall clock). The batch deliberately mixes the
+  // PAID main task with the two non-PAID branch tasks: each non-PAID
+  // task lands as `{ taskId, error }` only, fails only itself, and
+  // never blocks the tasks after it — DEMO-003 is still attempted
+  // after DEMO-002 errors. Every built webhook is then verified
+  // with the demo secret, exactly as in the single-build section.
+  const BATCH_NOW = new Date("2026-03-13T09:00:00.000Z");
+  let batchSeq = 0;
+  const batchResults = buildPayoutWebhooks(
+    [task, overdueTask, disputeTask],
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: BATCH_NOW,
+      eventIdFactory: () =>
+        `evt_demo_batch_${String(++batchSeq).padStart(3, "0")}`,
+    },
+  );
+  const batchVerified: Array<boolean | undefined> = batchResults.map((r) =>
+    r.webhook
+      ? verifyPayoutWebhook(r.webhook.payload, r.webhook.signature, DEMO_WEBHOOK_SECRET)
+      : undefined,
+  );
+  lines.push("", "Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):");
+  lines.push(
+    `  shared now: ${BATCH_NOW.toISOString()} (eventIds from a deterministic factory)`,
+  );
+  batchResults.forEach((r, i) => {
+    if (r.webhook) {
+      lines.push(
+        `  ${r.taskId}: webhook eventId=${r.webhook.payload.eventId} payoutRef=${r.webhook.payload.payoutRef} payoutAmount=${r.webhook.payload.payoutAmount} verifyPayoutWebhook: ${batchVerified[i] ? "ok" : "FAILED"}`,
+      );
+    } else {
+      lines.push(`  ${r.taskId}: error: ${r.error}`);
+    }
+  });
+  const batchBuilt = batchResults.filter((r) => r.webhook).length;
+  lines.push(
+    `  batch: ${batchBuilt} webhook(s) built, ${batchResults.length - batchBuilt} error(s) — a non-PAID task fails only itself and never blocks later tasks`,
+  );
+
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, batchResults, batchVerified, lines };
 }
 
 function main(): void {
