@@ -9,7 +9,11 @@
  * DISPUTED and an arbitrator's ARBITRATE_REJECT lands it back in
  * REJECTED, consuming the task's one demo dispute), then build the
  * signed payout webhook for the settled task and verify it the way
- * a receiver would, run the batch builder
+ * a receiver would, feed its `eventId` through a receiver-side
+ * `PayoutEventDedupe` under an injected fixed clock (the first
+ * delivery is booked, the redelivery is skipped as a duplicate,
+ * and the same id is accepted again once the demo TTL lapses),
+ * run the batch builder
  * (`buildPayoutWebhooks`) over all three demo tasks — the
  * settlement-peak pipeline in which each non-PAID task fails only
  * itself and every built webhook is verified in turn — and finally
@@ -42,6 +46,7 @@
 
 import { fileURLToPath } from "node:url";
 import {
+  PayoutEventDedupe,
   TaskLifecycle,
   buildPayoutWebhook,
   buildPayoutWebhooks,
@@ -104,6 +109,9 @@ export interface DemoResult {
   disputeTask: TaskLifecycle;
   webhook: PayoutWebhook;
   webhookVerified: boolean;
+  dedupeFirst: boolean;
+  dedupeRedelivery: boolean;
+  dedupeAfterTtl: boolean;
   batchResults: BuildPayoutWebhooksResult[];
   batchVerified: Array<boolean | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -117,7 +125,8 @@ export interface DemoResult {
 /**
  * Run the demo lifecycle without printing anything, and return the
  * five tasks, the watchdog screening result, the built + verified
- * payout webhook, the batch webhook results with their per-item
+ * payout webhook, the receiver-side dedupe outcomes for its
+ * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the reconciliation screening results with
  * the paid-out total, and the exact lines `main()` prints — so
  * tests can assert on the demo itself, not just on the library.
@@ -263,6 +272,53 @@ export function runDemo(): DemoResult {
   const webhookVerified = verifyPayoutWebhook(payload, signature, DEMO_WEBHOOK_SECRET);
   lines.push(`  verifyPayoutWebhook: ${webhookVerified ? "ok" : "FAILED"}`);
 
+  // Receiver-side dedupe segment: the other half of the webhook
+  // story. Everything above is the sender's view — build, sign,
+  // verify. A receiver that stopped at verification would still
+  // book the payout twice when the sender (or a fan-out retry)
+  // re-delivers the same event, so deduplication on `eventId` is
+  // the receiver's own duty (the other half of the at-least-once
+  // delivery semantics the README describes). The main webhook's
+  // eventId is fed to a PayoutEventDedupe under an injected fixed
+  // clock — starting at 2026-03-18T09:00:00.000Z and advanced by
+  // hand, so no wall clock is read here:
+  //   delivery 1 — first sighting: checkAndRecord returns false,
+  //     the receiver books the payout;
+  //   delivery 2 — the same eventId again within the TTL:
+  //     checkAndRecord returns true (duplicate), the receiver
+  //     acknowledges the delivery and skips it, booking nothing
+  //     twice;
+  //   delivery 3 — the clock is advanced by exactly the TTL
+  //     (60_000 ms; the demo shortens the library default of
+  //     3_600_000 ms so the expiry act fits the script): at
+  //     exactly ttlMs the first-seen record has expired (the
+  //     boundary rule in PayoutEventDedupe's docs), so the same
+  //     id counts as unseen again and checkAndRecord returns
+  //     false — accepted again.
+  const DEDUPE_TTL_MS = 60_000;
+  let dedupeNowMs = Date.parse("2026-03-18T09:00:00.000Z");
+  const dedupe = new PayoutEventDedupe({
+    ttlMs: DEDUPE_TTL_MS,
+    now: () => dedupeNowMs,
+  });
+  lines.push("", "Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):");
+  lines.push(
+    `  dedupe ttl: ${DEDUPE_TTL_MS} ms (demo policy; the library default is 3600000 ms) — clock injected and fixed at ${new Date(dedupeNowMs).toISOString()}`,
+  );
+  const dedupeFirst = dedupe.checkAndRecord(payload.eventId);
+  lines.push(
+    `  delivery 1: eventId ${payload.eventId} -> checkAndRecord ${dedupeFirst} (new event, payout booked)`,
+  );
+  const dedupeRedelivery = dedupe.checkAndRecord(payload.eventId);
+  lines.push(
+    `  delivery 2: same eventId redelivered -> checkAndRecord ${dedupeRedelivery} (duplicate, skipped — no second booking)`,
+  );
+  dedupeNowMs += DEDUPE_TTL_MS;
+  const dedupeAfterTtl = dedupe.checkAndRecord(payload.eventId);
+  lines.push(
+    `  delivery 3: clock advanced by exactly the ttl to ${new Date(dedupeNowMs).toISOString()} -> checkAndRecord ${dedupeAfterTtl} (record expired at the ttl boundary, accepted again)`,
+  );
+
   // Batch payout webhook segment: the settlement-peak pipeline. A
   // single build handles one settled task; at settlement time the
   // norm is a batch — every demo task at once — built with
@@ -403,7 +459,7 @@ export function runDemo(): DemoResult {
     `  totalPaidOut: ${totalPaid} (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines };
 }
 
 function main(): void {

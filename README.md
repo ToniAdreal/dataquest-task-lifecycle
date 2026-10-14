@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 504 tests, all local
+npm test   # 506 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -34,9 +34,14 @@ ARBITRATE_REJECT lands it back in REJECTED — not a terminal state; the demo
 sets `maxDisputes: 1` and uses 1 of the 1, while the library default is
 unlimited; every branch timestamp is a fixed literal), and finally the
 signed payout webhook for the settled task built from that history and
-verified with the demo secret, a batch segment that runs
-`buildPayoutWebhooks` over all three demo tasks under one shared fixed
-`now` and a deterministic `eventId` factory (the PAID task builds and
+verified with the demo secret, a receiver-side dedupe segment that
+feeds the webhook's `eventId` through a `PayoutEventDedupe` under an
+injected fixed clock (the first delivery is booked, a redelivery of
+the same `eventId` is skipped as a duplicate, and the same id is
+accepted again once the demo TTL — 60 seconds, against the library
+default of one hour — lapses at exactly its boundary), a batch
+segment that runs `buildPayoutWebhooks` over all three demo tasks
+under one shared fixed `now` and a deterministic `eventId` factory (the PAID task builds and
 verifies; each non-PAID task lands as `{ taskId, error }` only and
 never blocks the tasks after it), and a final reconciliation
 screening branch that drives two more tasks to PAID under
@@ -1070,7 +1075,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 504 tests covering the happy path, reject→resubmit
+`npm test` runs 506 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

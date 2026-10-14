@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
-import { verifyPayoutWebhook } from "../src/index.js";
+import { PayoutEventDedupe, verifyPayoutWebhook } from "../src/index.js";
 
 const repoRoot = path.dirname(
   path.dirname(path.dirname(fileURLToPath(import.meta.url))),
@@ -110,6 +110,12 @@ Payout webhook (signed PAYOUT_COMPLETE notification):
   signature:    sha256=<signature>
   verifyPayoutWebhook: ok
 
+Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):
+  dedupe ttl: 60000 ms (demo policy; the library default is 3600000 ms) — clock injected and fixed at <timestamp>
+  delivery 1: eventId <uuid> -> checkAndRecord false (new event, payout booked)
+  delivery 2: same eventId redelivered -> checkAndRecord true (duplicate, skipped — no second booking)
+  delivery 3: clock advanced by exactly the ttl to <timestamp> -> checkAndRecord false (record expired at the ttl boundary, accepted again)
+
 Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):
   shared now: <timestamp> (eventIds from a deterministic factory)
   DEMO-001: webhook eventId=evt_demo_batch_001 payoutRef=xfer-88f2 payoutAmount=10098.5 verifyPayoutWebhook: ok
@@ -145,7 +151,7 @@ Task DEMO-005: DRAFT
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 112);
+  assert.equal(lines.length, 118);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -223,6 +229,73 @@ test("demo builds the payout webhook from the settled task and verifies it (stru
     "payout webhook section must follow the SLA branch",
   );
   assert.match(text, /verifyPayoutWebhook: ok/);
+});
+
+test("demo shows the receiver-side dedupe segment in-process: first delivery booked, redelivery skipped, same id accepted again after the TTL", () => {
+  const { dedupeFirst, dedupeRedelivery, dedupeAfterTtl, webhook, lines } = runDemo();
+  const text = lines.join("\n");
+
+  // The three structured outcomes are the hand-written expectations
+  // for checkAndRecord's contract (false = first sighting, true =
+  // duplicate within the TTL, false again once the record expired).
+  assert.equal(dedupeFirst, false);
+  assert.equal(dedupeRedelivery, true);
+  assert.equal(dedupeAfterTtl, false);
+  // An independent dedupe instance under the same fixed-clock /
+  // TTL setup reproduces the same three outcomes for the demo
+  // webhook's eventId — the demo segment is not self-certifying.
+  let nowMs = Date.parse("2026-03-18T09:00:00.000Z");
+  const replay = new PayoutEventDedupe({ ttlMs: 60_000, now: () => nowMs });
+  assert.equal(replay.checkAndRecord(webhook.payload.eventId), false);
+  assert.equal(replay.checkAndRecord(webhook.payload.eventId), true);
+  nowMs += 60_000; // exactly the TTL: the record has expired
+  assert.equal(replay.checkAndRecord(webhook.payload.eventId), false);
+  // The segment is printed after the single webhook section and
+  // before the batch section, with the three delivery lines
+  // verbatim (the fixed clock start and the TTL-advanced instant
+  // are fixed literals).
+  const dedupeAt = text.indexOf("Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):");
+  assert.ok(
+    dedupeAt > text.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):"),
+    "dedupe segment must follow the single webhook section",
+  );
+  assert.ok(
+    text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):") > dedupeAt,
+    "batch section must follow the dedupe segment",
+  );
+  assert.match(
+    text,
+    /dedupe ttl: 60000 ms \(demo policy; the library default is 3600000 ms\) — clock injected and fixed at 2026-03-18T09:00:00\.000Z/,
+  );
+  assert.match(text, /delivery 1: eventId \S+ -> checkAndRecord false \(new event, payout booked\)/);
+  assert.match(
+    text,
+    /delivery 2: same eventId redelivered -> checkAndRecord true \(duplicate, skipped — no second booking\)/,
+  );
+  assert.match(
+    text,
+    /delivery 3: clock advanced by exactly the ttl to 2026-03-18T09:01:00\.000Z -> checkAndRecord false \(record expired at the ttl boundary, accepted again\)/,
+  );
+});
+
+test("demo dedupe segment is deterministic in outcome: two runs agree on all three checkAndRecord results", () => {
+  const dedupeLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):"),
+      ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):") - 1,
+    );
+  const a = runDemo();
+  const b = runDemo();
+  // Header + ttl line + 3 delivery lines; the only varying value
+  // is the main webhook's random eventId, normalized away — the
+  // segment's clock is injected and fixed, never the wall clock.
+  const segA = dedupeLines(a.lines);
+  assert.equal(segA.length, 5);
+  assert.equal(normalize(segA.join("\n")), normalize(dedupeLines(b.lines).join("\n")));
+  assert.deepEqual(
+    [a.dedupeFirst, a.dedupeRedelivery, a.dedupeAfterTtl],
+    [b.dedupeFirst, b.dedupeRedelivery, b.dedupeAfterTtl],
+  );
 });
 
 test("demo shows the SLA watchdog branch in-process: screening finds DEMO-002, then EXPIRE lands it in EXPIRED", () => {
@@ -474,7 +547,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 112);
+  assert.equal(out.trimEnd().split("\n").length, 118);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

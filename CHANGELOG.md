@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A receiver-side dedupe segment in the CLI demo: after the single
+  payout webhook is built and verified, its `eventId` is fed
+  through a `PayoutEventDedupe` under an injected fixed clock
+  (starting 2026-03-18T09:00:00.000Z, advanced by hand — no wall
+  clock). The first delivery is a new event and the payout is
+  booked, a redelivery of the same `eventId` is reported as a
+  duplicate and skipped, and once the clock advances by exactly
+  the demo TTL (60,000 ms; the library default is 3,600,000 ms)
+  the same id is accepted again at the TTL boundary.
+  `runDemo()` returns the three `checkAndRecord` outcomes, and
+  the demo tests pin the structured results (cross-checked
+  against an independent dedupe instance under the same clock),
+  the exact printed lines, and the segment's determinism across
+  two runs. Demo and tests only; no library behavior change.
 - A reconciliation screening branch in the CLI demo: after the
   batch webhook segment, two more tasks are driven to PAID under
   fixed-literal timestamps, each with one deliberate flaw —
