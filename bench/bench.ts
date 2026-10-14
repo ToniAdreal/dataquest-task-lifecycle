@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the eleven hot-path
+ * Measures real, locally-observed throughput for the twelve hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -87,6 +87,18 @@
  *      WD-04 (ACCEPTED) is abandoned, WD-01 / WD-08 (OPEN) and WD-06
  *      (IN_REVIEW) fail in isolation.
  *
+ *  12. payout Retry-After parsing — `parsePayoutRetryAfter(value,
+ *      nowMs)` over a fixed 11-value corpus under one injected fixed
+ *      `nowMs` (see the retry-after fixture below for the composition
+ *      and the hand-written expectation for every value). This is the
+ *      pure parsing step every 429 response pays before a delivery
+ *      retry can be scheduled: delay-seconds values, HTTP-dates in
+ *      the future and the past, signed numbers, garbage, and absent
+ *      values, whose outcomes are respectively a wait in
+ *      milliseconds, a clamp to 0, or `undefined` (the caller then
+ *      falls back to exponential backoff). No network and no wall
+ *      clock: `nowMs` is injected, never read.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -107,6 +119,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   mismatchedPayouts,
+  parsePayoutRetryAfter,
   PayoutEventDedupe,
   replay,
   staleTasks,
@@ -868,6 +881,58 @@ if (
   );
 }
 
+// Retry-After parsing fixture: a fixed 11-value corpus parsed under
+// one injected fixed instant, RETRY_NOW_MS =
+// Date.parse("2026-06-01T12:00:00.000Z"). The HTTP-date strings are
+// built with toUTCString() from that instant; toUTCString() has
+// one-second precision and RETRY_NOW_MS sits exactly on a whole
+// second, so the date expectations below are exact, not ranges.
+// Hand-written expectations — written out here from the documented
+// semantics of parsePayoutRetryAfter, never derived by calling it:
+//   "120"                          -> 120,000 (120 s x 1,000)
+//   "0"                            -> 0
+//   "2.5"                          -> 2,500 (fractional seconds)
+//   "  30 "                        -> 30,000 (value is trimmed)
+//   HTTP-date at RETRY_NOW + 5,000 -> 5,000 (future date delta)
+//   HTTP-date at RETRY_NOW - 1,000 -> 0 (past date clamps, never
+//                                        negative)
+//   "-5"                           -> undefined (signed numbers are
+//                                        rejected explicitly, not
+//                                        read as a date / year)
+//   "+5"                           -> undefined (same signed rule)
+//   "banana"                       -> undefined (unparsable; the
+//                                        caller falls back to
+//                                        exponential backoff)
+//   null                           -> undefined (absent header)
+//   undefined                      -> undefined (absent header)
+const RETRY_NOW_MS = Date.parse("2026-06-01T12:00:00.000Z");
+const retryAfterCorpus: Array<{
+  value: string | null | undefined;
+  expected: number | undefined;
+}> = [
+  { value: "120", expected: 120_000 },
+  { value: "0", expected: 0 },
+  { value: "2.5", expected: 2_500 },
+  { value: "  30 ", expected: 30_000 },
+  { value: new Date(RETRY_NOW_MS + 5_000).toUTCString(), expected: 5_000 },
+  { value: new Date(RETRY_NOW_MS - 1_000).toUTCString(), expected: 0 },
+  { value: "-5", expected: undefined },
+  { value: "+5", expected: undefined },
+  { value: "banana", expected: undefined },
+  { value: null, expected: undefined },
+  { value: undefined, expected: undefined },
+];
+function checkRetryAfterCorpus(where: string): void {
+  for (const { value, expected } of retryAfterCorpus) {
+    if (parsePayoutRetryAfter(value, RETRY_NOW_MS) !== expected) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time exhaustive validation (outside the timed loop): every
+// corpus value returns exactly its hand-written expectation.
+checkRetryAfterCorpus("parsePayoutRetryAfter fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1080,6 +1145,14 @@ function benchActOnStaleTasks(): number {
   }, ITERATIONS);
 }
 
+function benchParsePayoutRetryAfter(): number {
+  return measure(() => {
+    // Per-iteration self-check: every corpus value returns exactly
+    // its hand-written expectation (see the fixture above).
+    checkRetryAfterCorpus("parsePayoutRetryAfter");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1096,7 +1169,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1121,6 +1194,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "staleTasks (12 mixed-state tasks)", ops: benchStaleTasks() },
   { path: "expireOverdueTasks (12 mixed-state tasks, fresh fixture)", ops: benchExpireOverdueTasks() },
   { path: "actOnStaleTasks (12 mixed-state tasks, fresh fixture)", ops: benchActOnStaleTasks() },
+  { path: "parsePayoutRetryAfter (11-value corpus)", ops: benchParsePayoutRetryAfter() },
 ];
 
 console.log("path                                              throughput");

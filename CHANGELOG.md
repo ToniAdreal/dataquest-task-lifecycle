@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for payout Retry-After parsing:
+  `parsePayoutRetryAfter()` over a fixed 11-value corpus
+  (delay-seconds, a future HTTP-date, a past HTTP-date, signed
+  numbers, garbage, and absent values) under an injected fixed
+  `nowMs` now appears in `npm run bench`. Per-iteration
+  self-checks pin every returned value to the hand-written
+  expectations in the bench comments (a past date clamps to 0,
+  signed values are rejected, absent / garbage values yield
+  `undefined`), and an exhaustive check runs once outside the
+  timed loop. No network and no wall-clock reads. The README
+  Benchmarks table is refreshed from one real run. Benchmark
+  only; no library behavior change.
 - An event-sourcing replay segment closing the CLI demo: the main
   task's 12-entry audit history is exported with
   `historyToNdjson()`, printed in full (one canonical JSON entry

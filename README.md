@@ -1226,7 +1226,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the eleven hot
+`npm run bench` measures locally-observed throughput for the twelve hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
@@ -1242,7 +1242,9 @@ payout webhook building (`buildPayoutWebhooks` over
 a batch of PAID tasks), watchdog screening (`expiredTasks` /
 `staleTasks` over a batch of mixed-state tasks), and watchdog
 execution (`expireOverdueTasks` / `actOnStaleTasks` over the same
-batch). Fixtures are
+batch), and payout Retry-After parsing
+(`parsePayoutRetryAfter` over a fixed corpus of header values).
+Fixtures are
 deterministic — one task driven through the full
 `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a fixed
 webhook secret, payload timestamp, and `eventId`; the screening paths
@@ -1295,35 +1297,47 @@ per-iteration self-checks pin the hand-counted outcomes (expire:
 WD-01, WD-10 and WD-12 expire, WD-06 — IN_REVIEW, which has no
 `EXPIRE` edge — fails in isolation; stale action: only WD-04 —
 ACCEPTED — is abandoned, WD-01 / WD-08 (OPEN) and WD-06 (IN_REVIEW)
-fail in isolation) and the resulting task states. One real run on
+fail in isolation) and the resulting task states. The
+`parsePayoutRetryAfter` path parses a fixed 11-value corpus on every
+iteration under one injected fixed `nowMs`
+(`2026-06-01T12:00:00.000Z`, never the wall clock, and no network):
+delay-seconds values (`120`, `0`, `2.5`, and a whitespace-padded
+`30`), a future HTTP-date, a past HTTP-date, signed numbers,
+garbage, and absent (`null` / `undefined`) values. Its per-iteration
+self-check pins every returned value to the hand-written expectation
+written out in the bench comments (a future date yields its exact
+delta, a past date clamps to 0, and signed / garbage / absent values
+yield `undefined`, so the caller falls back to exponential
+backoff); one timed pass is one full corpus pass of 11 parses. One real run on
 2026-10-14:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~15,100 ops/sec (~66 µs/op) |
-| replay (8-entry history) | ~14,400 ops/sec (~69 µs/op) |
-| fromHistory (8-entry history) | ~5,500 ops/sec (~183 µs/op) |
-| verifyHistoryChain (8 entries) | ~38,800 ops/sec (~26 µs/op) |
-| buildPayoutWebhook (sign) | ~45,000 ops/sec (~22 µs/op) |
-| verifyPayoutWebhook | ~66,100 ops/sec (~15 µs/op) |
-| historyToNdjson (8 entries) | ~11,400 ops/sec (~88 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~17,600 ops/sec (~57 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~25,200 ops/sec (~40 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~59,700 ops/sec (~17 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~72,700 ops/sec (~14 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~5,600 ops/sec (~177 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,876,000 ops/sec (~0.26 µs/op) |
-| PayoutEventDedupe.restore (1,000-entry snapshot) | ~3,000 ops/sec (~336 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~8,800 ops/sec (~114 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~387,600 ops/sec (~2.58 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~164,500 ops/sec (~6.08 µs/op) |
-| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~3,900 ops/sec (~256 µs/op) |
-| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~3,400 ops/sec (~295 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~17,400 ops/sec (~58 µs/op) |
+| replay (8-entry history) | ~9,600 ops/sec (~105 µs/op) |
+| fromHistory (8-entry history) | ~11,900 ops/sec (~84 µs/op) |
+| verifyHistoryChain (8 entries) | ~44,500 ops/sec (~22 µs/op) |
+| buildPayoutWebhook (sign) | ~105,900 ops/sec (~9.4 µs/op) |
+| verifyPayoutWebhook | ~131,000 ops/sec (~7.6 µs/op) |
+| historyToNdjson (8 entries) | ~17,300 ops/sec (~58 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~19,100 ops/sec (~52 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~52,700 ops/sec (~19 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~94,700 ops/sec (~10.6 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~99,300 ops/sec (~10 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~9,400 ops/sec (~106 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~986,900 ops/sec (~1.01 µs/op) |
+| PayoutEventDedupe.restore (1,000-entry snapshot) | ~4,400 ops/sec (~229 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~10,300 ops/sec (~97 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~380,600 ops/sec (~2.63 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~132,100 ops/sec (~7.57 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~4,300 ops/sec (~233 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~3,700 ops/sec (~273 µs/op) |
+| parsePayoutRetryAfter (11-value corpus) | ~534,100 ops/sec (~1.87 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host, so numbers vary run to run — a second run in the same
-session measured the restore path at ~3,900 ops/sec, the same order
-of magnitude). Machine-local measurements
+session measured the new parsePayoutRetryAfter path at ~563,500
+ops/sec, the same order of magnitude). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.
 
