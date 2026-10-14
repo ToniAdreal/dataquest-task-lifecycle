@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 506 tests, all local
+npm test   # 508 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -50,7 +50,14 @@ fixed-literal timestamps — one settled with no `payoutRef` on its
 quote — and screens all five demo tasks with
 `unreconciledPayouts()` / `mismatchedPayouts()` / `totalPaidOut()`:
 each flawed task is flagged by exactly one screen and the paid-out
-total is the hand-computed 16349.
+total is the hand-computed 16349 — and a closing event-sourcing
+segment that exports the main task's audit history with
+`historyToNdjson()`, prints all 12 NDJSON lines, parses them back
+with `historyFromNdjson()`, and replays them with
+`TaskLifecycle.fromHistory()`: the replayed task lands in the same
+PAID state with the same 12-entry history, last entry included (the
+segment adds no new nondeterminism — it only serializes the main
+task's existing history).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1075,7 +1082,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 506 tests covering the happy path, reject→resubmit
+`npm test` runs 508 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -4,7 +4,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
-import { PayoutEventDedupe, verifyPayoutWebhook } from "../src/index.js";
+import {
+  PayoutEventDedupe,
+  TaskLifecycle,
+  historyFromNdjson,
+  historyToNdjson,
+  verifyPayoutWebhook,
+} from "../src/index.js";
 
 const repoRoot = path.dirname(
   path.dirname(path.dirname(fileURLToPath(import.meta.url))),
@@ -17,8 +23,11 @@ const repoRoot = path.dirname(
  * any two runs of the old script: ISO timestamps (the main task's
  * wall-clock history timestamps, from which the webhook `at` also
  * derives), the webhook eventId (a random UUID), and the HMAC
- * signature (a function of those). Every other byte — wording,
- * spacing, ordering, blank lines — must match exactly.
+ * signature (a function of those), and the audit hash-chain links
+ * (`prevHash` / `hash`) carried by the NDJSON export lines, which
+ * are hashes of entries containing those timestamps. Every other
+ * byte — wording, spacing, ordering, blank lines — must match
+ * exactly.
  */
 function normalize(text: string): string {
   return text
@@ -27,7 +36,8 @@ function normalize(text: string): string {
       /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/g,
       "<uuid>",
     )
-    .replace(/sha256=[0-9a-f]{64}/g, "sha256=<signature>");
+    .replace(/sha256=[0-9a-f]{64}/g, "sha256=<signature>")
+    .replace(/"(prevHash|hash)":"[0-9a-f]{64}"/g, '"$1":"<hash>"');
 }
 
 const GOLDEN_DEMO_OUTPUT = `Task DEMO-001: DRAFT
@@ -147,11 +157,29 @@ Task DEMO-005: DRAFT
   screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005 (all five demo tasks)
   unreconciledPayouts: DEMO-004 (1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry)
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
-  totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`;
+  totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)
+
+Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
+  historyToNdjson(DEMO-001): 12 lines (one JSON entry per line, trailing newline)
+  {"seq":1,"event":"PUBLISH","from":"DRAFT","to":"OPEN","at":"<timestamp>","actor":"system","note":"Researcher publishes the data-collection task","prevHash":"GENESIS","hash":"<hash>"}
+  {"seq":2,"event":"ACCEPT","from":"OPEN","to":"ACCEPTED","at":"<timestamp>","actor":"contributor","note":"Contributor picks up the task","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":3,"event":"START_CAPTURE","from":"ACCEPTED","to":"CAPTURING","at":"<timestamp>","actor":"contributor","note":"Data capture begins","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":4,"event":"SUBMIT","from":"CAPTURING","to":"SUBMITTED","at":"<timestamp>","actor":"contributor","note":"Batch uploaded for QA","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":5,"event":"BEGIN_REVIEW","from":"SUBMITTED","to":"IN_REVIEW","at":"<timestamp>","actor":"reviewer","note":"QA specialist starts review","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":6,"event":"REJECT","from":"IN_REVIEW","to":"REJECTED","at":"<timestamp>","actor":"reviewer","note":"Sample fails QA: gaps in the capture","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":7,"event":"RESUBMIT","from":"REJECTED","to":"CAPTURING","at":"<timestamp>","actor":"contributor","note":"Contributor fixes the batch and resubmits (uses 1 of the demo's 2 allowed RESUBMITs)","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":8,"event":"SUBMIT","from":"CAPTURING","to":"SUBMITTED","at":"<timestamp>","actor":"contributor","note":"Revised batch uploaded for QA","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":9,"event":"BEGIN_REVIEW","from":"SUBMITTED","to":"IN_REVIEW","at":"<timestamp>","actor":"reviewer","note":"QA specialist re-reviews the revised batch","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":10,"event":"APPROVE","from":"IN_REVIEW","to":"APPROVED","at":"<timestamp>","actor":"reviewer","note":"Revised sample passes QA","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":11,"event":"REQUEST_PAYOUT","from":"APPROVED","to":"PAYOUT_PENDING","at":"<timestamp>","actor":"contributor","note":"Contributor requests payout","prevHash":"<hash>","hash":"<hash>"}
+  {"seq":12,"event":"PAYOUT_COMPLETE","from":"PAYOUT_PENDING","to":"PAID","at":"<timestamp>","actor":"system","note":"Finance settles the payout","payoutRef":"xfer-88f2","payoutAmount":10098.5,"prevHash":"<hash>","hash":"<hash>"}
+  historyFromNdjson: 12 entries parsed back
+  TaskLifecycle.fromHistory(DEMO-001, entries): state PAID, 12 history entries
+  replay matches the original (state + full history): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID`;
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 118);
+  assert.equal(lines.length, 136);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -509,8 +537,9 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.equal(mismatchedTask.state, "PAID");
   assert.equal(unreconciledTask.history.length, 8);
   assert.equal(mismatchedTask.history.length, 8);
-  // The branch is printed after the batch section and closes the
-  // demo, with the three screening lines verbatim.
+  // The branch is printed after the batch section (the
+  // event-sourcing replay segment follows it and closes the demo),
+  // with the three screening lines verbatim.
   const reconAt = text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):");
   assert.ok(
     reconAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
@@ -530,7 +559,10 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
 
 test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", () => {
   const reconLines = (ls: string[]) =>
-    ls.slice(ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"));
+    ls.slice(
+      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
   const a = reconLines(runDemo().lines);
   const b = reconLines(runDemo().lines);
   // Header + (task header + 8 transitions + note) x2 + 4 screening
@@ -540,6 +572,92 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   assert.deepEqual(a, b);
 });
 
+
+test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", () => {
+  const { task, ndjsonText, replayedTask, lines } = runDemo();
+  const text = lines.join("\n");
+
+  // The export is the main task's full history: 12 NDJSON lines,
+  // one canonical JSON entry per line, trailing newline, seq 1..12
+  // in order.
+  assert.ok(ndjsonText.endsWith("\n"));
+  const ndjsonLines = ndjsonText.trimEnd().split("\n");
+  assert.equal(ndjsonLines.length, 12);
+  ndjsonLines.forEach((line, i) => {
+    const entry = JSON.parse(line) as { seq: number };
+    assert.equal(entry.seq, i + 1);
+  });
+  // Parsing the export back yields the original history entry for
+  // entry (deep equality) — the export is not a lossy summary.
+  assert.deepEqual(historyFromNdjson(ndjsonText), [...task.history]);
+  // The replayed task matches the hand-written expectations: same
+  // id, PAID terminal state, the full 12-entry history deep-equal
+  // to the original's, last entry included.
+  assert.equal(replayedTask.id, "DEMO-001");
+  assert.equal(replayedTask.state, "PAID");
+  assert.equal(replayedTask.isTerminal, true);
+  assert.deepEqual([...replayedTask.history], [...task.history]);
+  const last = replayedTask.history.at(-1)!;
+  assert.deepEqual(
+    [last.seq, last.event, last.from, last.to],
+    [12, "PAYOUT_COMPLETE", "PAYOUT_PENDING", "PAID"],
+  );
+  // An independent replay of the parsed entries lands identically —
+  // the demo segment is not self-certifying — and re-exporting the
+  // replayed task reproduces the NDJSON byte for byte.
+  const independent = TaskLifecycle.fromHistory("DEMO-001", historyFromNdjson(ndjsonText));
+  assert.equal(independent.state, "PAID");
+  assert.deepEqual([...independent.history], [...task.history]);
+  assert.equal(historyToNdjson(replayedTask), ndjsonText);
+  // The segment is printed after the reconciliation branch and
+  // closes the demo, with every NDJSON line printed in full and
+  // the replay lines verbatim.
+  const replayAt = text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):");
+  assert.ok(
+    replayAt > text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+    "event-sourcing segment must follow the reconciliation branch",
+  );
+  assert.match(
+    text,
+    /historyToNdjson\(DEMO-001\): 12 lines \(one JSON entry per line, trailing newline\)/,
+  );
+  for (const line of ndjsonLines) {
+    assert.ok(text.includes(`  ${line}`), "every NDJSON line is printed in full");
+  }
+  assert.match(text, /historyFromNdjson: 12 entries parsed back/);
+  assert.match(
+    text,
+    /TaskLifecycle\.fromHistory\(DEMO-001, entries\): state PAID, 12 history entries/,
+  );
+  assert.match(
+    text,
+    /replay matches the original \(state \+ full history\): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID/,
+  );
+});
+
+test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
+  const a = runDemo();
+  const b = runDemo();
+  const segA = segment(a.lines);
+  // Blank separator + header + intro line + 12 NDJSON lines + the
+  // parsed-count, fromHistory, and match lines.
+  assert.equal(segA.length, 18);
+  // The only varying values are the ones the main task already
+  // varied on between any two runs: its wall-clock history
+  // timestamps and the hash-chain links derived from them, both
+  // replaced by normalize(). The segment itself reads no new wall
+  // clock, no randomness, and no network.
+  assert.equal(normalize(segA.join("\n")), normalize(segment(b.lines).join("\n")));
+  assert.equal(a.replayedTask.state, "PAID");
+  assert.equal(b.replayedTask.state, "PAID");
+  assert.equal(a.ndjsonText.trimEnd().split("\n").length, 12);
+  assert.equal(b.ndjsonText.trimEnd().split("\n").length, 12);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", () => {
   const out = execFileSync(
     "node",
@@ -547,7 +665,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 118);
+  assert.equal(out.trimEnd().split("\n").length, 136);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -23,7 +23,12 @@
  * less than its `ACCEPT` quote, screened together with the three
  * earlier tasks by `unreconciledPayouts()` / `mismatchedPayouts()`
  * / `totalPaidOut()` — the post-settlement finance pass a platform
- * runs after payout day.
+ * runs after payout day — and finally an event-sourcing replay
+ * segment: the main task's audit history is exported with
+ * `historyToNdjson()`, printed in full, parsed back with
+ * `historyFromNdjson()`, and replayed with
+ * `TaskLifecycle.fromHistory()` — the history alone, as the single
+ * source of truth, rebuilds the same PAID terminal state.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -32,8 +37,9 @@
  * The script is structured as an importable `runDemo()` (the same
  * shape as the sibling demos in rfc9421-signing-demo and
  * escrow-state-machine-ts): it returns all five tasks, the screening
- * results, the built webhook and its verification outcome, plus the
- * exact `lines` the CLI prints — so tests assert on structured values
+ * results, the built webhook and its verification outcome, the
+ * NDJSON export of the main task's history and the task replayed
+ * from it, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -51,6 +57,8 @@ import {
   buildPayoutWebhook,
   buildPayoutWebhooks,
   expiredTasks,
+  historyFromNdjson,
+  historyToNdjson,
   mismatchedPayouts,
   payoutMismatch,
   totalPaidOut,
@@ -119,6 +127,8 @@ export interface DemoResult {
   unreconciledFound: TaskLifecycle[];
   mismatchedFound: TaskLifecycle[];
   totalPaid: number;
+  ndjsonText: string;
+  replayedTask: TaskLifecycle;
   lines: string[];
 }
 
@@ -128,8 +138,10 @@ export interface DemoResult {
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the reconciliation screening results with
- * the paid-out total, and the exact lines `main()` prints — so
- * tests can assert on the demo itself, not just on the library.
+ * the paid-out total, the NDJSON export of the main task's history
+ * and the task replayed from that export, and the exact lines
+ * `main()` prints — so tests can assert on the demo itself, not
+ * just on the library.
  */
 export function runDemo(): DemoResult {
   // The demo sets an explicit resubmit budget of 2 so the REJECT ->
@@ -459,7 +471,46 @@ export function runDemo(): DemoResult {
     `  totalPaidOut: ${totalPaid} (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines };
+  // Event-sourcing replay segment (closing): the demo's thesis —
+  // the audit history is the single source of truth — acted out on
+  // the main task. Its 12-entry history is exported as NDJSON
+  // (one canonical JSON entry per line, trailing newline), printed
+  // in full, parsed back with historyFromNdjson(), and replayed
+  // with TaskLifecycle.fromHistory(). Hand-written expectations:
+  // the export has exactly 12 lines; the parsed entries are the
+  // original history entry for entry; the replayed task is in
+  // state PAID with 12 history entries whose last entry is
+  // seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID, identical to
+  // the original's last entry (the demo tests pin all of this,
+  // including a full deep equality of the two histories). The
+  // segment adds no new nondeterminism: it only serializes the
+  // main task's existing history — whose timestamps already vary
+  // between runs — and reads no network, no randomness, and no
+  // new wall clock.
+  const ndjsonText = historyToNdjson(task);
+  const ndjsonLines = ndjsonText.trimEnd().split("\n");
+  lines.push("", "Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):");
+  lines.push(
+    `  historyToNdjson(${task.id}): ${ndjsonLines.length} lines (one JSON entry per line, trailing newline)`,
+  );
+  for (const line of ndjsonLines) {
+    lines.push(`  ${line}`);
+  }
+  const parsedEntries = historyFromNdjson(ndjsonText);
+  lines.push(`  historyFromNdjson: ${parsedEntries.length} entries parsed back`);
+  const replayedTask = TaskLifecycle.fromHistory(task.id, parsedEntries);
+  lines.push(
+    `  TaskLifecycle.fromHistory(${task.id}, entries): state ${replayedTask.state}, ${replayedTask.history.length} history entries`,
+  );
+  const replayedLast = replayedTask.history.at(-1)!;
+  const replayMatches =
+    replayedTask.state === task.state &&
+    historyToNdjson(replayedTask) === ndjsonText;
+  lines.push(
+    `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
+  );
+
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, ndjsonText, replayedTask, lines };
 }
 
 function main(): void {

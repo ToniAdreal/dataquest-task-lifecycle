@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An event-sourcing replay segment closing the CLI demo: the main
+  task's 12-entry audit history is exported with
+  `historyToNdjson()`, printed in full (one canonical JSON entry
+  per line), parsed back with `historyFromNdjson()`, and replayed
+  with `TaskLifecycle.fromHistory()` — the replayed task lands in
+  the same PAID state with a history deep-equal to the original's,
+  last entry included, and re-exporting it reproduces the NDJSON
+  byte for byte. `runDemo()` returns the NDJSON text and the
+  replayed task, and the demo tests pin the structured round-trip
+  (cross-checked against an independent parse + replay), the
+  exact printed lines, and the segment's agreement across two
+  runs once the main task's own timestamps and derived hash-chain
+  links are normalized. Demo and tests only; no library behavior
+  change.
 - A receiver-side dedupe segment in the CLI demo: after the single
   payout webhook is built and verified, its `eventId` is fed
   through a `PayoutEventDedupe` under an injected fixed clock
