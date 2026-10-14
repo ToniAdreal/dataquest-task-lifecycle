@@ -159,6 +159,20 @@ Task DEMO-005: DRAFT
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
   totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)
 
+Dispatch subscription branch (sixth task, in-process fan-out):
+Task DEMO-006: DRAFT
+  subscribed: 1 collecting listener (notified after each audit append, in subscription order)
+  listener received 3 notification(s), in dispatch order:
+    notification 1: PUBLISH DRAFT -> OPEN (entry seq 1)
+    notification 2: ACCEPT OPEN -> ACCEPTED (entry seq 2)
+    notification 3: START_CAPTURE ACCEPTED -> CAPTURING (entry seq 3)
+  notifications match the task history: true (each (event, from, to) equals the history entry with the same seq)
+  unsubscribed: listenerCount 0
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  listener received after unsubscribe: 3 notification(s) (unchanged — SUBMIT produced no new notification)
+
+Final state (subscription branch): SUBMITTED (terminal: false)
+
 Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   historyToNdjson(DEMO-001): 12 lines (one JSON entry per line, trailing newline)
   {"seq":1,"event":"PUBLISH","from":"DRAFT","to":"OPEN","at":"<timestamp>","actor":"system","note":"Researcher publishes the data-collection task","prevHash":"GENESIS","hash":"<hash>"}
@@ -179,7 +193,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 136);
+  assert.equal(lines.length, 150);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -538,8 +552,9 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.equal(unreconciledTask.history.length, 8);
   assert.equal(mismatchedTask.history.length, 8);
   // The branch is printed after the batch section (the
-  // event-sourcing replay segment follows it and closes the demo),
-  // with the three screening lines verbatim.
+  // subscription branch follows it, then the event-sourcing
+  // replay segment closes the demo), with the three screening
+  // lines verbatim.
   const reconAt = text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):");
   assert.ok(
     reconAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
@@ -561,7 +576,7 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   const reconLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
-      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
     );
   const a = reconLines(runDemo().lines);
   const b = reconLines(runDemo().lines);
@@ -572,6 +587,91 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   assert.deepEqual(a, b);
 });
 
+
+test("demo shows the dispatch subscription branch in-process: ordered notifications match history, silence after unsubscribe", () => {
+  const {
+    subscriptionTask,
+    subscriptionNotifications,
+    subscriptionMatchesHistory,
+    subscriptionCountAfterUnsubscribe,
+    lines,
+  } = runDemo();
+  const text = lines.join("\n");
+
+  // The branch task ends in SUBMITTED (not terminal) with four
+  // fixed-literal history entries — three subscribed dispatches
+  // plus the post-unsubscribe SUBMIT.
+  assert.equal(subscriptionTask.id, "DEMO-006");
+  assert.equal(subscriptionTask.state, "SUBMITTED");
+  assert.equal(subscriptionTask.isTerminal, false);
+  assert.equal(subscriptionTask.listenerCount, 0);
+  assert.deepEqual(
+    subscriptionTask.history.map((h) => [h.event, h.from, h.to, h.actor, h.at]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN", "researcher", "2026-03-19T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "contributor", "2026-03-19T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "contributor", "2026-03-19T09:10:00.000Z"],
+      ["SUBMIT", "CAPTURING", "SUBMITTED", "contributor", "2026-03-19T09:15:00.000Z"],
+    ],
+  );
+  // The collected notifications are exactly the first three
+  // dispatches, in order, each carrying its audit entry's seq —
+  // independently re-derived from the task history here, not just
+  // trusted from the demo's own match flag.
+  assert.deepEqual(subscriptionNotifications, [
+    { event: "PUBLISH", from: "DRAFT", to: "OPEN", seq: 1 },
+    { event: "ACCEPT", from: "OPEN", to: "ACCEPTED", seq: 2 },
+    { event: "START_CAPTURE", from: "ACCEPTED", to: "CAPTURING", seq: 3 },
+  ]);
+  assert.deepEqual(
+    subscriptionNotifications,
+    subscriptionTask.history
+      .slice(0, 3)
+      .map((h) => ({ event: h.event, from: h.from, to: h.to, seq: h.seq })),
+  );
+  assert.equal(subscriptionMatchesHistory, true);
+  // After unsubscribe, the SUBMIT dispatch moved the task but
+  // produced no fourth notification.
+  assert.equal(subscriptionCountAfterUnsubscribe, 3);
+  // The branch is printed after the reconciliation branch and
+  // before the closing event-sourcing replay segment, with its
+  // lines verbatim.
+  const subAt = text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):");
+  assert.ok(
+    subAt > text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+    "subscription branch must follow the reconciliation branch",
+  );
+  assert.ok(
+    text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") > subAt,
+    "event-sourcing segment must follow the subscription branch",
+  );
+  assert.match(text, /notification 1: PUBLISH DRAFT -> OPEN \(entry seq 1\)/);
+  assert.match(text, /notification 3: START_CAPTURE ACCEPTED -> CAPTURING \(entry seq 3\)/);
+  assert.match(text, /notifications match the task history: true/);
+  assert.match(text, /unsubscribed: listenerCount 0/);
+  assert.match(
+    text,
+    /listener received after unsubscribe: 3 notification\(s\) \(unchanged — SUBMIT produced no new notification\)/,
+  );
+  assert.match(text, /Final state \(subscription branch\): SUBMITTED \(terminal: false\)/);
+});
+
+test("demo subscription segment is deterministic: two runs print byte-identical subscription lines", () => {
+  const subLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):"),
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
+  const a = subLines(runDemo().lines);
+  const b = subLines(runDemo().lines);
+  // Header + task header + subscribed line + received header + 3
+  // notification lines + match line + unsubscribed line + SUBMIT
+  // line + after-unsubscribe line + blank + final-state line;
+  // every timestamp in the segment is a fixed literal that never
+  // reaches the printed lines, so no normalization is needed.
+  assert.equal(a.length, 13);
+  assert.deepEqual(a, b);
+});
 
 test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", () => {
   const { task, ndjsonText, replayedTask, lines } = runDemo();
@@ -665,7 +765,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 136);
+  assert.equal(out.trimEnd().split("\n").length, 150);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

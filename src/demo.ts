@@ -23,7 +23,12 @@
  * less than its `ACCEPT` quote, screened together with the three
  * earlier tasks by `unreconciledPayouts()` / `mismatchedPayouts()`
  * / `totalPaidOut()` — the post-settlement finance pass a platform
- * runs after payout day — and finally an event-sourcing replay
+ * runs after payout day — run a sixth task through the dispatch
+ * subscription branch (a collecting listener subscribed before any
+ * dispatch receives each `(event, from, to)` in order, matching
+ * the audit history entry for entry, and — after unsubscribe —
+ * receives nothing for one further dispatch), and finally an
+ * event-sourcing replay
  * segment: the main task's audit history is exported with
  * `historyToNdjson()`, printed in full, parsed back with
  * `historyFromNdjson()`, and replayed with
@@ -36,7 +41,7 @@
  *
  * The script is structured as an importable `runDemo()` (the same
  * shape as the sibling demos in rfc9421-signing-demo and
- * escrow-state-machine-ts): it returns all five tasks, the screening
+ * escrow-state-machine-ts): it returns all six tasks, the screening
  * results, the built webhook and its verification outcome, the
  * NDJSON export of the main task's history and the task replayed
  * from it, plus the exact `lines` the CLI prints — so tests assert on structured values
@@ -67,6 +72,7 @@ import {
   type BuildPayoutWebhooksResult,
   type PayoutWebhook,
   type TaskEvent,
+  type TaskState,
 } from "./index.js";
 
 /**
@@ -110,6 +116,14 @@ const steps: Array<{
   },
 ];
 
+/** One notification collected by the demo's subscription listener. */
+export interface SubscriptionNotification {
+  event: TaskEvent;
+  from: TaskState;
+  to: TaskState;
+  seq: number;
+}
+
 export interface DemoResult {
   task: TaskLifecycle;
   overdueTask: TaskLifecycle;
@@ -127,6 +141,10 @@ export interface DemoResult {
   unreconciledFound: TaskLifecycle[];
   mismatchedFound: TaskLifecycle[];
   totalPaid: number;
+  subscriptionTask: TaskLifecycle;
+  subscriptionNotifications: SubscriptionNotification[];
+  subscriptionMatchesHistory: boolean;
+  subscriptionCountAfterUnsubscribe: number;
   ndjsonText: string;
   replayedTask: TaskLifecycle;
   lines: string[];
@@ -134,11 +152,13 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * five tasks, the watchdog screening result, the built + verified
+ * six tasks, the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the reconciliation screening results with
- * the paid-out total, the NDJSON export of the main task's history
+ * the paid-out total, the subscription branch's collected
+ * notifications with their history-match verdict and the
+ * post-unsubscribe notification count, the NDJSON export of the main task's history
  * and the task replayed from that export, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
@@ -471,6 +491,80 @@ export function runDemo(): DemoResult {
     `  totalPaidOut: ${totalPaid} (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`,
   );
 
+  // Dispatch subscription branch: the demo's only in-process
+  // notification fan-out point, acted out on a sixth task. A
+  // collecting listener is subscribed BEFORE any dispatch, so it
+  // receives every successful dispatch in order — each notification
+  // is the (event, from, to) triple plus the seq of the audit entry
+  // appended just before the listener ran. The branch then
+  // unsubscribes and dispatches one further step: the task moves,
+  // the listener hears nothing. Every timestamp in this branch is
+  // a fixed literal (2026-03-19): no network, no randomness, no
+  // wall clock. Hand-written expectations: the listener collects
+  // exactly 3 notifications (PUBLISH DRAFT -> OPEN seq 1, ACCEPT
+  // OPEN -> ACCEPTED seq 2, START_CAPTURE ACCEPTED -> CAPTURING
+  // seq 3), each equal to the history entry with the same seq;
+  // after unsubscribe the count stays 3 while the task lands in
+  // SUBMITTED with 4 history entries.
+  const subscriptionTask = new TaskLifecycle("DEMO-006");
+  const subscriptionNotifications: SubscriptionNotification[] = [];
+  const unsubscribeSubscription = subscriptionTask.subscribe(
+    (event, from, to, entry) => {
+      subscriptionNotifications.push({ event, from, to, seq: entry.seq });
+    },
+  );
+  lines.push("", "Dispatch subscription branch (sixth task, in-process fan-out):");
+  lines.push(`Task ${subscriptionTask.id}: ${subscriptionTask.state}`);
+  lines.push(
+    "  subscribed: 1 collecting listener (notified after each audit append, in subscription order)",
+  );
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-19T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-19T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-19T09:10:00.000Z"],
+  ] as const) {
+    subscriptionTask.dispatch(event, { actor, at });
+  }
+  lines.push(
+    `  listener received ${subscriptionNotifications.length} notification(s), in dispatch order:`,
+  );
+  subscriptionNotifications.forEach((n, i) => {
+    lines.push(
+      `    notification ${i + 1}: ${n.event} ${n.from} -> ${n.to} (entry seq ${n.seq})`,
+    );
+  });
+  const subscriptionMatchesHistory = subscriptionNotifications.every((n) => {
+    const entry = subscriptionTask.history[n.seq - 1];
+    return (
+      entry !== undefined &&
+      entry.seq === n.seq &&
+      entry.event === n.event &&
+      entry.from === n.from &&
+      entry.to === n.to
+    );
+  });
+  lines.push(
+    `  notifications match the task history: ${subscriptionMatchesHistory} (each (event, from, to) equals the history entry with the same seq)`,
+  );
+  unsubscribeSubscription();
+  lines.push(`  unsubscribed: listenerCount ${subscriptionTask.listenerCount}`);
+  const subscriptionFrom = subscriptionTask.state;
+  const subscriptionTo = subscriptionTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-19T09:15:00.000Z",
+  });
+  lines.push(
+    `  ${"SUBMIT".padEnd(15)} ${subscriptionFrom.padEnd(12)} -> ${subscriptionTo}  (contributor)`,
+  );
+  const subscriptionCountAfterUnsubscribe = subscriptionNotifications.length;
+  lines.push(
+    `  listener received after unsubscribe: ${subscriptionCountAfterUnsubscribe} notification(s) (unchanged — SUBMIT produced no new notification)`,
+  );
+  lines.push(
+    "",
+    `Final state (subscription branch): ${subscriptionTask.state} (terminal: ${subscriptionTask.isTerminal})`,
+  );
+
   // Event-sourcing replay segment (closing): the demo's thesis —
   // the audit history is the single source of truth — acted out on
   // the main task. Its 12-entry history is exported as NDJSON
@@ -510,7 +604,7 @@ export function runDemo(): DemoResult {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, ndjsonText, replayedTask, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, ndjsonText, replayedTask, lines };
 }
 
 function main(): void {

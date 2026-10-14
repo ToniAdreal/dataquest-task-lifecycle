@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch subscription branch in the CLI demo: a sixth task
+  (`DEMO-006`) is created under fixed-literal timestamps
+  (2026-03-19; no network, no randomness, no wall clock) and a
+  collecting listener is subscribed before any dispatch. The
+  listener receives the first three dispatches in order —
+  `PUBLISH` DRAFT → OPEN, `ACCEPT` OPEN → ACCEPTED,
+  `START_CAPTURE` ACCEPTED → CAPTURING — each `(event, from, to)`
+  matching the audit history entry with the same seq; after
+  `unsubscribe`, a further `SUBMIT` dispatch moves the task to
+  SUBMITTED but produces no new notification. `runDemo()` returns
+  the task, the collected notifications, the history-match
+  verdict, and the post-unsubscribe notification count, and the
+  demo tests pin the structured results (cross-checked against
+  the task history), the exact printed lines, and the segment's
+  byte-identical determinism across two runs. Demo and tests
+  only; no library behavior change.
 - Benchmark coverage for payout Retry-After parsing:
   `parsePayoutRetryAfter()` over a fixed 11-value corpus
   (delay-seconds, a future HTTP-date, a past HTTP-date, signed
