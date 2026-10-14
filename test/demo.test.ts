@@ -115,11 +115,37 @@ Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):
   DEMO-001: webhook eventId=evt_demo_batch_001 payoutRef=xfer-88f2 payoutAmount=10098.5 verifyPayoutWebhook: ok
   DEMO-002: error: cannot build payout webhook: task DEMO-002 is in state EXPIRED, only PAID tasks have a completed settlement to announce
   DEMO-003: error: cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce
-  batch: 1 webhook(s) built, 2 error(s) — a non-PAID task fails only itself and never blocks later tasks`;
+  batch: 1 webhook(s) built, 2 error(s) — a non-PAID task fails only itself and never blocks later tasks
+
+Reconciliation screening branch (two more PAID tasks, then the finance pass):
+Task DEMO-004: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  note: PAYOUT_COMPLETE records payoutAmount=2500 and no payoutRef (the ACCEPT quote was also 2500, so the amount itself agrees)
+Task DEMO-005: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  note: ACCEPT quoted 4000 but PAYOUT_COMPLETE settled 3750.5 under payoutRef xfer-91c7 (the amount, not the evidence, is the problem)
+  screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005 (all five demo tasks)
+  unreconciledPayouts: DEMO-004 (1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry)
+  mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
+  totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`;
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 86);
+  assert.equal(lines.length, 112);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -273,7 +299,8 @@ test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in
   assert.equal(disputeTask.state, "REJECTED");
   assert.equal(disputeTask.history.length, 8);
   // The dispute branch is printed after the SLA branch and before the
-  // payout webhook section (the batch section now closes the demo).
+  // payout webhook section (the reconciliation branch now closes the
+  // demo, after the batch section).
   const disputeAt = text.indexOf("DISPUTE appeal branch");
   assert.ok(
     disputeAt > text.indexOf("SLA watchdog branch"),
@@ -323,8 +350,9 @@ test("demo builds the batch payout webhooks in-process: per-item isolation and p
     batchResults[2].error,
     "cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce",
   );
-  // The batch section is printed after the single webhook section
-  // and closes the demo, with one line per result plus the summary.
+  // The batch section is printed after the single webhook section,
+  // with one line per result plus the summary (the reconciliation
+  // branch follows it and closes the demo).
   const batchAt = text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):");
   assert.ok(
     batchAt > text.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):"),
@@ -339,7 +367,10 @@ test("demo builds the batch payout webhooks in-process: per-item isolation and p
 
 test("demo batch segment is deterministic: two runs print byte-identical batch lines", () => {
   const batchLines = (ls: string[]) =>
-    ls.slice(ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"));
+    ls.slice(
+      ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
+      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+    );
   const a = batchLines(runDemo().lines);
   const b = batchLines(runDemo().lines);
   assert.equal(a.length, 6);
@@ -349,6 +380,93 @@ test("demo batch segment is deterministic: two runs print byte-identical batch l
   assert.match(a.join("\n"), /shared now: 2026-03-13T09:00:00\.000Z/);
 });
 
+test("demo shows the reconciliation screening branch in-process: unreconciled, mismatched, and total match the hand-computed expectations", () => {
+  const { unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines } =
+    runDemo();
+  const text = lines.join("\n");
+
+  // Both branch tasks are driven to PAID under fixed-literal
+  // timestamps — no wall clock anywhere in either history.
+  for (const [task, firstDay, secondDay] of [
+    [unreconciledTask, "2026-03-14", "2026-03-15"],
+    [mismatchedTask, "2026-03-16", "2026-03-17"],
+  ] as const) {
+    assert.equal(task.state, "PAID");
+    assert.equal(task.isTerminal, true);
+    assert.equal(task.history.length, 8);
+    assert.ok(task.history.slice(0, 3).every((h) => h.at.startsWith(firstDay)));
+    assert.ok(task.history.slice(3).every((h) => h.at.startsWith(secondDay)));
+  }
+  // DEMO-004's deliberate flaw is evidence only: its PAYOUT_COMPLETE
+  // entry records the settled amount but no payoutRef, and its
+  // ACCEPT quote equals the settled amount.
+  const unreconciledComplete = unreconciledTask.history.at(-1)!;
+  assert.equal(unreconciledComplete.event, "PAYOUT_COMPLETE");
+  assert.equal(unreconciledComplete.payoutRef, undefined);
+  assert.equal(unreconciledComplete.payoutAmount, 2500);
+  assert.equal(
+    unreconciledTask.history.find((h) => h.event === "ACCEPT")!.quotedAmount,
+    2500,
+  );
+  // DEMO-005's deliberate flaw is the amount only: evidenced under a
+  // payoutRef, but settled 249.5 under its ACCEPT quote.
+  const mismatchedComplete = mismatchedTask.history.at(-1)!;
+  assert.equal(mismatchedComplete.event, "PAYOUT_COMPLETE");
+  assert.equal(mismatchedComplete.payoutRef, "xfer-91c7");
+  assert.equal(mismatchedComplete.payoutAmount, 3750.5);
+  assert.equal(
+    mismatchedTask.history.find((h) => h.event === "ACCEPT")!.quotedAmount,
+    4000,
+  );
+  // The three screens over all five demo tasks hit exactly the
+  // hand-computed expectations written in the demo source: the main
+  // task (ref recorded, no quote) is flagged by neither screen, and
+  // the EXPIRED / REJECTED tasks contribute nothing to the total.
+  assert.deepEqual(
+    unreconciledFound.map((t) => t.id),
+    ["DEMO-004"],
+  );
+  assert.deepEqual(
+    mismatchedFound.map((t) => t.id),
+    ["DEMO-005"],
+  );
+  assert.equal(totalPaid, 16349);
+  // The screening is pure: every screened task is untouched.
+  assert.equal(unreconciledTask.state, "PAID");
+  assert.equal(mismatchedTask.state, "PAID");
+  assert.equal(unreconciledTask.history.length, 8);
+  assert.equal(mismatchedTask.history.length, 8);
+  // The branch is printed after the batch section and closes the
+  // demo, with the three screening lines verbatim.
+  const reconAt = text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):");
+  assert.ok(
+    reconAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
+    "reconciliation branch must follow the batch section",
+  );
+  assert.match(text, /screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005 \(all five demo tasks\)/);
+  assert.match(
+    text,
+    /unreconciledPayouts: DEMO-004 \(1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry\)/,
+  );
+  assert.match(
+    text,
+    /mismatchedPayouts: DEMO-005 \(quoted 4000, paid 3750\.5, delta -249\.5\) \(1 hit: settled amount differs from the ACCEPT quote\)/,
+  );
+  assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the 3 PAID tasks/);
+});
+
+test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", () => {
+  const reconLines = (ls: string[]) =>
+    ls.slice(ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"));
+  const a = reconLines(runDemo().lines);
+  const b = reconLines(runDemo().lines);
+  // Header + (task header + 8 transitions + note) x2 + 4 screening
+  // lines; every timestamp in the segment is a fixed literal that
+  // never reaches the printed lines, so no normalization is needed.
+  assert.equal(a.length, 25);
+  assert.deepEqual(a, b);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", () => {
   const out = execFileSync(
     "node",
@@ -356,7 +474,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 86);
+  assert.equal(out.trimEnd().split("\n").length, 112);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

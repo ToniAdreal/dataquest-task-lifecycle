@@ -9,10 +9,17 @@
  * DISPUTED and an arbitrator's ARBITRATE_REJECT lands it back in
  * REJECTED, consuming the task's one demo dispute), then build the
  * signed payout webhook for the settled task and verify it the way
- * a receiver would, and finally run the batch builder
+ * a receiver would, run the batch builder
  * (`buildPayoutWebhooks`) over all three demo tasks — the
  * settlement-peak pipeline in which each non-PAID task fails only
- * itself and every built webhook is verified in turn.
+ * itself and every built webhook is verified in turn — and finally
+ * run a reconciliation screening branch: two more tasks driven to
+ * PAID under fixed-literal timestamps, one settled with no
+ * `payoutRef` on its `PAYOUT_COMPLETE` entry and one settled for
+ * less than its `ACCEPT` quote, screened together with the three
+ * earlier tasks by `unreconciledPayouts()` / `mismatchedPayouts()`
+ * / `totalPaidOut()` — the post-settlement finance pass a platform
+ * runs after payout day.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -20,8 +27,8 @@
  *
  * The script is structured as an importable `runDemo()` (the same
  * shape as the sibling demos in rfc9421-signing-demo and
- * escrow-state-machine-ts): it returns all three tasks, the screening
- * result, the built webhook and its verification outcome, plus the
+ * escrow-state-machine-ts): it returns all five tasks, the screening
+ * results, the built webhook and its verification outcome, plus the
  * exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -39,6 +46,10 @@ import {
   buildPayoutWebhook,
   buildPayoutWebhooks,
   expiredTasks,
+  mismatchedPayouts,
+  payoutMismatch,
+  totalPaidOut,
+  unreconciledPayouts,
   verifyPayoutWebhook,
   type BuildPayoutWebhooksResult,
   type PayoutWebhook,
@@ -95,14 +106,20 @@ export interface DemoResult {
   webhookVerified: boolean;
   batchResults: BuildPayoutWebhooksResult[];
   batchVerified: Array<boolean | undefined>;
+  unreconciledTask: TaskLifecycle;
+  mismatchedTask: TaskLifecycle;
+  unreconciledFound: TaskLifecycle[];
+  mismatchedFound: TaskLifecycle[];
+  totalPaid: number;
   lines: string[];
 }
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * three tasks, the watchdog screening result, the built + verified
+ * five tasks, the watchdog screening result, the built + verified
  * payout webhook, the batch webhook results with their per-item
- * verification outcomes, and the exact lines `main()` prints — so
+ * verification outcomes, the reconciliation screening results with
+ * the paid-out total, and the exact lines `main()` prints — so
  * tests can assert on the demo itself, not just on the library.
  */
 export function runDemo(): DemoResult {
@@ -292,7 +309,101 @@ export function runDemo(): DemoResult {
     `  batch: ${batchBuilt} webhook(s) built, ${batchResults.length - batchBuilt} error(s) — a non-PAID task fails only itself and never blocks later tasks`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, batchResults, batchVerified, lines };
+  // Reconciliation screening branch: payout day is not the end of
+  // the story — finance then screens the settled tasks for the ones
+  // whose settlement lacks external evidence or disagrees with the
+  // quote. Two more tasks are driven to PAID here, each with one
+  // deliberate flaw, every timestamp a fixed literal (no network,
+  // no randomness, no wall clock):
+  //   DEMO-004 settles exactly as quoted (ACCEPT quotedAmount 2500,
+  //     PAYOUT_COMPLETE payoutAmount 2500) but its PAYOUT_COMPLETE
+  //     entry carries NO payoutRef — paid, yet unevidenced, so
+  //     unreconciledPayouts() must flag it and mismatchedPayouts()
+  //     must not.
+  //   DEMO-005 settles under payoutRef "xfer-91c7" but for 3750.5
+  //     against an ACCEPT quote of 4000 (delta -249.5) — evidenced,
+  //     yet short, so mismatchedPayouts() must flag it and
+  //     unreconciledPayouts() must not.
+  // The main task DEMO-001 (payoutRef "xfer-88f2", payoutAmount
+  // 10098.5, no recorded quote) must be flagged by neither screen.
+  // Hand-computed expectations for the screening over all five demo
+  // tasks: unreconciled = [DEMO-004], mismatched = [DEMO-005],
+  // totalPaidOut = 10098.5 + 2500 + 3750.5 = 16349 (the EXPIRED and
+  // REJECTED tasks contribute nothing).
+  const drivePaidTask = (
+    id: string,
+    spec: Array<{
+      event: TaskEvent;
+      actor: string;
+      at: string;
+      quotedAmount?: number;
+      payoutRef?: string;
+      payoutAmount?: number;
+    }>,
+  ): TaskLifecycle => {
+    const driven = new TaskLifecycle(id);
+    lines.push(`Task ${driven.id}: ${driven.state}`);
+    for (const { event, actor, at, quotedAmount, payoutRef, payoutAmount } of spec) {
+      const from = driven.state;
+      const to = driven.dispatch(event, {
+        actor,
+        at,
+        ...(quotedAmount !== undefined ? { quotedAmount } : {}),
+        ...(payoutRef !== undefined ? { payoutRef } : {}),
+        ...(payoutAmount !== undefined ? { payoutAmount } : {}),
+      });
+      lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+    }
+    return driven;
+  };
+  lines.push("", "Reconciliation screening branch (two more PAID tasks, then the finance pass):");
+  const unreconciledTask = drivePaidTask("DEMO-004", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-14T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-14T09:05:00.000Z", quotedAmount: 2500 },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-14T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-15T09:00:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-15T09:05:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-15T09:10:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-15T09:15:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-15T09:20:00.000Z", payoutAmount: 2500 },
+  ]);
+  lines.push(
+    "  note: PAYOUT_COMPLETE records payoutAmount=2500 and no payoutRef (the ACCEPT quote was also 2500, so the amount itself agrees)",
+  );
+  const mismatchedTask = drivePaidTask("DEMO-005", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-16T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-16T09:05:00.000Z", quotedAmount: 4000 },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-16T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-17T09:00:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-17T09:05:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-17T09:10:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-17T09:15:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-17T09:20:00.000Z", payoutRef: "xfer-91c7", payoutAmount: 3750.5 },
+  ]);
+  lines.push(
+    "  note: ACCEPT quoted 4000 but PAYOUT_COMPLETE settled 3750.5 under payoutRef xfer-91c7 (the amount, not the evidence, is the problem)",
+  );
+  const screenedTasks = [task, overdueTask, disputeTask, unreconciledTask, mismatchedTask];
+  const unreconciledFound = unreconciledPayouts(screenedTasks);
+  const mismatchedFound = mismatchedPayouts(screenedTasks);
+  const totalPaid = totalPaidOut(screenedTasks);
+  lines.push(`  screened: ${screenedTasks.map((t) => t.id).join(", ")} (all five demo tasks)`);
+  lines.push(
+    `  unreconciledPayouts: ${unreconciledFound.map((t) => t.id).join(", ")} (${unreconciledFound.length} hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry)`,
+  );
+  lines.push(
+    `  mismatchedPayouts: ${mismatchedFound
+      .map((t) => {
+        const m = payoutMismatch(t)!;
+        return `${t.id} (quoted ${m.quoted}, paid ${m.paid}, delta ${m.delta})`;
+      })
+      .join(", ")} (${mismatchedFound.length} hit: settled amount differs from the ACCEPT quote)`,
+  );
+  lines.push(
+    `  totalPaidOut: ${totalPaid} (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)`,
+  );
+
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines };
 }
 
 function main(): void {

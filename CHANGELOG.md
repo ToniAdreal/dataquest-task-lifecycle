@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A reconciliation screening branch in the CLI demo: after the
+  batch webhook segment, two more tasks are driven to PAID under
+  fixed-literal timestamps, each with one deliberate flaw —
+  `DEMO-004` settles exactly as quoted but its `PAYOUT_COMPLETE`
+  entry carries no `payoutRef`, and `DEMO-005` settles under a
+  `payoutRef` for 3750.5 against an `ACCEPT` quote of 4000. All
+  five demo tasks are then screened with `unreconciledPayouts()` /
+  `mismatchedPayouts()` / `totalPaidOut()`: each flawed task is
+  flagged by exactly one screen, the main task by neither, and the
+  paid-out total prints the hand-computed 16349
+  (10098.5 + 2500 + 3750.5; the EXPIRED and REJECTED tasks
+  contribute nothing). `runDemo()` returns both branch tasks, both
+  screening results, and the total, and the demo tests pin the
+  structured results, the exact screening lines, and the segment's
+  determinism across two runs. Demo and tests only; no library
+  behavior change.
 - Benchmark coverage for payout event dedupe restore:
   `PayoutEventDedupe.restore()` rebuilding a dedupe from a
   1,000-entry snapshot (the persisted JSON-round-tripped form, all
