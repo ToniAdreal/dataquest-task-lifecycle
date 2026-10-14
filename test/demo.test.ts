@@ -76,6 +76,30 @@ History (SLA branch, append-only audit trail):
     2  ACCEPT           OPEN          -> ACCEPTED      contributor  <timestamp>
     3  EXPIRE           ACCEPTED      -> EXPIRED       watchdog     <timestamp>
 
+DISPUTE appeal branch (third task, dispute budget):
+Task DEMO-003: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  DISPUTE         REJECTED     -> DISPUTED  (contributor)
+  ARBITRATE_REJECT DISPUTED     -> REJECTED  (moderator)
+  dispute budget: 1 of 1 DISPUTEs used (demo sets maxDisputes: 1; the library default is unlimited)
+
+Final state (DISPUTE branch): REJECTED (terminal: false)
+History (DISPUTE branch, append-only audit trail):
+  seq  event            from          -> to             actor        at
+    1  PUBLISH          DRAFT         -> OPEN          researcher   <timestamp>
+    2  ACCEPT           OPEN          -> ACCEPTED      contributor  <timestamp>
+    3  START_CAPTURE    ACCEPTED      -> CAPTURING     contributor  <timestamp>
+    4  SUBMIT           CAPTURING     -> SUBMITTED     contributor  <timestamp>
+    5  BEGIN_REVIEW     SUBMITTED     -> IN_REVIEW     reviewer     <timestamp>
+    6  REJECT           IN_REVIEW     -> REJECTED      reviewer     <timestamp>
+    7  DISPUTE          REJECTED      -> DISPUTED      contributor  <timestamp>
+    8  ARBITRATE_REJECT DISPUTED      -> REJECTED      moderator    <timestamp>
+
 Payout webhook (signed PAYOUT_COMPLETE notification):
   event:        PAYOUT_COMPLETE
   taskId:       DEMO-001
@@ -88,7 +112,7 @@ Payout webhook (signed PAYOUT_COMPLETE notification):
 
 test("demo lines match the pre-refactor golden output, line for line", () => {
   const { lines } = runDemo();
-  assert.equal(lines.length, 55);
+  assert.equal(lines.length, 79);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -126,9 +150,9 @@ test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-proces
   assert.ok(rejectAt >= 0 && resubmitAt > rejectAt, "RESUBMIT must follow REJECT");
   assert.ok(approveAt > resubmitAt, "APPROVE must follow the RESUBMIT loop");
   assert.match(text, /Final state: PAID \(terminal: true\)/);
-  // Numbered history rows across both printed audit trails: 12 + 3.
+  // Numbered history rows across all printed audit trails: 12 + 3 + 8.
   const seqRows = text.match(/^\s+\d+  /gm) ?? [];
-  assert.equal(seqRows.length, 15);
+  assert.equal(seqRows.length, 23);
 });
 
 test("demo builds the payout webhook from the settled task and verifies it (structured)", () => {
@@ -201,6 +225,59 @@ test("demo shows the SLA watchdog branch in-process: screening finds DEMO-002, t
   assert.ok(screenAt >= 0 && expireAt > screenAt, "EXPIRE must follow the screening line");
 });
 
+test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in DISPUTED, arbitration returns it to REJECTED", () => {
+  const { disputeTask, lines } = runDemo();
+  const text = lines.join("\n");
+
+  assert.equal(disputeTask.id, "DEMO-003");
+  assert.equal(disputeTask.state, "REJECTED");
+  assert.equal(disputeTask.isTerminal, false);
+  // Fixed-literal branch timestamps: no wall clock anywhere here.
+  assert.deepEqual(
+    disputeTask.history.map((h) => [h.event, h.from, h.to, h.actor, h.at]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN", "researcher", "2026-03-10T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "contributor", "2026-03-10T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "contributor", "2026-03-10T09:10:00.000Z"],
+      ["SUBMIT", "CAPTURING", "SUBMITTED", "contributor", "2026-03-11T09:00:00.000Z"],
+      ["BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW", "reviewer", "2026-03-11T09:05:00.000Z"],
+      ["REJECT", "IN_REVIEW", "REJECTED", "reviewer", "2026-03-11T09:10:00.000Z"],
+      ["DISPUTE", "REJECTED", "DISPUTED", "contributor", "2026-03-11T10:00:00.000Z"],
+      ["ARBITRATE_REJECT", "DISPUTED", "REJECTED", "moderator", "2026-03-12T09:00:00.000Z"],
+    ],
+  );
+  assert.match(text, /DISPUTE\s+REJECTED\s+-> DISPUTED\s+\(contributor\)/);
+  assert.match(text, /ARBITRATE_REJECT DISPUTED\s+-> REJECTED\s+\(moderator\)/);
+  assert.match(text, /Final state \(DISPUTE branch\): REJECTED \(terminal: false\)/);
+  assert.match(
+    text,
+    /dispute budget: 1 of 1 DISPUTEs used \(demo sets maxDisputes: 1; the library default is unlimited\)/,
+  );
+  // The appeal consumed the demo's budget of 1: a second DISPUTE throws
+  // the explicit budget error and leaves no trace in the history.
+  assert.throws(
+    () =>
+      disputeTask.dispatch("DISPUTE", {
+        actor: "contributor",
+        at: "2026-03-12T10:00:00.000Z",
+      }),
+    /dispute budget exhausted: 1 of 1 DISPUTEs already used/,
+  );
+  assert.equal(disputeTask.state, "REJECTED");
+  assert.equal(disputeTask.history.length, 8);
+  // The dispute branch is printed after the SLA branch and before the
+  // payout webhook section, which still closes the demo.
+  const disputeAt = text.indexOf("DISPUTE appeal branch");
+  assert.ok(
+    disputeAt > text.indexOf("SLA watchdog branch"),
+    "DISPUTE branch must follow the SLA branch",
+  );
+  assert.ok(
+    text.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):") > disputeAt,
+    "payout webhook section must follow the DISPUTE branch",
+  );
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", () => {
   const out = execFileSync(
     "node",
@@ -208,7 +285,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 55);
+  assert.equal(out.trimEnd().split("\n").length, 79);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

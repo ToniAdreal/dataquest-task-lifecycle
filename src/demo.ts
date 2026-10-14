@@ -4,9 +4,12 @@
  * the append-only audit history, run a second task through the SLA
  * watchdog branch (an advisory deadline passes, `expiredTasks()`
  * screening finds the task, and a watchdog explicitly dispatches
- * EXPIRE into the EXPIRED terminal state), then build the signed
- * payout webhook for the settled task and verify it the way a
- * receiver would.
+ * EXPIRE into the EXPIRED terminal state), run a third task through
+ * the DISPUTE appeal branch (a REJECTED task is DISPUTEd into
+ * DISPUTED and an arbitrator's ARBITRATE_REJECT lands it back in
+ * REJECTED, consuming the task's one demo dispute), then build the
+ * signed payout webhook for the settled task and verify it the way
+ * a receiver would.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -14,7 +17,7 @@
  *
  * The script is structured as an importable `runDemo()` (the same
  * shape as the sibling demos in rfc9421-signing-demo and
- * escrow-state-machine-ts): it returns both tasks, the screening
+ * escrow-state-machine-ts): it returns all three tasks, the screening
  * result, the built webhook and its verification outcome, plus the
  * exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
@@ -82,6 +85,7 @@ export interface DemoResult {
   task: TaskLifecycle;
   overdueTask: TaskLifecycle;
   overdueFound: TaskLifecycle[];
+  disputeTask: TaskLifecycle;
   webhook: PayoutWebhook;
   webhookVerified: boolean;
   lines: string[];
@@ -89,7 +93,7 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * two tasks, the watchdog screening result, the built + verified
+ * three tasks, the watchdog screening result, the built + verified
  * payout webhook, and the exact lines `main()` prints — so tests can
  * assert on the demo itself, not just on the library.
  */
@@ -174,6 +178,50 @@ export function runDemo(): DemoResult {
     );
   }
 
+  // DISPUTE appeal branch: a third task that is REJECTED in QA and
+  // then appealed instead of resubmitted. The contributor DISPUTEs
+  // the rejection (REJECTED -> DISPUTED) and a moderator arbitrates
+  // against the appeal (ARBITRATE_REJECT -> REJECTED), so the branch
+  // ends back in REJECTED — not a terminal state. The demo sets an
+  // explicit dispute budget of 1 so the appeal shows the budget
+  // being consumed (this script uses 1 of the 1). The library
+  // default for `maxDisputes` is unlimited — the budget here is a
+  // demo policy choice, not a built-in cap, and a second DISPUTE on
+  // this task would throw "dispute budget exhausted". Every
+  // timestamp in this branch is a fixed literal: no wall clock is
+  // read here.
+  const disputeTask = new TaskLifecycle("DEMO-003", { maxDisputes: 1 });
+  lines.push("", "DISPUTE appeal branch (third task, dispute budget):");
+  lines.push(`Task ${disputeTask.id}: ${disputeTask.state}`);
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-10T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-10T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-10T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-11T09:00:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-11T09:05:00.000Z"],
+    ["REJECT", "reviewer", "2026-03-11T09:10:00.000Z"],
+    ["DISPUTE", "contributor", "2026-03-11T10:00:00.000Z"],
+    ["ARBITRATE_REJECT", "moderator", "2026-03-12T09:00:00.000Z"],
+  ] as const) {
+    const from = disputeTask.state;
+    const to = disputeTask.dispatch(event, { actor, at });
+    lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  lines.push(
+    "  dispute budget: 1 of 1 DISPUTEs used (demo sets maxDisputes: 1; the library default is unlimited)",
+  );
+  lines.push(
+    "",
+    `Final state (DISPUTE branch): ${disputeTask.state} (terminal: ${disputeTask.isTerminal})`,
+  );
+  lines.push("History (DISPUTE branch, append-only audit trail):");
+  lines.push("  seq  event            from          -> to             actor        at");
+  for (const h of disputeTask.history) {
+    lines.push(
+      `  ${String(h.seq).padStart(3)}  ${h.event.padEnd(16)} ${h.from.padEnd(13)} -> ${h.to.padEnd(13)} ${String(h.actor ?? "-").padEnd(12)} ${h.at}`,
+    );
+  }
+
   // The PAID state is where PAYOUT_COMPLETE settlement webhooks fire:
   // build the signed notification from the audit history, print what a
   // receiver would get, then verify it with the same secret.
@@ -190,7 +238,7 @@ export function runDemo(): DemoResult {
   const webhookVerified = verifyPayoutWebhook(payload, signature, DEMO_WEBHOOK_SECRET);
   lines.push(`  verifyPayoutWebhook: ${webhookVerified ? "ok" : "FAILED"}`);
 
-  return { task, overdueTask, overdueFound, webhook, webhookVerified, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, lines };
 }
 
 function main(): void {

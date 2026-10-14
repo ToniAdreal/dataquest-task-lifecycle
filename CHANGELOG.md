@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A DISPUTE appeal branch in the CLI demo: a third task (`DEMO-003`)
+  is rejected in QA, the contributor DISPUTEs the rejection into
+  DISPUTED, and a moderator's ARBITRATE_REJECT lands it back in
+  REJECTED (not a terminal state), with the full audit history
+  printed. The demo task carries `maxDisputes: 1` and uses 1 of the
+  1 — the demo source and output state explicitly that the library
+  default is unlimited, so the budget is not mistaken for a built-in
+  cap — and the demo tests pin the branch's transition lines, its
+  fixed-literal timestamps, and the fact that a second DISPUTE throws
+  `dispute budget exhausted` without leaving a trace. The main
+  DRAFT → PAID chain and the SLA watchdog branch are unchanged, and
+  the payout webhook section still closes the demo. Demo and tests
+  only; no library behavior change.
 - Benchmark coverage for watchdog execution: `expireOverdueTasks()`
   and `actOnStaleTasks()` (with its default ABANDON action) over the
   same fixed batch of 12 mixed-state tasks as the watchdog screening
