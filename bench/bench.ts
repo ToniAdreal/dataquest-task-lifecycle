@@ -39,9 +39,13 @@
  *      steady-state duplicate hits cycling over 1,000 pre-recorded
  *      `eventId`s under an injected fixed clock (the clock never
  *      advances, so no entry expires and none is evicted in the timed
- *      loop). This is the receiver-side counterpart of the sender
- *      paths above: every delivered payout notification pays this
- *      check before it may be processed;
+ *      loop), and `PayoutEventDedupe.restore(snapshot, opts)`
+ *      rebuilding a dedupe from a 1,000-entry snapshot (see the
+ *      restore fixture below for its composition and the hand-written
+ *      expectations). This is the receiver-side counterpart of the
+ *      sender paths above: every delivered payout notification pays
+ *      this check before it may be processed, and every receiver
+ *      restart pays the restore before the first check;
  *   9. batch payout webhook building — `buildPayoutWebhooks()` over a
  *      fixed batch of 12 PAID tasks under one shared payload timestamp,
  *      with per-task `eventId`s from an injected deterministic factory
@@ -657,6 +661,106 @@ if (
 }
 let dedupeCursor = 0;
 
+// Dedupe-restore fixture: a 1,000-entry snapshot of a dedupe that
+// recorded the fixed ids `bench-restore-0000` ..
+// `bench-restore-0999`, in that order, under an injected FIXED clock
+// (`DEDUPE_RESTORE_NOW_MS`, a fixed instant after BASE_MS — the
+// clock never advances). The snapshot goes through a JSON
+// stringify/parse round-trip, exactly the persisted form a receiver
+// reloads at startup. Restore runs under the default TTL (1 hour)
+// and the default capacity (10,000): every entry was first seen at
+// the restore instant itself (age 0), so no entry is expired at
+// load and none is evicted for capacity. Hand-written expectations
+// — written out here from the composition above, never derived by
+// calling `restore` itself:
+//   - the snapshot is `{ v: 1, entries }` with exactly 1,000 pairs,
+//     in prefill order, each `seenAtMs` exactly
+//     DEDUPE_RESTORE_NOW_MS;
+//   - a restored dedupe reports size 1,000 with all observability
+//     counters at zero (counters are not part of a snapshot);
+//   - `checkAndRecord` on every snapshot id is a duplicate (true):
+//     1,000 hits in total, the size stays 1,000, and an unseen id is
+//     still a first sighting (false) followed by a duplicate (true).
+// The exhaustive 1,000-id check runs ONCE, outside the timed loop,
+// below; the timed path re-checks the counters and spot-checks the
+// first / middle / last ids on every iteration (see
+// `benchPayoutEventDedupeRestore`).
+const DEDUPE_RESTORE_PREFILL = 1000;
+const DEDUPE_RESTORE_NOW_MS = BASE_MS + 180_000;
+const dedupeRestoreIds: string[] = Array.from(
+  { length: DEDUPE_RESTORE_PREFILL },
+  (_, i) => `bench-restore-${String(i).padStart(4, "0")}`,
+);
+const dedupeRestoreSource = new PayoutEventDedupe({
+  now: () => DEDUPE_RESTORE_NOW_MS,
+});
+for (const id of dedupeRestoreIds) {
+  if (dedupeRestoreSource.checkAndRecord(id)) {
+    throw new Error(
+      "benchmark fixture failed: dedupe restore prefill saw a duplicate",
+    );
+  }
+}
+const dedupeRestoreSnapshot = JSON.parse(
+  JSON.stringify(dedupeRestoreSource.exportSnapshot()),
+) as { v: unknown; entries: Array<[string, number]> };
+if (
+  dedupeRestoreSnapshot.v !== 1 ||
+  !Array.isArray(dedupeRestoreSnapshot.entries) ||
+  dedupeRestoreSnapshot.entries.length !== DEDUPE_RESTORE_PREFILL ||
+  dedupeRestoreSnapshot.entries.some(
+    (pair, i) =>
+      pair[0] !== dedupeRestoreIds[i] || pair[1] !== DEDUPE_RESTORE_NOW_MS,
+  )
+) {
+  throw new Error("benchmark fixture failed: dedupe restore snapshot shape");
+}
+// Exhaustive validation (outside the timed loop): every snapshot id
+// restores as a duplicate, the counts agree exactly with the calls
+// made, and an unseen id keeps first-sighting semantics.
+const dedupeRestoreProbe = PayoutEventDedupe.restore(dedupeRestoreSnapshot, {
+  now: () => DEDUPE_RESTORE_NOW_MS,
+});
+const dedupeRestoreProbeFresh = dedupeRestoreProbe.stats();
+if (
+  dedupeRestoreProbeFresh.size !== DEDUPE_RESTORE_PREFILL ||
+  dedupeRestoreProbeFresh.hits !== 0 ||
+  dedupeRestoreProbeFresh.misses !== 0 ||
+  dedupeRestoreProbeFresh.evictions !== 0
+) {
+  throw new Error(
+    "benchmark fixture failed: restored dedupe counters do not start at zero",
+  );
+}
+for (const id of dedupeRestoreIds) {
+  if (!dedupeRestoreProbe.checkAndRecord(id)) {
+    throw new Error(
+      "benchmark fixture failed: restored dedupe missed a snapshot id",
+    );
+  }
+}
+const dedupeRestoreProbeHits = dedupeRestoreProbe.stats();
+if (
+  dedupeRestoreProbeHits.size !== DEDUPE_RESTORE_PREFILL ||
+  dedupeRestoreProbeHits.hits !== DEDUPE_RESTORE_PREFILL ||
+  dedupeRestoreProbeHits.misses !== 0 ||
+  dedupeRestoreProbeHits.evictions !== 0
+) {
+  throw new Error(
+    "benchmark fixture failed: restored dedupe hit count differs from the hand-written expectation",
+  );
+}
+if (dedupeRestoreProbe.checkAndRecord("bench-restore-unseen")) {
+  throw new Error(
+    "benchmark fixture failed: restored dedupe flagged a first sighting",
+  );
+}
+if (!dedupeRestoreProbe.checkAndRecord("bench-restore-unseen")) {
+  throw new Error(
+    "benchmark fixture failed: restored dedupe missed a second sighting",
+  );
+}
+
 // Batch-build fixture: 12 PAID tasks built with the same
 // `buildPaidTask` fixture as the screening batch (full 8-entry
 // history, settled exactly as quoted, each with a payoutRef). The
@@ -880,6 +984,39 @@ function benchPayoutEventDedupe(): number {
   return ops;
 }
 
+function benchPayoutEventDedupeRestore(): number {
+  return measure(() => {
+    const restored = PayoutEventDedupe.restore(dedupeRestoreSnapshot, {
+      now: () => DEDUPE_RESTORE_NOW_MS,
+    });
+    // Per-iteration self-check against the hand-written
+    // expectations above: the restore kept all 1,000 entries, the
+    // observability counters restarted at zero, and the first /
+    // middle / last snapshot ids are all duplicates (3 hits). The
+    // exhaustive all-ids check runs once, outside the timed loop,
+    // in the fixture validation.
+    const fresh = restored.stats();
+    if (
+      fresh.size !== DEDUPE_RESTORE_PREFILL ||
+      fresh.hits !== 0 ||
+      fresh.misses !== 0 ||
+      fresh.evictions !== 0 ||
+      !restored.checkAndRecord(dedupeRestoreIds[0]) ||
+      !restored.checkAndRecord(
+        dedupeRestoreIds[DEDUPE_RESTORE_PREFILL / 2],
+      ) ||
+      !restored.checkAndRecord(
+        dedupeRestoreIds[DEDUPE_RESTORE_PREFILL - 1],
+      ) ||
+      restored.stats().hits !== 3
+    ) {
+      throw new Error(
+        "benchmark self-check failed: PayoutEventDedupe restore",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchBuildPayoutWebhooks(): number {
   return measure(() => {
     runBatchBuild();
@@ -959,7 +1096,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -978,6 +1115,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids)", ops: benchPayoutEventDedupe() },
+  { path: "PayoutEventDedupe.restore (1,000-entry snapshot)", ops: benchPayoutEventDedupeRestore() },
   { path: "buildPayoutWebhooks (batch of 12 PAID tasks)", ops: benchBuildPayoutWebhooks() },
   { path: "expiredTasks (12 mixed-state tasks)", ops: benchExpiredTasks() },
   { path: "staleTasks (12 mixed-state tasks)", ops: benchStaleTasks() },

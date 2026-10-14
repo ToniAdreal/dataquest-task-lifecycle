@@ -1218,7 +1218,8 @@ screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut`
 over a batch of tasks), payout webhook fan-out delivery
 (`deliverPayoutWebhookToMany` to 4 endpoints), receiver-side
 payout event dedupe (`PayoutEventDedupe.checkAndRecord` duplicate
-hits), batch payout webhook building (`buildPayoutWebhooks` over
+hits and `PayoutEventDedupe.restore` snapshot restore), batch
+payout webhook building (`buildPayoutWebhooks` over
 a batch of PAID tasks), watchdog screening (`expiredTasks` /
 `staleTasks` over a batch of mixed-state tasks), and watchdog
 execution (`expireOverdueTasks` / `actOnStaleTasks` over the same
@@ -1234,7 +1235,16 @@ sleep), so it measures this library's fan-out overhead — one shared
 endpoint's own secret — not network throughput. The dedupe path
 pre-records 1,000 fixed `eventId`s under an injected fixed clock (the
 clock never advances, so no entry expires or is evicted in the timed
-loop) and cycles steady-state duplicate hits over them. The batch-build
+loop) and cycles steady-state duplicate hits over them. The dedupe
+restore path rebuilds a dedupe on every iteration from a
+1,000-entry snapshot (the persisted JSON-round-tripped form of a
+dedupe that recorded 1,000 fixed `eventId`s under the same fixed
+clock; default TTL and capacity, so every entry is live at load and
+none is evicted); its per-iteration self-checks pin the restored
+size and the zeroed observability counters to the hand-written
+expectations in the bench comments, spot-check the first / middle /
+last snapshot ids as duplicates, and an exhaustive all-ids check
+runs once outside the timed loop. The batch-build
 path builds webhooks for a fixed batch of 12 PAID tasks (settled exactly
 as quoted, each with a `payoutRef`) under one shared payload timestamp,
 with per-task `eventId`s from an injected deterministic factory; its
@@ -1271,27 +1281,30 @@ fail in isolation) and the resulting task states. One real run on
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~5,400 ops/sec (~187 µs/op) |
-| replay (8-entry history) | ~8,900 ops/sec (~112 µs/op) |
-| fromHistory (8-entry history) | ~6,200 ops/sec (~162 µs/op) |
-| verifyHistoryChain (8 entries) | ~34,400 ops/sec (~29 µs/op) |
-| buildPayoutWebhook (sign) | ~69,100 ops/sec (~14 µs/op) |
-| verifyPayoutWebhook | ~106,900 ops/sec (~9.35 µs/op) |
-| historyToNdjson (8 entries) | ~15,100 ops/sec (~66 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~10,400 ops/sec (~96 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~50,900 ops/sec (~20 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~57,000 ops/sec (~18 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~70,700 ops/sec (~14 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~4,300 ops/sec (~234 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~1,670,000 ops/sec (~0.60 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~7,400 ops/sec (~135 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~245,800 ops/sec (~4.07 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~112,900 ops/sec (~8.85 µs/op) |
-| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~2,800 ops/sec (~356 µs/op) |
-| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~2,600 ops/sec (~392 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~15,100 ops/sec (~66 µs/op) |
+| replay (8-entry history) | ~14,400 ops/sec (~69 µs/op) |
+| fromHistory (8-entry history) | ~5,500 ops/sec (~183 µs/op) |
+| verifyHistoryChain (8 entries) | ~38,800 ops/sec (~26 µs/op) |
+| buildPayoutWebhook (sign) | ~45,000 ops/sec (~22 µs/op) |
+| verifyPayoutWebhook | ~66,100 ops/sec (~15 µs/op) |
+| historyToNdjson (8 entries) | ~11,400 ops/sec (~88 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~17,600 ops/sec (~57 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~25,200 ops/sec (~40 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~59,700 ops/sec (~17 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~72,700 ops/sec (~14 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~5,600 ops/sec (~177 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,876,000 ops/sec (~0.26 µs/op) |
+| PayoutEventDedupe.restore (1,000-entry snapshot) | ~3,000 ops/sec (~336 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~8,800 ops/sec (~114 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~387,600 ops/sec (~2.58 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~164,500 ops/sec (~6.08 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~3,900 ops/sec (~256 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~3,400 ops/sec (~295 µs/op) |
 
-Environment: Node v24.20.0, linux/x64, AMD EPYC 7D13 (virtualized;
-shared host, so numbers vary run to run). Machine-local measurements
+Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
+shared host, so numbers vary run to run — a second run in the same
+session measured the restore path at ~3,900 ops/sec, the same order
+of magnitude). Machine-local measurements
 for capacity planning, not guaranteed throughput — run
 `npm run bench` on your own hardware.
 

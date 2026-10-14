@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for payout event dedupe restore:
+  `PayoutEventDedupe.restore()` rebuilding a dedupe from a
+  1,000-entry snapshot (the persisted JSON-round-tripped form, all
+  entries live at load under the default TTL and capacity) now
+  appears in `npm run bench`, next to the existing duplicate-hit
+  path. Per-iteration self-checks pin the restored size and the
+  zeroed observability counters to the hand-written expectations in
+  the bench comments and spot-check the first / middle / last
+  snapshot ids as duplicates; an exhaustive all-ids check (1,000
+  hits, unseen-id first-sighting semantics intact) runs once
+  outside the timed loop. The README Benchmarks table is refreshed
+  from one real run. Benchmark only; no library behavior change.
 - A batch payout webhook segment in the CLI demo: after the
   single-build webhook section, the demo runs `buildPayoutWebhooks`
   over all three demo tasks (the PAID main task plus the EXPIRED SLA
