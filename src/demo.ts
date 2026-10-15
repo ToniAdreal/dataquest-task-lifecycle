@@ -34,7 +34,16 @@
  * subscription branch (a collecting listener subscribed before any
  * dispatch receives each `(event, from, to)` in order, matching
  * the audit history entry for entry, and — after unsubscribe —
- * receives nothing for one further dispatch), and finally an
+ * receives nothing for one further dispatch), run three more
+ * tasks through the stale-task dwell screening branch (each task's
+ * history ends at a fixed literal timestamp, so at one fixed
+ * screening `now` the dwell in its current state — `now` minus the
+ * last history entry's `at` — is exact: one task has sat in OPEN
+ * past its dwell budget but its SLA deadline is still ahead, one
+ * has sat in IN_REVIEW within its dwell budget but its SLA
+ * deadline has passed, and one is within both — so `staleTasks()`
+ * and `expiredTasks()` select different subsets of the same batch,
+ * printed side by side), and finally an
  * event-sourcing replay
  * segment: the main task's audit history is exported with
  * `historyToNdjson()`, printed in full, parsed back with
@@ -48,7 +57,7 @@
  *
  * The script is structured as an importable `runDemo()` (the same
  * shape as the sibling demos in rfc9421-signing-demo and
- * escrow-state-machine-ts): it returns all six tasks, the screening
+ * escrow-state-machine-ts): it returns all nine tasks, the screening
  * results, the built webhook and its verification outcome, the
  * multi-endpoint fan-out delivery result and the wire copies the
  * injected fake fetch received, the
@@ -74,8 +83,10 @@ import {
   expiredTasks,
   historyFromNdjson,
   historyToNdjson,
+  isOverdue,
   mismatchedPayouts,
   payoutMismatch,
+  staleTasks,
   totalPaidOut,
   unreconciledPayouts,
   verifyPayoutWebhook,
@@ -166,6 +177,9 @@ export interface DemoResult {
   subscriptionNotifications: SubscriptionNotification[];
   subscriptionMatchesHistory: boolean;
   subscriptionCountAfterUnsubscribe: number;
+  staleDwellTasks: TaskLifecycle[];
+  staleFound: TaskLifecycle[];
+  staleExpiredFound: TaskLifecycle[];
   ndjsonText: string;
   replayedTask: TaskLifecycle;
   lines: string[];
@@ -173,14 +187,16 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * six tasks, the watchdog screening result, the built + verified
+ * nine tasks, the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the fan-out delivery result with the wire
  * calls the injected fake fetch received, the reconciliation
  * screening results with the paid-out total, the subscription branch's collected
  * notifications with their history-match verdict and the
- * post-unsubscribe notification count, the NDJSON export of the main task's history
+ * post-unsubscribe notification count, the stale-task dwell
+ * screening branch's three tasks with its stale and overdue
+ * subsets, the NDJSON export of the main task's history
  * and the task replayed from that export, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
@@ -685,6 +701,107 @@ export async function runDemo(): Promise<DemoResult> {
     `Final state (subscription branch): ${subscriptionTask.state} (terminal: ${subscriptionTask.isTerminal})`,
   );
 
+  // Stale-task dwell screening branch: the watchdog's second
+  // screening lens, acted out on three more tasks. The SLA branch
+  // near the top screens by absolute deadline (`expiredTasks()`:
+  // "past the deadline attached to the current state"); this branch
+  // screens the same way a "stuck task" watchdog does — by dwell
+  // (`staleTasks()`: "in the current state longer than the
+  // per-state budget", measured from the last history entry's
+  // `at`). The two lenses are independent, and this batch is built so
+  // they disagree: every timestamp is a fixed literal and the
+  // screening `now` is fixed at 2026-03-22T09:00:00.000Z, so every
+  // dwell below is exact (no network, no randomness, no wall
+  // clock). Hand-written expectations:
+  //   DEMO-007 sits in OPEN since 2026-03-01T09:00:00.000Z —
+  //     dwell 1814400000 ms (21 days) > the OPEN budget of
+  //     604800000 ms (7 days), so stale; its OPEN SLA deadline is
+  //     2026-03-25T09:00:00.000Z, still ahead, so NOT overdue.
+  //   DEMO-008 sits in IN_REVIEW since 2026-03-21T09:00:00.000Z —
+  //     dwell 86400000 ms (1 day) < the IN_REVIEW budget of
+  //     432000000 ms (5 days), so NOT stale; its IN_REVIEW SLA
+  //     deadline is 2026-03-21T12:00:00.000Z, already past, so
+  //     overdue.
+  //   DEMO-009 sits in OPEN since 2026-03-21T09:00:00.000Z —
+  //     dwell 86400000 ms (1 day) < the OPEN budget, and it
+  //     carries no SLA deadline at all, so neither stale nor
+  //     overdue.
+  // Screening is pure: staleTasks()/expiredTasks() never dispatch
+  // or mutate, so all three tasks keep their states and history
+  // lengths (the demo tests pin this).
+  const STALE_BRANCH_NOW = new Date("2026-03-22T09:00:00.000Z");
+  const STALE_BUDGETS = {
+    OPEN: 7 * 24 * 3600_000,
+    IN_REVIEW: 5 * 24 * 3600_000,
+  } as const;
+  const DAY_MS = 24 * 3600_000;
+  const driveStaleTask = (
+    id: string,
+    spec: Array<{ event: TaskEvent; actor: string; at: string }>,
+  ): TaskLifecycle => {
+    const driven = new TaskLifecycle(id);
+    lines.push(`Task ${driven.id}: ${driven.state}`);
+    for (const { event, actor, at } of spec) {
+      const from = driven.state;
+      const to = driven.dispatch(event, { actor, at });
+      lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+    }
+    return driven;
+  };
+  lines.push("", "Stale-task dwell screening branch (three more tasks, dwell vs deadline):");
+  lines.push(
+    `  screened at: ${STALE_BRANCH_NOW.toISOString()} (fixed now; no wall clock)`,
+  );
+  lines.push(
+    `  budgets: OPEN ${STALE_BUDGETS.OPEN} ms (7 days), IN_REVIEW ${STALE_BUDGETS.IN_REVIEW} ms (5 days) — dwell is now minus the last history entry's at`,
+  );
+  const staleOpenTask = driveStaleTask("DEMO-007", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-01T09:00:00.000Z" },
+  ]);
+  staleOpenTask.setSlaDeadline("2026-03-25T09:00:00.000Z", "OPEN");
+  lines.push(
+    `  SLA deadline (OPEN): ${staleOpenTask.getSlaDeadline("OPEN")}`,
+  );
+  const staleReviewTask = driveStaleTask("DEMO-008", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-20T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-20T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-20T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-21T08:55:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-21T09:00:00.000Z" },
+  ]);
+  staleReviewTask.setSlaDeadline("2026-03-21T12:00:00.000Z", "IN_REVIEW");
+  lines.push(
+    `  SLA deadline (IN_REVIEW): ${staleReviewTask.getSlaDeadline("IN_REVIEW")}`,
+  );
+  const staleFreshTask = driveStaleTask("DEMO-009", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-21T09:00:00.000Z" },
+  ]);
+  lines.push("  SLA deadline (OPEN): none");
+  const staleDwellTasks = [staleOpenTask, staleReviewTask, staleFreshTask];
+  const staleFound = staleTasks(staleDwellTasks, STALE_BUDGETS, STALE_BRANCH_NOW);
+  const staleExpiredFound = expiredTasks(staleDwellTasks, STALE_BRANCH_NOW);
+  for (const t of staleDwellTasks) {
+    const enteredAt = t.history[t.history.length - 1].at;
+    const dwellMs = STALE_BRANCH_NOW.getTime() - Date.parse(enteredAt);
+    const dwellDays = dwellMs / DAY_MS;
+    const budget = STALE_BUDGETS[t.state as keyof typeof STALE_BUDGETS];
+    lines.push(
+      `  ${t.id}: state ${t.state}, entered at ${enteredAt}, dwell ${dwellMs} ms (${dwellDays} ${dwellDays === 1 ? "day" : "days"}) vs ${t.state} budget ${budget} ms -> stale: ${staleFound.includes(t)}, overdue: ${isOverdue(t, STALE_BRANCH_NOW)}`,
+    );
+  }
+  lines.push(
+    `  staleTasks([${staleDwellTasks.map((t) => t.id).join(", ")}], budgets, ${STALE_BRANCH_NOW.toISOString()}): ${staleFound.map((t) => t.id).join(", ")} (${staleFound.length} stale)`,
+  );
+  lines.push(
+    `  expiredTasks([${staleDwellTasks.map((t) => t.id).join(", ")}], ${STALE_BRANCH_NOW.toISOString()}): ${staleExpiredFound.map((t) => t.id).join(", ")} (${staleExpiredFound.length} overdue)`,
+  );
+  lines.push(
+    "  contrast: the two screens disagree on the same batch — DEMO-007 is stale but not overdue (dwell past budget, deadline still ahead), DEMO-008 is overdue but not stale (deadline passed, dwell within budget), DEMO-009 is neither",
+  );
+  lines.push(
+    "  screening is pure: no task was dispatched or mutated by either screen",
+  );
+
   // Event-sourcing replay segment (closing): the demo's thesis —
   // the audit history is the single source of truth — acted out on
   // the main task. Its 12-entry history is exported as NDJSON
@@ -724,7 +841,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, ndjsonText, replayedTask, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, ndjsonText, replayedTask, lines };
 }
 
 async function main(): Promise<void> {

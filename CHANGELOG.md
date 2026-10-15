@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A stale-task dwell screening branch in the CLI demo: three
+  more tasks (`DEMO-007` / `DEMO-008` / `DEMO-009`) are driven
+  under fixed-literal timestamps and screened at one fixed `now`
+  (2026-03-22T09:00:00.000Z; no network, no randomness, no wall
+  clock). `DEMO-007` has sat in OPEN for 21 days — past the
+  7-day OPEN dwell budget, so `staleTasks()` selects it — but
+  its OPEN SLA deadline (2026-03-25) is still ahead, so
+  `expiredTasks()` does not; `DEMO-008` has sat in IN_REVIEW
+  for 1 day — within the 5-day IN_REVIEW dwell budget, so not
+  stale — but its IN_REVIEW SLA deadline (2026-03-21T12:00)
+  has passed, so `expiredTasks()` selects it; `DEMO-009` has
+  sat in OPEN for 1 day with no SLA deadline and is selected
+  by neither screen. The branch prints each task's dwell
+  beside its per-state budget and the two screens' subsets
+  side by side — the same batch reads differently under the
+  dwell lens than under the deadline lens — and both screens
+  are pure, so no task is dispatched or mutated. `runDemo()`
+  returns the three tasks and both subsets; the demo tests
+  pin the structured results (cross-checked by an independent
+  re-screening under the same fixed `now` and budgets), the
+  exact printed lines, and the segment's byte-identical
+  determinism across two runs. Demo and tests only; no
+  library behavior change.
 - A multi-endpoint fan-out delivery segment in the CLI demo:
   after the batch segment, the main task's payout event is
   delivered with `deliverPayoutWebhookToMany` to three fixed

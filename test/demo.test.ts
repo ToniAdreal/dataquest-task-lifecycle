@@ -7,8 +7,11 @@ import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
 import {
   PayoutEventDedupe,
   TaskLifecycle,
+  expiredTasks,
   historyFromNdjson,
   historyToNdjson,
+  isOverdue,
+  staleTasks,
   verifyPayoutWebhook,
 } from "../src/index.js";
 
@@ -181,6 +184,30 @@ Task DEMO-006: DRAFT
 
 Final state (subscription branch): SUBMITTED (terminal: false)
 
+Stale-task dwell screening branch (three more tasks, dwell vs deadline):
+  screened at: <timestamp> (fixed now; no wall clock)
+  budgets: OPEN 604800000 ms (7 days), IN_REVIEW 432000000 ms (5 days) — dwell is now minus the last history entry's at
+Task DEMO-007: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+Task DEMO-008: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  SLA deadline (IN_REVIEW): <timestamp>
+Task DEMO-009: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): none
+  DEMO-007: state OPEN, entered at <timestamp>, dwell 1814400000 ms (21 days) vs OPEN budget 604800000 ms -> stale: true, overdue: false
+  DEMO-008: state IN_REVIEW, entered at <timestamp>, dwell 86400000 ms (1 day) vs IN_REVIEW budget 432000000 ms -> stale: false, overdue: true
+  DEMO-009: state OPEN, entered at <timestamp>, dwell 86400000 ms (1 day) vs OPEN budget 604800000 ms -> stale: false, overdue: false
+  staleTasks([DEMO-007, DEMO-008, DEMO-009], budgets, <timestamp>): DEMO-007 (1 stale)
+  expiredTasks([DEMO-007, DEMO-008, DEMO-009], <timestamp>): DEMO-008 (1 overdue)
+  contrast: the two screens disagree on the same batch — DEMO-007 is stale but not overdue (dwell past budget, deadline still ahead), DEMO-008 is overdue but not stale (deadline passed, dwell within budget), DEMO-009 is neither
+  screening is pure: no task was dispatched or mutated by either screen
+
 Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   historyToNdjson(DEMO-001): 12 lines (one JSON entry per line, trailing newline)
   {"seq":1,"event":"PUBLISH","from":"DRAFT","to":"OPEN","at":"<timestamp>","actor":"system","note":"Researcher publishes the data-collection task","prevHash":"GENESIS","hash":"<hash>"}
@@ -201,7 +228,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 158);
+  assert.equal(lines.length, 182);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -668,7 +695,7 @@ test("demo subscription segment is deterministic: two runs print byte-identical 
   const subLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):"),
-      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+      ls.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):") - 1,
     );
   const a = subLines((await runDemo()).lines);
   const b = subLines((await runDemo()).lines);
@@ -679,6 +706,138 @@ test("demo subscription segment is deterministic: two runs print byte-identical 
   // reaches the printed lines, so no normalization is needed.
   assert.equal(a.length, 13);
   assert.deepEqual(a, b);
+});
+
+test("demo shows the stale-task dwell screening branch in-process: stale and overdue subsets disagree on the same batch", async () => {
+  const { staleDwellTasks, staleFound, staleExpiredFound, lines } = await runDemo();
+  const text = lines.join("\n");
+  const NOW = new Date("2026-03-22T09:00:00.000Z");
+  const BUDGETS = { OPEN: 7 * 24 * 3600_000, IN_REVIEW: 5 * 24 * 3600_000 };
+
+  // The three branch tasks end in the hand-written states with
+  // fixed-literal histories — no wall clock anywhere.
+  assert.deepEqual(
+    staleDwellTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-007", "OPEN", 1],
+      ["DEMO-008", "IN_REVIEW", 5],
+      ["DEMO-009", "OPEN", 1],
+    ],
+  );
+  assert.deepEqual(
+    staleDwellTasks[1].history.map((h) => [h.event, h.from, h.to, h.actor, h.at]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN", "researcher", "2026-03-20T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "contributor", "2026-03-20T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "contributor", "2026-03-20T09:10:00.000Z"],
+      ["SUBMIT", "CAPTURING", "SUBMITTED", "contributor", "2026-03-21T08:55:00.000Z"],
+      ["BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW", "reviewer", "2026-03-21T09:00:00.000Z"],
+    ],
+  );
+  // The dwell of each task (now minus its last entry's `at`) is the
+  // hand-computed value written in the demo source.
+  assert.deepEqual(
+    staleDwellTasks.map(
+      (t) => NOW.getTime() - Date.parse(t.history[t.history.length - 1].at),
+    ),
+    [1814400000, 86400000, 86400000],
+  );
+  assert.equal(staleDwellTasks[0].getSlaDeadline("OPEN"), "2026-03-25T09:00:00.000Z");
+  assert.equal(staleDwellTasks[1].getSlaDeadline("IN_REVIEW"), "2026-03-21T12:00:00.000Z");
+  assert.equal(staleDwellTasks[2].getSlaDeadline("OPEN"), undefined);
+  // The two screens disagree on the same batch, exactly as the demo
+  // source's hand-written expectations say: DEMO-007 is stale only,
+  // DEMO-008 is overdue only, DEMO-009 is neither.
+  assert.deepEqual(
+    staleFound.map((t) => t.id),
+    ["DEMO-007"],
+  );
+  assert.deepEqual(
+    staleExpiredFound.map((t) => t.id),
+    ["DEMO-008"],
+  );
+  assert.deepEqual(
+    staleDwellTasks.map((t) => isOverdue(t, NOW)),
+    [false, true, false],
+  );
+  // An independent re-screening of the returned tasks under the
+  // same fixed now and budgets reproduces both subsets — the demo
+  // segment is not self-certifying.
+  assert.deepEqual(
+    staleTasks(staleDwellTasks, BUDGETS, NOW).map((t) => t.id),
+    ["DEMO-007"],
+  );
+  assert.deepEqual(
+    expiredTasks(staleDwellTasks, NOW).map((t) => t.id),
+    ["DEMO-008"],
+  );
+  // Screening is pure: the tasks keep their states and history
+  // lengths after both screens ran inside the demo.
+  assert.deepEqual(
+    staleDwellTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["OPEN", 1],
+      ["IN_REVIEW", 5],
+      ["OPEN", 1],
+    ],
+  );
+  // The branch is printed after the subscription branch and before
+  // the closing event-sourcing replay segment, with its lines
+  // verbatim.
+  const staleAt = text.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):");
+  assert.ok(
+    staleAt > text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):"),
+    "stale branch must follow the subscription branch",
+  );
+  assert.ok(
+    text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") > staleAt,
+    "event-sourcing segment must follow the stale branch",
+  );
+  assert.match(text, /screened at: 2026-03-22T09:00:00\.000Z \(fixed now; no wall clock\)/);
+  assert.match(
+    text,
+    /DEMO-007: state OPEN, entered at 2026-03-01T09:00:00\.000Z, dwell 1814400000 ms \(21 days\) vs OPEN budget 604800000 ms -> stale: true, overdue: false/,
+  );
+  assert.match(
+    text,
+    /DEMO-008: state IN_REVIEW, entered at 2026-03-21T09:00:00\.000Z, dwell 86400000 ms \(1 day\) vs IN_REVIEW budget 432000000 ms -> stale: false, overdue: true/,
+  );
+  assert.match(
+    text,
+    /staleTasks\(\[DEMO-007, DEMO-008, DEMO-009\], budgets, 2026-03-22T09:00:00\.000Z\): DEMO-007 \(1 stale\)/,
+  );
+  assert.match(
+    text,
+    /expiredTasks\(\[DEMO-007, DEMO-008, DEMO-009\], 2026-03-22T09:00:00\.000Z\): DEMO-008 \(1 overdue\)/,
+  );
+  assert.match(text, /contrast: the two screens disagree on the same batch/);
+});
+
+test("demo stale-task segment is deterministic: two runs print byte-identical stale lines", async () => {
+  const staleLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):"),
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = staleLines(a.lines);
+  // Header + screened-at + budgets + (task header + 1 transition +
+  // SLA line) + (task header + 5 transitions + SLA line) + (task
+  // header + 1 transition + SLA line) + 3 dwell lines + stale line
+  // + expired line + contrast line + purity line; every timestamp
+  // in the segment is a fixed literal, so no normalization is
+  // needed.
+  assert.equal(segA.length, 23);
+  assert.deepEqual(segA, staleLines(b.lines));
+  assert.deepEqual(
+    a.staleFound.map((t) => t.id),
+    b.staleFound.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.staleExpiredFound.map((t) => t.id),
+    b.staleExpiredFound.map((t) => t.id),
+  );
 });
 
 test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", async () => {
@@ -898,7 +1057,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 158);
+  assert.equal(out.trimEnd().split("\n").length, 182);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

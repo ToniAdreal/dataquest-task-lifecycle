@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 512 tests, all local
+npm test   # 514 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -62,7 +62,18 @@ that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
 dispatches in order, each `(event, from, to)` matching the audit
 history entry with the same seq, and receives nothing for a
-fourth dispatch after unsubscribe — and a closing event-sourcing
+fourth dispatch after unsubscribe, a stale-task dwell screening
+branch that drives three more tasks under fixed-literal timestamps
+to one fixed screening `now` — one sat in OPEN for 21 days, past
+its 7-day dwell budget, but its SLA deadline is still ahead; one
+sat in IN_REVIEW for 1 day, within its 5-day dwell budget, but its
+SLA deadline has passed; and one sat in OPEN for 1 day with no SLA
+deadline at all — and prints each task's dwell beside its budget
+plus the two screens' subsets side by side: `staleTasks()` selects
+only the first task and `expiredTasks()` only the second, so the
+same batch reads differently under the dwell lens than under the
+deadline lens (both screens are pure; no task is dispatched or
+mutated) — and a closing event-sourcing
 segment that exports the main task's audit history with
 `historyToNdjson()`, prints all 12 NDJSON lines, parses them back
 with `historyFromNdjson()`, and replays them with
@@ -1094,7 +1105,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 512 tests covering the happy path, reject→resubmit
+`npm test` runs 514 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
