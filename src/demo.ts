@@ -27,7 +27,13 @@
  * own demo secret and delivered through an injected fake fetch
  * (one endpoint answers 500 on every attempt and exhausts its
  * retries; the other two still succeed — a failing endpoint never
- * blocks the rest) — and finally
+ * blocks the rest), parse a fixed 6-value corpus of would-be
+ * `Retry-After` hints with `parsePayoutRetryAfter` under the
+ * fan-out segment's shared fixed instant reused as `nowMs`
+ * (delay-seconds and HTTP-date forms normalized to milliseconds,
+ * a past date clamped to 0, and garbage / absent values falling
+ * back to `undefined` — the hint a 429 response would have used
+ * to set the risk endpoint's next retry delay) — and finally
  * run a reconciliation screening branch: two more tasks driven to
  * PAID under fixed-literal timestamps, one settled with no
  * `payoutRef` on its `PAYOUT_COMPLETE` entry and one settled for
@@ -78,7 +84,8 @@
  * escrow-state-machine-ts): it returns all nine tasks, the screening
  * results, the built webhook and its verification outcome, the
  * multi-endpoint fan-out delivery result and the wire copies the
- * injected fake fetch received, the
+ * injected fake fetch received, the Retry-After parsing results
+ * for the fixed corpus under the fan-out instant, the
  * NDJSON export of the main task's history and the task replayed
  * from it, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
@@ -105,6 +112,7 @@ import {
   historyToNdjson,
   isOverdue,
   mismatchedPayouts,
+  parsePayoutRetryAfter,
   payoutMismatch,
   staleTasks,
   totalPaidOut,
@@ -197,6 +205,8 @@ export interface DemoResult {
   batchVerified: Array<boolean | undefined>;
   fanoutResult: DeliverPayoutWebhookToManyResult;
   fanoutCalls: FanoutCall[];
+  /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
+  retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
   mismatchedTask: TaskLifecycle;
   unreconciledFound: TaskLifecycle[];
@@ -610,6 +620,75 @@ export async function runDemo(): Promise<DemoResult> {
     );
   lines.push(
     `  shared event check: all endpoints received the same eventId ${FANOUT_EVENT_ID}: ${fanoutSharedEvent} (identical payload bytes, signed per endpoint with its own secret)`,
+  );
+
+  // Payout Retry-After parsing segment: the sender-side half of
+  // the retry story the fan-out segment acted out. The risk
+  // endpoint answered 500 on every attempt, so its retries fell
+  // back to exponential backoff — a Retry-After hint is only
+  // honored on a 429. This segment shows how such a hint would
+  // be read: a fixed 6-value corpus parsed with
+  // parsePayoutRetryAfter under the fan-out segment's shared
+  // fixed instant reused as `nowMs` (2026-03-20T09:00:00.000Z —
+  // no new instant, no network, no randomness, no wall clock).
+  // The HTTP-date strings are built with toUTCString() from that
+  // instant; toUTCString() has one-second precision and the
+  // instant sits exactly on a whole second, so the date
+  // expectations below are exact, not ranges. Hand-written
+  // expectations — written out here from the documented
+  // semantics of parsePayoutRetryAfter, never derived by
+  // calling it:
+  //   "2"                                -> 2000 (delay-seconds:
+  //                                          2 s x 1,000)
+  //   "  30 "                            -> 30000 (the value is
+  //                                          trimmed, then
+  //                                          30 s x 1,000)
+  //   HTTP-date at FANOUT_NOW + 5,000 ms -> 5000 (future date
+  //                                          delta)
+  //   HTTP-date at FANOUT_NOW - 1,000 ms -> 0 (a past date
+  //                                          clamps to zero,
+  //                                          never negative)
+  //   "banana"                           -> undefined
+  //                                          (unparsable; the
+  //                                          caller falls back
+  //                                          to backoff)
+  //   null                               -> undefined (absent
+  //                                          header; same
+  //                                          fallback)
+  const retryAfterCorpus: Array<{
+    value: string | null;
+    expected: number | undefined;
+  }> = [
+    { value: "2", expected: 2000 },
+    { value: "  30 ", expected: 30_000 },
+    {
+      value: new Date(FANOUT_NOW.getTime() + 5_000).toUTCString(),
+      expected: 5_000,
+    },
+    {
+      value: new Date(FANOUT_NOW.getTime() - 1_000).toUTCString(),
+      expected: 0,
+    },
+    { value: "banana", expected: undefined },
+    { value: null, expected: undefined },
+  ];
+  const retryAfterParsed = retryAfterCorpus.map(({ value }) =>
+    parsePayoutRetryAfter(value, FANOUT_NOW.getTime()),
+  );
+  lines.push(
+    "",
+    "Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):",
+    `  fixed now: ${FANOUT_NOW.toISOString()} (the fan-out segment's shared instant, reused as nowMs; no wall clock)`,
+  );
+  retryAfterCorpus.forEach(({ value }, i) => {
+    const display = value === null ? "null" : `"${value}"`;
+    const parsed = retryAfterParsed[i];
+    lines.push(
+      `  parsePayoutRetryAfter(${display}) -> ${parsed === undefined ? "undefined" : `${parsed} ms`}`,
+    );
+  });
+  lines.push(
+    "  retry context: the fan-out risk endpoint answered 500, so its retries used exponential backoff; had it answered 429 with a Retry-After header, the parsed wait above (clamped to maxRetryDelayMs) would have set the next attempt's delay — an absent or unparsable header (undefined) falls back to that backoff",
   );
 
   // Reconciliation screening branch: payout day is not the end of
@@ -1121,7 +1200,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, lines };
 }
 
 async function main(): Promise<void> {

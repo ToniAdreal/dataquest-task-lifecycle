@@ -13,6 +13,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
+  parsePayoutRetryAfter,
   staleTasks,
   verifyHistoryChain,
   verifyPayoutWebhook,
@@ -152,6 +153,16 @@ Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake
   fan-out: 2 delivered, 1 failed — the failing endpoint did not block the others
   shared event check: all endpoints received the same eventId evt_demo_fanout_001: true (identical payload bytes, signed per endpoint with its own secret)
 
+Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):
+  fixed now: <timestamp> (the fan-out segment's shared instant, reused as nowMs; no wall clock)
+  parsePayoutRetryAfter("2") -> 2000 ms
+  parsePayoutRetryAfter("  30 ") -> 30000 ms
+  parsePayoutRetryAfter("Fri, 20 Mar 2026 09:00:05 GMT") -> 5000 ms
+  parsePayoutRetryAfter("Fri, 20 Mar 2026 08:59:59 GMT") -> 0 ms
+  parsePayoutRetryAfter("banana") -> undefined
+  parsePayoutRetryAfter(null) -> undefined
+  retry context: the fan-out risk endpoint answered 500, so its retries used exponential backoff; had it answered 429 with a Retry-After header, the parsed wait above (clamped to maxRetryDelayMs) would have set the next attempt's delay — an absent or unparsable header (undefined) falls back to that backoff
+
 Reconciliation screening branch (two more PAID tasks, then the finance pass):
 Task DEMO-004: DRAFT
   PUBLISH         DRAFT        -> OPEN  (researcher)
@@ -281,7 +292,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 232);
+  assert.equal(lines.length, 242);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1165,13 +1176,94 @@ test("demo fan-out segment is deterministic: two runs print byte-identical fan-o
   const b = await runDemo();
   const segA = fanLines(a.lines);
   // Header + shared line + 3 per-endpoint lines + summary line +
-  // shared-event check line; every value in the segment is a fixed
-  // literal or derived from one (shared now / eventId, per-endpoint
-  // demo secrets), so no normalization is needed.
-  assert.equal(segA.length, 7);
+  // shared-event check line, plus the Retry-After segment that
+  // now follows it (blank + header + fixed-now line + 6 corpus
+  // lines + retry-context line); every value in either segment
+  // is a fixed literal or derived from one (shared now / eventId,
+  // per-endpoint demo secrets), so no normalization is needed.
+  assert.equal(segA.length, 17);
   assert.deepEqual(segA, fanLines(b.lines));
   assert.deepEqual(a.fanoutCalls, b.fanoutCalls);
   assert.deepEqual(a.fanoutResult, b.fanoutResult);
+});
+
+test("demo shows the Retry-After parsing segment in-process: delay-seconds and HTTP-date forms normalize, past dates clamp, garbage and absent values fall back", async () => {
+  const { retryAfterParsed, lines } = await runDemo();
+  const text = lines.join("\n");
+  const NOW_MS = Date.parse("2026-03-20T09:00:00.000Z");
+
+  // The structured results are exactly the hand-written
+  // expectations from the demo source for the fixed 6-value
+  // corpus under the fan-out segment's shared instant.
+  assert.deepEqual(retryAfterParsed, [2000, 30000, 5000, 0, undefined, undefined]);
+  // An independent re-parse of the same hand-written corpus
+  // under the same fixed now reproduces the same results — the
+  // demo segment is not self-certifying.
+  const corpus: Array<string | null> = [
+    "2",
+    "  30 ",
+    new Date(NOW_MS + 5_000).toUTCString(),
+    new Date(NOW_MS - 1_000).toUTCString(),
+    "banana",
+    null,
+  ];
+  assert.deepEqual(
+    corpus.map((v) => parsePayoutRetryAfter(v, NOW_MS)),
+    retryAfterParsed,
+  );
+  // The segment is printed after the fan-out segment and before
+  // the reconciliation branch, with its lines verbatim (the
+  // HTTP-date strings are exact literals: the fixed instant sits
+  // on a whole second and toUTCString() has one-second
+  // precision).
+  const retryAt = text.indexOf("Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):");
+  assert.ok(
+    retryAt >
+      text.indexOf("Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):"),
+    "Retry-After segment must follow the fan-out segment",
+  );
+  assert.ok(
+    text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") > retryAt,
+    "reconciliation branch must follow the Retry-After segment",
+  );
+  assert.match(
+    text,
+    /fixed now: 2026-03-20T09:00:00\.000Z \(the fan-out segment's shared instant, reused as nowMs; no wall clock\)/,
+  );
+  assert.match(text, /parsePayoutRetryAfter\("2"\) -> 2000 ms/);
+  assert.match(text, /parsePayoutRetryAfter\(" {2}30 "\) -> 30000 ms/);
+  assert.match(
+    text,
+    /parsePayoutRetryAfter\("Fri, 20 Mar 2026 09:00:05 GMT"\) -> 5000 ms/,
+  );
+  assert.match(
+    text,
+    /parsePayoutRetryAfter\("Fri, 20 Mar 2026 08:59:59 GMT"\) -> 0 ms/,
+  );
+  assert.match(text, /parsePayoutRetryAfter\("banana"\) -> undefined/);
+  assert.match(text, /parsePayoutRetryAfter\(null\) -> undefined/);
+  assert.match(
+    text,
+    /retry context: the fan-out risk endpoint answered 500, so its retries used exponential backoff; had it answered 429 with a Retry-After header, the parsed wait above \(clamped to maxRetryDelayMs\) would have set the next attempt's delay/,
+  );
+});
+
+test("demo Retry-After segment is deterministic: two runs print byte-identical parsing lines", async () => {
+  const retryLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):"),
+      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = retryLines(a.lines);
+  // Header + fixed-now line + 6 corpus lines + retry-context
+  // line; every value is a fixed literal or derived from the
+  // fan-out segment's fixed instant, so no normalization is
+  // needed.
+  assert.equal(segA.length, 9);
+  assert.deepEqual(segA, retryLines(b.lines));
+  assert.deepEqual(a.retryAfterParsed, b.retryAfterParsed);
 });
 
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
@@ -1181,7 +1273,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 232);
+  assert.equal(out.trimEnd().split("\n").length, 242);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout Retry-After parsing segment in the CLI demo: a fixed
+  6-value corpus (`"2"`, `"  30 "`, a future HTTP-date, a past
+  HTTP-date, `"banana"`, and `null`) is parsed with
+  `parsePayoutRetryAfter()` under the fan-out segment's shared
+  fixed instant (2026-03-20T09:00:00.000Z) reused as `nowMs` — no
+  new instant, no network, no randomness, no wall clock.
+  Delay-seconds normalize to milliseconds (2000 / 30000, the
+  second value trimmed first), the future date yields its exact
+  5000 ms delta, the past date clamps to 0, and the garbage and
+  absent values return `undefined` (the caller's fallback to
+  exponential backoff). A closing line ties the corpus to the
+  fan-out segment: the risk endpoint answered 500, so its
+  retries used backoff; had it answered 429 with a `Retry-After`
+  header, the parsed wait (clamped to `maxRetryDelayMs`) would
+  have set the next attempt's delay. `runDemo()` returns the six
+  parsed results in corpus order; the demo tests pin the
+  structured results (cross-checked by an independent re-parse
+  of the same corpus under the same fixed now), the exact
+  printed lines in the golden output, and the segment's
+  printed-line determinism across two runs. Demo and tests only;
+  no library behavior change.
 - Benchmark coverage for standalone history parsing:
   `parseHistory(history)` over the fixed 8-entry chained
   history now appears in `npm run bench`. Per-iteration

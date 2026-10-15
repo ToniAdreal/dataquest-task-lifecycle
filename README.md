@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 520 tests, all local
+npm test   # 522 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -56,7 +56,15 @@ injected fake fetch (zero real network) under one shared fixed
 `eventId` and `now`, each endpoint signed with its own demo
 secret — the endpoint scripted to answer 500 exhausts its
 retries and fails without blocking the other two, and the
-per-endpoint results print in input order — and a final reconciliation
+per-endpoint results print in input order — a Retry-After parsing
+segment that runs `parsePayoutRetryAfter` over a fixed 6-value
+corpus under the fan-out segment's shared fixed instant reused
+as `nowMs` (delay-seconds `"2"` → 2000 ms and `"  30 "` → 30000 ms,
+a future HTTP-date → 5000 ms, a past HTTP-date → 0 ms, and
+`"banana"` / absent values → `undefined`, the fallback to
+exponential backoff — the hint a 429 response, unlike the risk
+endpoint's 500, would have used to set the next retry delay) —
+and a final reconciliation
 screening branch that drives two more tasks to PAID under
 fixed-literal timestamps — one settled with no `payoutRef` on its
 `PAYOUT_COMPLETE` entry, one settled for less than its `ACCEPT`
@@ -1130,7 +1138,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 520 tests covering the happy path, reject→resubmit
+`npm test` runs 522 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
