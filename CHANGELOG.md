@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A multi-endpoint fan-out delivery segment in the CLI demo:
+  after the batch segment, the main task's payout event is
+  delivered with `deliverPayoutWebhookToMany` to three fixed
+  endpoints (billing / risk / notifications) under one shared
+  fixed `now` (2026-03-20T09:00:00.000Z) and one shared
+  `eventId`, each endpoint signed with its own demo secret,
+  through an injected fake `fetchImpl` (no real network) and a
+  no-op `sleepImpl` with `backoffMs: 0` (no real sleeps). The
+  risk endpoint answers 500 on every attempt and fails after
+  the default 3 attempts while the other two succeed on their
+  first attempt — the results print in input order (2
+  delivered, 1 failed) with a shared-event check line.
+  `runDemo()` is now async and returns the fan-out result plus
+  the wire calls the fake fetch received; the demo tests pin
+  the structured results (cross-checked against the recorded
+  wire bodies and signatures, each verifying only under its
+  own endpoint's secret), the exact printed lines, and the
+  segment's byte-identical determinism across two runs. Demo
+  and tests only; no library behavior change.
 - Benchmark coverage for per-task payout mismatch judgement:
   `payoutMismatch()` over a fixed set of 5 tasks (settled exactly
   as quoted, settled for a different amount, missing quote,

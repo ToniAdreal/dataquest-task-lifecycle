@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 510 tests, all local
+npm test   # 512 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -43,7 +43,14 @@ default of one hour — lapses at exactly its boundary), a batch
 segment that runs `buildPayoutWebhooks` over all three demo tasks
 under one shared fixed `now` and a deterministic `eventId` factory (the PAID task builds and
 verifies; each non-PAID task lands as `{ taskId, error }` only and
-never blocks the tasks after it), and a final reconciliation
+never blocks the tasks after it), a fan-out delivery segment
+that delivers the main task's payout event with
+`deliverPayoutWebhookToMany` to three fixed endpoints through an
+injected fake fetch (zero real network) under one shared fixed
+`eventId` and `now`, each endpoint signed with its own demo
+secret — the endpoint scripted to answer 500 exhausts its
+retries and fails without blocking the other two, and the
+per-endpoint results print in input order — and a final reconciliation
 screening branch that drives two more tasks to PAID under
 fixed-literal timestamps — one settled with no `payoutRef` on its
 `PAYOUT_COMPLETE` entry, one settled for less than its `ACCEPT`
@@ -1087,7 +1094,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 510 tests covering the happy path, reject→resubmit
+`npm test` runs 512 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

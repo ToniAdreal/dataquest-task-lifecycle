@@ -133,6 +133,14 @@ Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):
   DEMO-003: error: cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce
   batch: 1 webhook(s) built, 2 error(s) — a non-PAID task fails only itself and never blocks later tasks
 
+Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):
+  shared eventId: evt_demo_fanout_001, shared at: <timestamp> (one logical event for all endpoints)
+  billing (https://billing.example.com/hooks/payout): ok attempts=1 status=200
+  risk (https://risk.example.com/hooks/payout): FAILED attempts=3 status=500 error=server responded with status 500
+  notifications (https://notifications.example.com/hooks/payout): ok attempts=1 status=200
+  fan-out: 2 delivered, 1 failed — the failing endpoint did not block the others
+  shared event check: all endpoints received the same eventId evt_demo_fanout_001: true (identical payload bytes, signed per endpoint with its own secret)
+
 Reconciliation screening branch (two more PAID tasks, then the finance pass):
 Task DEMO-004: DRAFT
   PUBLISH         DRAFT        -> OPEN  (researcher)
@@ -191,14 +199,14 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   TaskLifecycle.fromHistory(DEMO-001, entries): state PAID, 12 history entries
   replay matches the original (state + full history): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID`;
 
-test("demo lines match the pre-refactor golden output, line for line", () => {
-  const { lines } = runDemo();
-  assert.equal(lines.length, 150);
+test("demo lines match the pre-refactor golden output, line for line", async () => {
+  const { lines } = await runDemo();
+  assert.equal(lines.length, 158);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
-test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-process", () => {
-  const { task, lines } = runDemo();
+test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-process", async () => {
+  const { task, lines } = await runDemo();
   const text = lines.join("\n");
 
   assert.equal(task.id, "DEMO-001");
@@ -236,8 +244,8 @@ test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-proces
   assert.equal(seqRows.length, 23);
 });
 
-test("demo builds the payout webhook from the settled task and verifies it (structured)", () => {
-  const { webhook, webhookVerified, lines } = runDemo();
+test("demo builds the payout webhook from the settled task and verifies it (structured)", async () => {
+  const { webhook, webhookVerified, lines } = await runDemo();
   const { payload, signature } = webhook;
 
   // Payload fields derive from the PAYOUT_COMPLETE audit entry — the
@@ -273,8 +281,8 @@ test("demo builds the payout webhook from the settled task and verifies it (stru
   assert.match(text, /verifyPayoutWebhook: ok/);
 });
 
-test("demo shows the receiver-side dedupe segment in-process: first delivery booked, redelivery skipped, same id accepted again after the TTL", () => {
-  const { dedupeFirst, dedupeRedelivery, dedupeAfterTtl, webhook, lines } = runDemo();
+test("demo shows the receiver-side dedupe segment in-process: first delivery booked, redelivery skipped, same id accepted again after the TTL", async () => {
+  const { dedupeFirst, dedupeRedelivery, dedupeAfterTtl, webhook, lines } = await runDemo();
   const text = lines.join("\n");
 
   // The three structured outcomes are the hand-written expectations
@@ -320,14 +328,14 @@ test("demo shows the receiver-side dedupe segment in-process: first delivery boo
   );
 });
 
-test("demo dedupe segment is deterministic in outcome: two runs agree on all three checkAndRecord results", () => {
+test("demo dedupe segment is deterministic in outcome: two runs agree on all three checkAndRecord results", async () => {
   const dedupeLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):"),
       ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):") - 1,
     );
-  const a = runDemo();
-  const b = runDemo();
+  const a = await runDemo();
+  const b = await runDemo();
   // Header + ttl line + 3 delivery lines; the only varying value
   // is the main webhook's random eventId, normalized away — the
   // segment's clock is injected and fixed, never the wall clock.
@@ -340,8 +348,8 @@ test("demo dedupe segment is deterministic in outcome: two runs agree on all thr
   );
 });
 
-test("demo shows the SLA watchdog branch in-process: screening finds DEMO-002, then EXPIRE lands it in EXPIRED", () => {
-  const { overdueTask, overdueFound, lines } = runDemo();
+test("demo shows the SLA watchdog branch in-process: screening finds DEMO-002, then EXPIRE lands it in EXPIRED", async () => {
+  const { overdueTask, overdueFound, lines } = await runDemo();
   const text = lines.join("\n");
 
   assert.deepEqual(
@@ -373,8 +381,8 @@ test("demo shows the SLA watchdog branch in-process: screening finds DEMO-002, t
   assert.ok(screenAt >= 0 && expireAt > screenAt, "EXPIRE must follow the screening line");
 });
 
-test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in DISPUTED, arbitration returns it to REJECTED", () => {
-  const { disputeTask, lines } = runDemo();
+test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in DISPUTED, arbitration returns it to REJECTED", async () => {
+  const { disputeTask, lines } = await runDemo();
   const text = lines.join("\n");
 
   assert.equal(disputeTask.id, "DEMO-003");
@@ -427,8 +435,8 @@ test("demo shows the DISPUTE appeal branch in-process: DISPUTE lands DEMO-003 in
   );
 });
 
-test("demo builds the batch payout webhooks in-process: per-item isolation and per-item verification", () => {
-  const { batchResults, batchVerified, lines } = runDemo();
+test("demo builds the batch payout webhooks in-process: per-item isolation and per-item verification", async () => {
+  const { batchResults, batchVerified, lines } = await runDemo();
   const text = lines.join("\n");
 
   // One result per demo task, in input order.
@@ -466,8 +474,8 @@ test("demo builds the batch payout webhooks in-process: per-item isolation and p
     "cannot build payout webhook: task DEMO-003 is in state REJECTED, only PAID tasks have a completed settlement to announce",
   );
   // The batch section is printed after the single webhook section,
-  // with one line per result plus the summary (the reconciliation
-  // branch follows it and closes the demo).
+  // with one line per result plus the summary (the fan-out delivery
+  // segment follows it).
   const batchAt = text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):");
   assert.ok(
     batchAt > text.indexOf("Payout webhook (signed PAYOUT_COMPLETE notification):"),
@@ -480,14 +488,14 @@ test("demo builds the batch payout webhooks in-process: per-item isolation and p
   assert.match(text, /batch: 1 webhook\(s\) built, 2 error\(s\)/);
 });
 
-test("demo batch segment is deterministic: two runs print byte-identical batch lines", () => {
+test("demo batch segment is deterministic: two runs print byte-identical batch lines", async () => {
   const batchLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
-      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+      ls.indexOf("Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):") - 1,
     );
-  const a = batchLines(runDemo().lines);
-  const b = batchLines(runDemo().lines);
+  const a = batchLines((await runDemo()).lines);
+  const b = batchLines((await runDemo()).lines);
   assert.equal(a.length, 6);
   assert.deepEqual(a, b);
   // The fixed shared `now` is printed literally — no wall clock, no
@@ -495,9 +503,9 @@ test("demo batch segment is deterministic: two runs print byte-identical batch l
   assert.match(a.join("\n"), /shared now: 2026-03-13T09:00:00\.000Z/);
 });
 
-test("demo shows the reconciliation screening branch in-process: unreconciled, mismatched, and total match the hand-computed expectations", () => {
+test("demo shows the reconciliation screening branch in-process: unreconciled, mismatched, and total match the hand-computed expectations", async () => {
   const { unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines } =
-    runDemo();
+    await runDemo();
   const text = lines.join("\n");
 
   // Both branch tasks are driven to PAID under fixed-literal
@@ -551,10 +559,10 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.equal(mismatchedTask.state, "PAID");
   assert.equal(unreconciledTask.history.length, 8);
   assert.equal(mismatchedTask.history.length, 8);
-  // The branch is printed after the batch section (the
-  // subscription branch follows it, then the event-sourcing
-  // replay segment closes the demo), with the three screening
-  // lines verbatim.
+  // The branch is printed after the batch section and the fan-out
+  // delivery segment (the subscription branch follows it, then the
+  // event-sourcing replay segment closes the demo), with the three
+  // screening lines verbatim.
   const reconAt = text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):");
   assert.ok(
     reconAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
@@ -572,14 +580,14 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the 3 PAID tasks/);
 });
 
-test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", () => {
+test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", async () => {
   const reconLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
       ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
     );
-  const a = reconLines(runDemo().lines);
-  const b = reconLines(runDemo().lines);
+  const a = reconLines((await runDemo()).lines);
+  const b = reconLines((await runDemo()).lines);
   // Header + (task header + 8 transitions + note) x2 + 4 screening
   // lines; every timestamp in the segment is a fixed literal that
   // never reaches the printed lines, so no normalization is needed.
@@ -588,14 +596,14 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
 });
 
 
-test("demo shows the dispatch subscription branch in-process: ordered notifications match history, silence after unsubscribe", () => {
+test("demo shows the dispatch subscription branch in-process: ordered notifications match history, silence after unsubscribe", async () => {
   const {
     subscriptionTask,
     subscriptionNotifications,
     subscriptionMatchesHistory,
     subscriptionCountAfterUnsubscribe,
     lines,
-  } = runDemo();
+  } = await runDemo();
   const text = lines.join("\n");
 
   // The branch task ends in SUBMITTED (not terminal) with four
@@ -656,14 +664,14 @@ test("demo shows the dispatch subscription branch in-process: ordered notificati
   assert.match(text, /Final state \(subscription branch\): SUBMITTED \(terminal: false\)/);
 });
 
-test("demo subscription segment is deterministic: two runs print byte-identical subscription lines", () => {
+test("demo subscription segment is deterministic: two runs print byte-identical subscription lines", async () => {
   const subLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):"),
       ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
     );
-  const a = subLines(runDemo().lines);
-  const b = subLines(runDemo().lines);
+  const a = subLines((await runDemo()).lines);
+  const b = subLines((await runDemo()).lines);
   // Header + task header + subscribed line + received header + 3
   // notification lines + match line + unsubscribed line + SUBMIT
   // line + after-unsubscribe line + blank + final-state line;
@@ -673,8 +681,8 @@ test("demo subscription segment is deterministic: two runs print byte-identical 
   assert.deepEqual(a, b);
 });
 
-test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", () => {
-  const { task, ndjsonText, replayedTask, lines } = runDemo();
+test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", async () => {
+  const { task, ndjsonText, replayedTask, lines } = await runDemo();
   const text = lines.join("\n");
 
   // The export is the main task's full history: 12 NDJSON lines,
@@ -735,13 +743,13 @@ test("demo shows the event-sourcing replay segment in-process: NDJSON export par
   );
 });
 
-test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", () => {
+test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
     );
-  const a = runDemo();
-  const b = runDemo();
+  const a = await runDemo();
+  const b = await runDemo();
   const segA = segment(a.lines);
   // Blank separator + header + intro line + 12 NDJSON lines + the
   // parsed-count, fromHistory, and match lines.
@@ -758,14 +766,139 @@ test("demo event-sourcing segment agrees across two runs once the main task's ow
   assert.equal(b.ndjsonText.trimEnd().split("\n").length, 12);
 });
 
-test("CLI entry point still runs as a subprocess and prints the same golden output", () => {
+test("demo shows the fan-out delivery segment in-process: per-endpoint results in input order, one failure does not block the others, one shared eventId", async () => {
+  const { fanoutResult, fanoutCalls, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // The aggregate outcome is exactly the hand-written expectation
+  // from the demo source: billing and notifications succeed on
+  // their first attempt; risk answers 500 on every attempt and
+  // exhausts the default retry budget (3 attempts) — and its
+  // failure neither blocks nor fails the other two.
+  assert.deepEqual(fanoutResult.results, [
+    { ok: true, attempts: 1, status: 200 },
+    {
+      ok: false,
+      attempts: 3,
+      status: 500,
+      error: "server responded with status 500",
+    },
+    { ok: true, attempts: 1, status: 200 },
+  ]);
+  assert.equal(fanoutResult.delivered, 2);
+  assert.equal(fanoutResult.failed, 1);
+  // The wire record proves the delivery really happened through
+  // the injected fake fetch: 5 calls in total (1 + 3 + 1), zero
+  // real network. The first call per endpoint carries a
+  // byte-identical body — one logical event: the shared fixed
+  // eventId, the shared fixed `at`, the main task's settlement —
+  // under three different signatures, each verifying only under
+  // its own endpoint's demo secret.
+  assert.equal(fanoutCalls.length, 5);
+  const fanoutUrls = [
+    "https://billing.example.com/hooks/payout",
+    "https://risk.example.com/hooks/payout",
+    "https://notifications.example.com/hooks/payout",
+  ];
+  const fanoutSecrets = [
+    "demo-fanout-billing-secret-do-not-use-in-production",
+    "demo-fanout-risk-secret-do-not-use-in-production",
+    "demo-fanout-notifications-secret-do-not-use-in-production",
+  ];
+  const firsts = fanoutUrls.map((u) => fanoutCalls.find((c) => c.url === u)!);
+  assert.ok(firsts.every((c) => c.body === firsts[0].body));
+  const sharedPayload = JSON.parse(firsts[0].body) as {
+    eventId: string;
+    at: string;
+    taskId: string;
+  };
+  assert.equal(sharedPayload.eventId, "evt_demo_fanout_001");
+  assert.equal(sharedPayload.at, "2026-03-20T09:00:00.000Z");
+  assert.equal(sharedPayload.taskId, "DEMO-001");
+  assert.equal(new Set(firsts.map((c) => c.signature)).size, 3);
+  firsts.forEach((c, i) => {
+    assert.equal(verifyPayoutWebhook(c.body, c.signature, fanoutSecrets[i]), true);
+    assert.equal(
+      verifyPayoutWebhook(c.body, c.signature, fanoutSecrets[(i + 1) % 3]),
+      false,
+    );
+  });
+  // The failing endpoint's retries re-POST the identical signed
+  // bytes (the same body and signature on all 3 attempts).
+  const riskCalls = fanoutCalls.filter((c) => c.url === fanoutUrls[1]);
+  assert.equal(riskCalls.length, 3);
+  assert.ok(
+    riskCalls.every(
+      (c) => c.body === riskCalls[0].body && c.signature === riskCalls[0].signature,
+    ),
+  );
+  // The segment is printed after the batch section and before the
+  // reconciliation branch, with its lines verbatim (the shared
+  // `at` is a fixed literal, printed as-is).
+  const fanAt = text.indexOf(
+    "Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):",
+  );
+  assert.ok(
+    fanAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
+    "fan-out segment must follow the batch section",
+  );
+  assert.ok(
+    text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") > fanAt,
+    "reconciliation branch must follow the fan-out segment",
+  );
+  assert.match(
+    text,
+    /shared eventId: evt_demo_fanout_001, shared at: 2026-03-20T09:00:00\.000Z \(one logical event for all endpoints\)/,
+  );
+  assert.match(
+    text,
+    /billing \(https:\/\/billing\.example\.com\/hooks\/payout\): ok attempts=1 status=200/,
+  );
+  assert.match(
+    text,
+    /risk \(https:\/\/risk\.example\.com\/hooks\/payout\): FAILED attempts=3 status=500 error=server responded with status 500/,
+  );
+  assert.match(
+    text,
+    /notifications \(https:\/\/notifications\.example\.com\/hooks\/payout\): ok attempts=1 status=200/,
+  );
+  assert.match(
+    text,
+    /fan-out: 2 delivered, 1 failed — the failing endpoint did not block the others/,
+  );
+  assert.match(
+    text,
+    /shared event check: all endpoints received the same eventId evt_demo_fanout_001: true \(identical payload bytes, signed per endpoint with its own secret\)/,
+  );
+});
+
+test("demo fan-out segment is deterministic: two runs print byte-identical fan-out lines and record identical wire calls", async () => {
+  const fanLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):"),
+      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = fanLines(a.lines);
+  // Header + shared line + 3 per-endpoint lines + summary line +
+  // shared-event check line; every value in the segment is a fixed
+  // literal or derived from one (shared now / eventId, per-endpoint
+  // demo secrets), so no normalization is needed.
+  assert.equal(segA.length, 7);
+  assert.deepEqual(segA, fanLines(b.lines));
+  assert.deepEqual(a.fanoutCalls, b.fanoutCalls);
+  assert.deepEqual(a.fanoutResult, b.fanoutResult);
+});
+
+test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
     [path.join(repoRoot, "dist", "src", "demo.js")],
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 150);
+  assert.equal(out.trimEnd().split("\n").length, 158);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

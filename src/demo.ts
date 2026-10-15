@@ -16,7 +16,14 @@
  * run the batch builder
  * (`buildPayoutWebhooks`) over all three demo tasks — the
  * settlement-peak pipeline in which each non-PAID task fails only
- * itself and every built webhook is verified in turn — and finally
+ * itself and every built webhook is verified in turn — then fan
+ * the main task's payout event out with
+ * `deliverPayoutWebhookToMany` to three fixed endpoints under one
+ * shared fixed `eventId` / `now`, each endpoint signed with its
+ * own demo secret and delivered through an injected fake fetch
+ * (one endpoint answers 500 on every attempt and exhausts its
+ * retries; the other two still succeed — a failing endpoint never
+ * blocks the rest) — and finally
  * run a reconciliation screening branch: two more tasks driven to
  * PAID under fixed-literal timestamps, one settled with no
  * `payoutRef` on its `PAYOUT_COMPLETE` entry and one settled for
@@ -43,6 +50,8 @@
  * shape as the sibling demos in rfc9421-signing-demo and
  * escrow-state-machine-ts): it returns all six tasks, the screening
  * results, the built webhook and its verification outcome, the
+ * multi-endpoint fan-out delivery result and the wire copies the
+ * injected fake fetch received, the
  * NDJSON export of the main task's history and the task replayed
  * from it, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
@@ -61,6 +70,7 @@ import {
   TaskLifecycle,
   buildPayoutWebhook,
   buildPayoutWebhooks,
+  deliverPayoutWebhookToMany,
   expiredTasks,
   historyFromNdjson,
   historyToNdjson,
@@ -70,7 +80,9 @@ import {
   unreconciledPayouts,
   verifyPayoutWebhook,
   type BuildPayoutWebhooksResult,
+  type DeliverPayoutWebhookToManyResult,
   type PayoutWebhook,
+  type PayoutWebhookFetchImpl,
   type TaskEvent,
   type TaskState,
 } from "./index.js";
@@ -116,6 +128,13 @@ const steps: Array<{
   },
 ];
 
+/** One wire call recorded by the demo fan-out segment's fake fetch. */
+export interface FanoutCall {
+  url: string;
+  body: string;
+  signature: string;
+}
+
 /** One notification collected by the demo's subscription listener. */
 export interface SubscriptionNotification {
   event: TaskEvent;
@@ -136,6 +155,8 @@ export interface DemoResult {
   dedupeAfterTtl: boolean;
   batchResults: BuildPayoutWebhooksResult[];
   batchVerified: Array<boolean | undefined>;
+  fanoutResult: DeliverPayoutWebhookToManyResult;
+  fanoutCalls: FanoutCall[];
   unreconciledTask: TaskLifecycle;
   mismatchedTask: TaskLifecycle;
   unreconciledFound: TaskLifecycle[];
@@ -155,15 +176,16 @@ export interface DemoResult {
  * six tasks, the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
- * verification outcomes, the reconciliation screening results with
- * the paid-out total, the subscription branch's collected
+ * verification outcomes, the fan-out delivery result with the wire
+ * calls the injected fake fetch received, the reconciliation
+ * screening results with the paid-out total, the subscription branch's collected
  * notifications with their history-match verdict and the
  * post-unsubscribe notification count, the NDJSON export of the main task's history
  * and the task replayed from that export, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
-export function runDemo(): DemoResult {
+export async function runDemo(): Promise<DemoResult> {
   // The demo sets an explicit resubmit budget of 2 so the REJECT ->
   // RESUBMIT loop below shows the budget being consumed (this script
   // uses 1 of the 2). The library default for `maxResubmits` is
@@ -397,6 +419,104 @@ export function runDemo(): DemoResult {
     `  batch: ${batchBuilt} webhook(s) built, ${batchResults.length - batchBuilt} error(s) — a non-PAID task fails only itself and never blocks later tasks`,
   );
 
+  // Multi-endpoint fan-out delivery segment: building a webhook is
+  // not delivering it. The batch segment above stops at signed
+  // payloads; here the main task's payout event is actually
+  // delivered with deliverPayoutWebhookToMany — ONE logical event
+  // (shared fixed `now` 2026-03-20T09:00:00.000Z, shared fixed
+  // eventId "evt_demo_fanout_001") fanned out to three fixed
+  // endpoints, each signed with its OWN demo secret (placeholder
+  // values in this source, not real credentials). All delivery
+  // goes through an injected fake fetchImpl that records every
+  // wire call and answers from a fixed script — billing 200, risk
+  // 500 on every attempt, notifications 200 — so the segment
+  // performs zero real network I/O; an injected no-op sleepImpl
+  // plus backoffMs 0 mean the risk endpoint's retries (the default
+  // maxAttempts of 3) never really sleep, so no wall clock is
+  // waited on either. Hand-written expectations: results stay in
+  // input order — billing ok (1 attempt, status 200), risk FAILED
+  // (3 attempts, status 500, error "server responded with status
+  // 500"), notifications ok (1 attempt, status 200) — delivered 2,
+  // failed 1: the failing endpoint neither blocks nor fails the
+  // others. The fake fetch sees 5 calls in total (1 + 3 + 1); the
+  // first call per endpoint carries a byte-identical body (the
+  // shared eventId / at) under three different signatures, each
+  // verifying only under its own endpoint's secret.
+  const FANOUT_NOW = new Date("2026-03-20T09:00:00.000Z");
+  const FANOUT_EVENT_ID = "evt_demo_fanout_001";
+  const fanoutEndpoints = [
+    {
+      name: "billing",
+      url: "https://billing.example.com/hooks/payout",
+      secret: "demo-fanout-billing-secret-do-not-use-in-production",
+    },
+    {
+      name: "risk",
+      url: "https://risk.example.com/hooks/payout",
+      secret: "demo-fanout-risk-secret-do-not-use-in-production",
+    },
+    {
+      name: "notifications",
+      url: "https://notifications.example.com/hooks/payout",
+      secret: "demo-fanout-notifications-secret-do-not-use-in-production",
+    },
+  ] as const;
+  const fanoutCalls: FanoutCall[] = [];
+  const fanoutFetch: PayoutWebhookFetchImpl = async (url, init) => {
+    fanoutCalls.push({
+      url,
+      body: String(init.body ?? ""),
+      signature: String(
+        new Headers(init.headers).get("x-hub-signature-256") ?? "",
+      ),
+    });
+    return new Response("{}", {
+      status: url === fanoutEndpoints[1].url ? 500 : 200,
+    });
+  };
+  const fanoutResult = await deliverPayoutWebhookToMany(
+    task,
+    fanoutEndpoints.map(({ url, secret }) => ({ url, secret })),
+    {
+      fetchImpl: fanoutFetch,
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      now: FANOUT_NOW,
+      eventId: FANOUT_EVENT_ID,
+    },
+  );
+  lines.push(
+    "",
+    "Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):",
+  );
+  lines.push(
+    `  shared eventId: ${FANOUT_EVENT_ID}, shared at: ${FANOUT_NOW.toISOString()} (one logical event for all endpoints)`,
+  );
+  fanoutResult.results.forEach((r, i) => {
+    const ep = fanoutEndpoints[i];
+    lines.push(
+      r.ok
+        ? `  ${ep.name} (${ep.url}): ok attempts=${r.attempts} status=${r.status}`
+        : `  ${ep.name} (${ep.url}): FAILED attempts=${r.attempts} status=${r.status} error=${r.error}`,
+    );
+  });
+  lines.push(
+    `  fan-out: ${fanoutResult.delivered} delivered, ${fanoutResult.failed} failed — the failing endpoint did not block the others`,
+  );
+  const fanoutFirstCalls = fanoutEndpoints.map(
+    (ep) => fanoutCalls.find((c) => c.url === ep.url)!,
+  );
+  const fanoutSharedEvent =
+    fanoutFirstCalls.every((c) => c.body === fanoutFirstCalls[0].body) &&
+    fanoutFirstCalls.every(
+      (c) =>
+        (JSON.parse(c.body) as { eventId?: string }).eventId ===
+        FANOUT_EVENT_ID,
+    );
+  lines.push(
+    `  shared event check: all endpoints received the same eventId ${FANOUT_EVENT_ID}: ${fanoutSharedEvent} (identical payload bytes, signed per endpoint with its own secret)`,
+  );
+
   // Reconciliation screening branch: payout day is not the end of
   // the story — finance then screens the settled tasks for the ones
   // whose settlement lacks external evidence or disagrees with the
@@ -604,15 +724,15 @@ export function runDemo(): DemoResult {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, ndjsonText, replayedTask, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, ndjsonText, replayedTask, lines };
 }
 
-function main(): void {
-  console.log(runDemo().lines.join("\n"));
+async function main(): Promise<void> {
+  console.log((await runDemo()).lines.join("\n"));
 }
 
 // Run only when executed directly (`node dist/src/demo.js`), not when
 // imported by tests.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main();
+  void main();
 }
