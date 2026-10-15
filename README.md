@@ -15,14 +15,20 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 516 tests, all local
+npm test   # 518 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
 through the full `DRAFT → PAID` chain, including a first submission that is
 rejected in QA and resubmitted (the demo sets `maxResubmits: 2` and uses 1 of
 the 2; the library default is unlimited) before passing on re-review, with
-the append-only audit history printed to stdout, then a second task running
+the append-only audit history printed to stdout, an audit hash-chain
+segment that runs `verifyHistoryChain` on that history — the intact
+12-entry chain passes, a detached copy whose `PAYOUT_COMPLETE`
+entry's `payoutAmount` is altered by 1 is detected (`false`: the
+stored hash no longer recomputes), and the original history
+re-verifies untouched — the verify-before-replay check an auditor
+runs before trusting a persisted history, then a second task running
 the SLA watchdog branch (its ACCEPTED-state deadline is already past at a
 fixed screening instant, `expiredTasks()` finds it while it is still
 ACCEPTED — the deadline alone never expires a task — and a watchdog
@@ -1112,7 +1118,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 516 tests covering the happy path, reject→resubmit
+`npm test` runs 518 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

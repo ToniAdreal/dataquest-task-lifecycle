@@ -1,7 +1,11 @@
 /**
  * Demo: drive one task from DRAFT to PAID — its first submission is
  * REJECTed in QA and RESUBMITted before it passes on re-review — print
- * the append-only audit history, run a second task through the SLA
+ * the append-only audit history, verify that history's hash chain
+ * with `verifyHistoryChain` (the intact chain passes; a detached
+ * copy whose PAYOUT_COMPLETE entry's `payoutAmount` is altered by 1
+ * is detected, and the original history re-verifies untouched), run
+ * a second task through the SLA
  * watchdog branch (an advisory deadline passes, `expiredTasks()`
  * screening finds the task, and a watchdog explicitly dispatches
  * EXPIRE into the EXPIRED terminal state), run a third task through
@@ -96,6 +100,7 @@ import {
   staleTasks,
   totalPaidOut,
   unreconciledPayouts,
+  verifyHistoryChain,
   verifyPayoutWebhook,
   type BuildPayoutWebhooksResult,
   type DeliverPayoutWebhookToManyResult,
@@ -164,6 +169,12 @@ export interface SubscriptionNotification {
 
 export interface DemoResult {
   task: TaskLifecycle;
+  /** `verifyHistoryChain` verdict on the main task's intact history. */
+  historyChainVerified: boolean;
+  /** `verifyHistoryChain` verdict on the detached tampered copy. */
+  tamperedChainVerified: boolean;
+  /** The tampered copy's altered PAYOUT_COMPLETE `payoutAmount`. */
+  tamperedPayoutAmount: number;
   overdueTask: TaskLifecycle;
   overdueFound: TaskLifecycle[];
   disputeTask: TaskLifecycle;
@@ -197,7 +208,9 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * thirteen tasks, the watchdog screening result, the built + verified
+ * thirteen tasks, the audit hash-chain verification verdicts for
+ * the main task's history (intact, and a detached tampered copy),
+ * the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the fan-out delivery result with the wire
@@ -241,6 +254,46 @@ export async function runDemo(): Promise<DemoResult> {
       `  ${String(h.seq).padStart(3)}  ${h.event.padEnd(16)} ${h.from.padEnd(13)} -> ${h.to.padEnd(13)} ${String(h.actor ?? "-").padEnd(12)} ${h.at}`,
     );
   }
+
+  // Audit hash-chain segment: the history just printed is
+  // hash-chained (each entry links to its predecessor's hash,
+  // genesis-linked to GENESIS_PREV_HASH), and everything later in
+  // this demo — the payout webhook, the replay segment at the
+  // end — is derived from it, so the audit workflow verifies the
+  // chain before trusting the history ("verify before replay").
+  // verifyHistoryChain recomputes every link and returns a plain
+  // boolean — true for the intact chain. To show what a rewrite
+  // looks like, build a detached copy (fresh entry objects — the
+  // task's history getter hands out frozen copies), alter the
+  // PAYOUT_COMPLETE entry's payoutAmount by 1, and verify again:
+  // the stored hash no longer recomputes from the altered
+  // canonical content, so the verdict flips to false. This demo's
+  // main task carries an unkeyed chain (no auditSecret), so no
+  // secret argument is passed; a keyed chain would need its
+  // secret here and would fail closed without it. The task's own
+  // history is never touched, and re-verifying it after the
+  // tamper check still passes. The segment adds no new
+  // nondeterminism: it only reads the main task's existing
+  // history and prints no timestamps or hashes.
+  const historyChainVerified = verifyHistoryChain(task.history);
+  const tamperedHistory = task.history.map((entry) => ({ ...entry }));
+  const tamperedEntry = tamperedHistory.find(
+    (entry) => entry.event === "PAYOUT_COMPLETE",
+  );
+  if (tamperedEntry === undefined || tamperedEntry.payoutAmount === undefined) {
+    throw new Error("demo fixture broken: main history has no PAYOUT_COMPLETE payoutAmount");
+  }
+  const originalPayoutAmount = tamperedEntry.payoutAmount;
+  tamperedEntry.payoutAmount = originalPayoutAmount + 1;
+  const tamperedPayoutAmount = tamperedEntry.payoutAmount;
+  const tamperedChainVerified = verifyHistoryChain(tamperedHistory);
+  lines.push(
+    "",
+    "Audit hash chain (verifyHistoryChain on the main task history):",
+    `  intact history: verifyHistoryChain: ${historyChainVerified} (${task.history.length} entries, genesis-linked, every hash recomputes)`,
+    `  tampered copy: PAYOUT_COMPLETE payoutAmount ${originalPayoutAmount} -> ${tamperedPayoutAmount} — verifyHistoryChain: ${tamperedChainVerified} (tamper detected: the stored hash no longer recomputes)`,
+    `  original history after the tamper check: verifyHistoryChain: ${verifyHistoryChain(task.history)} (detached copy — the task's own history is untouched)`,
+  );
 
   // SLA watchdog branch: a second task whose ACCEPTED-state SLA
   // deadline has already passed at the screening instant. The deadline
@@ -946,7 +999,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, ndjsonText, replayedTask, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, ndjsonText, replayedTask, lines };
 }
 
 async function main(): Promise<void> {

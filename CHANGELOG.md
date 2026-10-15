@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An audit hash-chain segment in the CLI demo, printed right
+  after the main task's history: `verifyHistoryChain` runs on
+  the intact 12-entry history (genesis-linked, every hash
+  recomputes — verdict `true`); a detached copy whose
+  `PAYOUT_COMPLETE` entry's `payoutAmount` is altered from
+  10098.5 to 10099.5 is detected (verdict `false` — the stored
+  hash no longer recomputes from the altered canonical
+  content); and the original history re-verifies `true`
+  afterwards, proving the tamper check never touched it. This
+  is the verify-before-replay check an auditor runs before
+  trusting a persisted history (the demo's closing segment
+  replays that same history). `runDemo()` returns the three
+  structured values (`historyChainVerified`,
+  `tamperedChainVerified`, `tamperedPayoutAmount`); the demo
+  tests pin them (cross-checked by a hand-built tamper in the
+  test itself), the exact printed lines in the golden output,
+  and the segment's determinism across two runs (it prints no
+  timestamps or hashes). Demo and tests only; no library
+  behavior change.
 - A stale-task batch execution branch in the CLI demo: four
   more tasks (`DEMO-010` / `DEMO-011` / `DEMO-012` / `DEMO-013`)
   are driven under fixed-literal timestamps and executed at the

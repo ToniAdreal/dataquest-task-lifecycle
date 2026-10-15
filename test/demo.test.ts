@@ -13,6 +13,7 @@ import {
   historyToNdjson,
   isOverdue,
   staleTasks,
+  verifyHistoryChain,
   verifyPayoutWebhook,
 } from "../src/index.js";
 
@@ -73,6 +74,11 @@ History (append-only audit trail):
    10  APPROVE          IN_REVIEW     -> APPROVED      reviewer     <timestamp>
    11  REQUEST_PAYOUT   APPROVED      -> PAYOUT_PENDING contributor  <timestamp>
    12  PAYOUT_COMPLETE  PAYOUT_PENDING -> PAID          system       <timestamp>
+
+Audit hash chain (verifyHistoryChain on the main task history):
+  intact history: verifyHistoryChain: true (12 entries, genesis-linked, every hash recomputes)
+  tampered copy: PAYOUT_COMPLETE payoutAmount 10098.5 -> 10099.5 — verifyHistoryChain: false (tamper detected: the stored hash no longer recomputes)
+  original history after the tamper check: verifyHistoryChain: true (detached copy — the task's own history is untouched)
 
 SLA watchdog branch (second task, advisory deadline):
 Task DEMO-002: DRAFT
@@ -253,7 +259,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 206);
+  assert.equal(lines.length, 211);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -294,6 +300,77 @@ test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-proces
   // Numbered history rows across all printed audit trails: 12 + 3 + 8.
   const seqRows = text.match(/^\s+\d+  /gm) ?? [];
   assert.equal(seqRows.length, 23);
+});
+
+test("demo shows the audit hash-chain segment in-process: intact chain passes, tampered payoutAmount is detected, original untouched", async () => {
+  const { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // The structured verdicts are the hand-written expectations:
+  // the main task's 12-entry chain verifies, the detached copy
+  // with its PAYOUT_COMPLETE payoutAmount raised by 1 does not.
+  assert.equal(historyChainVerified, true);
+  assert.equal(tamperedChainVerified, false);
+  assert.equal(tamperedPayoutAmount, 10099.5);
+  // An independent re-verification of the returned task agrees,
+  // and a hand-built tamper in the test (not the demo's own copy)
+  // is detected the same way — the segment is not self-certifying.
+  assert.equal(verifyHistoryChain(task.history), true);
+  const crossCheck = task.history.map((entry) => ({ ...entry }));
+  const crossEntry = crossCheck.find((e) => e.event === "PAYOUT_COMPLETE")!;
+  crossEntry.payoutAmount = crossEntry.payoutAmount! + 1;
+  assert.equal(verifyHistoryChain(crossCheck), false);
+  // The original is untouched: its PAYOUT_COMPLETE amount is
+  // still the fixture value and its chain still verifies.
+  assert.equal(
+    task.history.find((h) => h.event === "PAYOUT_COMPLETE")!.payoutAmount,
+    10098.5,
+  );
+  assert.equal(task.history.length, 12);
+  // The segment is printed after the main history and before the
+  // SLA branch, with its three lines verbatim.
+  const chainAt = text.indexOf("Audit hash chain (verifyHistoryChain on the main task history):");
+  assert.ok(
+    chainAt > text.indexOf("History (append-only audit trail):"),
+    "chain segment must follow the main history",
+  );
+  assert.ok(
+    text.indexOf("SLA watchdog branch") > chainAt,
+    "SLA branch must follow the chain segment",
+  );
+  assert.match(
+    text,
+    /intact history: verifyHistoryChain: true \(12 entries, genesis-linked, every hash recomputes\)/,
+  );
+  assert.match(
+    text,
+    /tampered copy: PAYOUT_COMPLETE payoutAmount 10098\.5 -> 10099\.5 — verifyHistoryChain: false \(tamper detected: the stored hash no longer recomputes\)/,
+  );
+  assert.match(
+    text,
+    /original history after the tamper check: verifyHistoryChain: true \(detached copy — the task's own history is untouched\)/,
+  );
+});
+
+test("demo audit hash-chain segment is deterministic in outcome: two runs agree on all three verdicts and lines", async () => {
+  const chainLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Audit hash chain (verifyHistoryChain on the main task history):"),
+      ls.indexOf("SLA watchdog branch (second task, advisory deadline):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = chainLines(a.lines);
+  // Header + intact + tampered + original lines; the segment
+  // prints no timestamps or hashes (only verdicts and the fixed
+  // fixture amounts), so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, chainLines(b.lines));
+  assert.deepEqual(
+    [a.historyChainVerified, a.tamperedChainVerified, a.tamperedPayoutAmount],
+    [b.historyChainVerified, b.tamperedChainVerified, b.tamperedPayoutAmount],
+  );
 });
 
 test("demo builds the payout webhook from the settled task and verifies it (structured)", async () => {
@@ -1082,7 +1159,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 206);
+  assert.equal(out.trimEnd().split("\n").length, 211);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
