@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An SLA watchdog batch execution branch in the CLI demo:
+  three more tasks (`DEMO-014` / `DEMO-015` / `DEMO-016`) rebuild
+  the SLA screening branch's batch fresh from the same fixed
+  literals — the executor mutates its inputs and the original
+  SLA tasks are already settled (`DEMO-001` PAID, `DEMO-002`
+  EXPIRED) — and are executed under the very same fixed
+  screening `now` (2026-03-06T09:00:00.000Z, reused from the SLA
+  branch; no new screening instant, no network, no randomness)
+  with `expireOverdueTasks()`. `DEMO-014` mirrors `DEMO-002`'s
+  setup exactly (ACCEPTED, deadline 2026-03-03) and `DEMO-015`
+  sits in OPEN past its 2026-03-04 deadline: both are screened
+  by `expiredTasks()` and both are expired by the executor, so
+  the screening subset and the execution's acted set agree.
+  `DEMO-016` (ACCEPTED, deadline 2026-03-10, still ahead) is
+  never attempted and produces no result entry (2 attempted,
+  2 expired, 0 failed). The executor takes no action callback,
+  so its EXPIRE entries carry the library defaults (no actor, a
+  wall-clock audit timestamp); the segment prints no history for
+  the rebuilt tasks and none of those timestamps, so every
+  printed line is a fixed literal or derived from one.
+  `runDemo()` returns the three tasks, the pre-execution
+  screening subset and the per-task results; the demo tests pin
+  the structured results (cross-checked by an independent batch
+  driven from the same fixed literals through the same
+  executor), the exact printed lines in the golden output, and
+  the segment's printed-line determinism across two runs. Demo
+  and tests only; no library behavior change.
 - Benchmark coverage for the allowed-events query:
   `allowedEvents(state)` over all 13 states (in transition-table
   declaration order) now appears in `npm run bench`. Per-iteration

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 518 tests, all local
+npm test   # 520 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -86,7 +86,19 @@ the stale task stuck in SUBMITTED (a state with no ABANDON edge)
 is placed first and fails in isolation, left untouched, while the
 stale ACCEPTED and CAPTURING tasks after it are still abandoned
 and a fresh ACCEPTED task is never attempted (3 attempted,
-2 acted, 1 failed) — and a closing event-sourcing
+2 acted, 1 failed), an SLA watchdog batch execution branch that
+rebuilds the SLA screening batch fresh from the same fixed
+literals under the very same fixed screening `now` (the executor
+mutates its inputs and the original SLA tasks are already
+settled) and runs `expireOverdueTasks()` over the rebuilt batch —
+the ACCEPTED mirror of the SLA branch's task and an OPEN task are
+both overdue and both expired, a third ACCEPTED task whose
+deadline is still ahead produces no result entry and is never
+attempted, and the printed screening subset equals the
+execution's acted set (2 attempted, 2 expired, 0 failed; the
+executor's own EXPIRE audit entries carry the library-default
+wall-clock timestamp, which the segment never prints, so its
+printed lines are byte-deterministic) — and a closing event-sourcing
 segment that exports the main task's audit history with
 `historyToNdjson()`, prints all 12 NDJSON lines, parses them back
 with `historyFromNdjson()`, and replays them with
@@ -1118,7 +1130,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 518 tests covering the happy path, reject→resubmit
+`npm test` runs 520 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

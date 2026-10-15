@@ -53,7 +53,15 @@
  * stale task stuck in SUBMITTED — a state with no ABANDON edge —
  * fails in isolation and is left untouched, the stale ACCEPTED
  * and CAPTURING tasks after it are still abandoned, and a fresh
- * ACCEPTED task is never attempted), and finally an
+ * ACCEPTED task is never attempted), run three more tasks through
+ * the SLA watchdog batch execution branch (a fresh rebuild of the
+ * SLA screening batch's fixed-literal setup under the very same
+ * fixed screening `now` — the executor mutates its inputs and the
+ * original branch tasks are already settled — on which
+ * `expireOverdueTasks()` dispatches EXPIRE for both overdue tasks
+ * while the not-yet-overdue task produces no result entry at all,
+ * and the screening subset is printed beside the execution's
+ * acted set: the two agree), and finally an
  * event-sourcing replay
  * segment: the main task's audit history is exported with
  * `historyToNdjson()`, printed in full, parsed back with
@@ -91,6 +99,7 @@ import {
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
+  expireOverdueTasks,
   expiredTasks,
   historyFromNdjson,
   historyToNdjson,
@@ -104,6 +113,7 @@ import {
   verifyPayoutWebhook,
   type BuildPayoutWebhooksResult,
   type DeliverPayoutWebhookToManyResult,
+  type ExpireOverdueResult,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
   type StaleActionResult,
@@ -201,6 +211,9 @@ export interface DemoResult {
   staleExpiredFound: TaskLifecycle[];
   staleActionTasks: TaskLifecycle[];
   staleActionResults: StaleActionResult[];
+  expireExecutionTasks: TaskLifecycle[];
+  expireExecutionFound: TaskLifecycle[];
+  expireExecutionResults: ExpireOverdueResult[];
   ndjsonText: string;
   replayedTask: TaskLifecycle;
   lines: string[];
@@ -208,7 +221,7 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * thirteen tasks, the audit hash-chain verification verdicts for
+ * sixteen tasks, the audit hash-chain verification verdicts for
  * the main task's history (intact, and a detached tampered copy),
  * the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
@@ -220,7 +233,9 @@ export interface DemoResult {
  * post-unsubscribe notification count, the stale-task dwell
  * screening branch's three tasks with its stale and overdue
  * subsets, the stale-task batch execution branch's four tasks
- * with their per-task action results, the NDJSON export of the main task's history
+ * with their per-task action results, the SLA watchdog batch
+ * execution branch's three rebuilt tasks with its screening
+ * subset and per-task expiry results, the NDJSON export of the main task's history
  * and the task replayed from that export, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
@@ -960,6 +975,113 @@ export async function runDemo(): Promise<DemoResult> {
     `  execution: ${staleActionResults.length} attempted, ${staleActed} acted, ${staleActionResults.length - staleActed} failed — one unactionable stale task never blocks the rest of the batch`,
   );
 
+  // SLA watchdog batch execution branch: the execution half of
+  // the SLA story at the top of this demo, acted out on three
+  // more tasks. The SLA branch near the top only screens
+  // (`expiredTasks()` finds DEMO-002) and then expires that one
+  // task with a hand-written dispatch loop; the batch executor
+  // `expireOverdueTasks()` never appeared in the demo, so a
+  // reader could not see screening and execution as two steps,
+  // nor what the executor's per-task result entries look like.
+  // The executor mutates its inputs, and the original SLA batch
+  // is already settled (DEMO-001 is PAID, DEMO-002 is EXPIRED),
+  // so this branch rebuilds the batch fresh from the same
+  // fixed literals and reuses the very same fixed screening
+  // instant (SLA_BRANCH_NOW, 2026-03-06T09:00:00.000Z — no new
+  // screening instant, no network, no randomness):
+  //   DEMO-014 is a byte-for-byte rebuild of DEMO-002's setup —
+  //     PUBLISH 2026-03-01T09:00, ACCEPT 2026-03-01T09:05, SLA
+  //     deadline (ACCEPTED) 2026-03-03T09:00 — so overdue at the
+  //     fixed now, and EXPIRE is legal from ACCEPTED.
+  //   DEMO-015 sits in OPEN since 2026-03-02T09:00 with an OPEN
+  //     SLA deadline of 2026-03-04T09:00 — also overdue, and
+  //     EXPIRE is legal from OPEN.
+  //   DEMO-016 sits in ACCEPTED like DEMO-014 but its deadline
+  //     is 2026-03-10T09:00, still ahead of the fixed now — not
+  //     overdue, so the executor never attempts it and it
+  //     produces no result entry, staying untouched in ACCEPTED.
+  // Hand-written expectations: the screening subset is
+  // [DEMO-014, DEMO-015]; the executor returns exactly one entry
+  // per screened task, both expired=true and now EXPIRED, so the
+  // screening subset and the execution's acted set agree.
+  // Honest limit: `expireOverdueTasks()` takes no action
+  // callback, so its EXPIRE dispatches carry the library defaults
+  // (no actor, a wall-clock audit timestamp) — this segment
+  // prints no history for the rebuilt tasks and no timestamp
+  // from those entries, so every printed line below is a fixed
+  // literal or derived from one; the demo tests pin the states
+  // and outcomes, never those entries' `at`.
+  const driveExpireTask = driveStaleTask;
+  lines.push("", "SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):");
+  lines.push(
+    `  executed at: ${SLA_BRANCH_NOW.toISOString()} (the SLA branch's fixed screening now, reused; no new screening instant)`,
+  );
+  lines.push(
+    "  rebuilt batch: the executor mutates its inputs and the original SLA tasks are already settled, so the batch is rebuilt fresh from the same fixed literals (DEMO-014 mirrors DEMO-002's setup exactly)",
+  );
+  const expireMirrorTask = driveExpireTask("DEMO-014", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-01T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-01T09:05:00.000Z" },
+  ]);
+  expireMirrorTask.setSlaDeadline("2026-03-03T09:00:00.000Z");
+  lines.push(
+    `  SLA deadline (ACCEPTED): ${expireMirrorTask.getSlaDeadline("ACCEPTED")}`,
+  );
+  const expireOpenTask = driveExpireTask("DEMO-015", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-02T09:00:00.000Z" },
+  ]);
+  expireOpenTask.setSlaDeadline("2026-03-04T09:00:00.000Z", "OPEN");
+  lines.push(
+    `  SLA deadline (OPEN): ${expireOpenTask.getSlaDeadline("OPEN")}`,
+  );
+  const expireFreshTask = driveExpireTask("DEMO-016", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-01T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-01T09:05:00.000Z" },
+  ]);
+  expireFreshTask.setSlaDeadline("2026-03-10T09:00:00.000Z");
+  lines.push(
+    `  SLA deadline (ACCEPTED): ${expireFreshTask.getSlaDeadline("ACCEPTED")}`,
+  );
+  const expireExecutionTasks = [
+    expireMirrorTask,
+    expireOpenTask,
+    expireFreshTask,
+  ];
+  const expireExecutionFound = expiredTasks(
+    expireExecutionTasks,
+    SLA_BRANCH_NOW,
+  );
+  lines.push(
+    `  expiredTasks([${expireExecutionTasks.map((t) => t.id).join(", ")}], ${SLA_BRANCH_NOW.toISOString()}): ${expireExecutionFound.map((t) => t.id).join(", ")} (${expireExecutionFound.length} overdue)`,
+  );
+  const expireExecutionResults = expireOverdueTasks(
+    expireExecutionTasks,
+    SLA_BRANCH_NOW,
+  );
+  for (const r of expireExecutionResults) {
+    lines.push(
+      r.expired
+        ? `  ${r.task.id}: expired=true -> state ${r.task.state} (EXPIRE dispatched by the executor)`
+        : `  ${r.task.id}: expired=false error="${r.error}" -> state ${r.task.state} (left untouched — the failure is isolated)`,
+    );
+  }
+  lines.push(
+    `  ${expireFreshTask.id}: not overdue at the fixed now (deadline ${expireFreshTask.getSlaDeadline("ACCEPTED")} still ahead) -> no result entry, untouched in ${expireFreshTask.state}`,
+  );
+  const expireActedIds = expireExecutionResults
+    .filter((r) => r.expired)
+    .map((r) => r.task.id);
+  const expireSetsAgree =
+    expireActedIds.length === expireExecutionFound.length &&
+    expireActedIds.every((id, i) => id === expireExecutionFound[i].id);
+  lines.push(
+    `  screening vs execution: expiredTasks subset [${expireExecutionFound.map((t) => t.id).join(", ")}] == expireOverdueTasks acted set [${expireActedIds.join(", ")}]: ${expireSetsAgree} (same tasks, same batch order)`,
+  );
+  const expireFailed = expireExecutionResults.length - expireActedIds.length;
+  lines.push(
+    `  execution: ${expireExecutionResults.length} attempted, ${expireActedIds.length} expired, ${expireFailed} failed — the not-yet-overdue task was never attempted`,
+  );
+
   // Event-sourcing replay segment (closing): the demo's thesis —
   // the audit history is the single source of truth — acted out on
   // the main task. Its 12-entry history is exported as NDJSON
@@ -999,7 +1121,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, ndjsonText, replayedTask, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, lines };
 }
 
 async function main(): Promise<void> {

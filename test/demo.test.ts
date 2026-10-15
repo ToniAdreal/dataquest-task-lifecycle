@@ -8,6 +8,7 @@ import {
   PayoutEventDedupe,
   TaskLifecycle,
   actOnStaleTasks,
+  expireOverdueTasks,
   expiredTasks,
   historyFromNdjson,
   historyToNdjson,
@@ -239,6 +240,27 @@ Task DEMO-013: DRAFT
   DEMO-013: not stale at the fixed now (dwell 86400000 ms (1 day) within the ACCEPTED budget) -> no result entry, untouched in ACCEPTED
   execution: 3 attempted, 2 acted, 1 failed — one unactionable stale task never blocks the rest of the batch
 
+SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):
+  executed at: <timestamp> (the SLA branch's fixed screening now, reused; no new screening instant)
+  rebuilt batch: the executor mutates its inputs and the original SLA tasks are already settled, so the batch is rebuilt fresh from the same fixed literals (DEMO-014 mirrors DEMO-002's setup exactly)
+Task DEMO-014: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  SLA deadline (ACCEPTED): <timestamp>
+Task DEMO-015: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+Task DEMO-016: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  SLA deadline (ACCEPTED): <timestamp>
+  expiredTasks([DEMO-014, DEMO-015, DEMO-016], <timestamp>): DEMO-014, DEMO-015 (2 overdue)
+  DEMO-014: expired=true -> state EXPIRED (EXPIRE dispatched by the executor)
+  DEMO-015: expired=true -> state EXPIRED (EXPIRE dispatched by the executor)
+  DEMO-016: not overdue at the fixed now (deadline <timestamp> still ahead) -> no result entry, untouched in ACCEPTED
+  screening vs execution: expiredTasks subset [DEMO-014, DEMO-015] == expireOverdueTasks acted set [DEMO-014, DEMO-015]: true (same tasks, same batch order)
+  execution: 2 attempted, 2 expired, 0 failed — the not-yet-overdue task was never attempted
+
 Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   historyToNdjson(DEMO-001): 12 lines (one JSON entry per line, trailing newline)
   {"seq":1,"event":"PUBLISH","from":"DRAFT","to":"OPEN","at":"<timestamp>","actor":"system","note":"Researcher publishes the data-collection task","prevHash":"GENESIS","hash":"<hash>"}
@@ -259,7 +281,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 211);
+  assert.equal(lines.length, 232);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1159,7 +1181,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 211);
+  assert.equal(out.trimEnd().split("\n").length, 232);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -1291,7 +1313,7 @@ test("demo stale-task execution segment is deterministic: two runs print byte-id
   const execLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):"),
-      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+      ls.indexOf("SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1306,5 +1328,188 @@ test("demo stale-task execution segment is deterministic: two runs print byte-id
   assert.deepEqual(
     a.staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
     b.staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
+  );
+});
+
+test("demo shows the SLA watchdog batch execution branch in-process: screening subset equals the acted set, the not-yet-overdue task has no result entry", async () => {
+  const {
+    expireExecutionTasks,
+    expireExecutionFound,
+    expireExecutionResults,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  const NOW = new Date("2026-03-06T09:00:00.000Z");
+
+  // Final states and history lengths are the hand-written
+  // expectations: both overdue tasks gained exactly one EXPIRE
+  // entry, and the fresh task was never attempted.
+  assert.deepEqual(
+    expireExecutionTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-014", "EXPIRED", 3],
+      ["DEMO-015", "EXPIRED", 2],
+      ["DEMO-016", "ACCEPTED", 2],
+    ],
+  );
+  // The executor's EXPIRE entries carry the library defaults —
+  // no actor is recorded — so the test pins event/from/to only,
+  // never those entries' wall-clock `at`.
+  assert.deepEqual(
+    expireExecutionTasks.slice(0, 2).map((t) => {
+      const last = t.history.at(-1)!;
+      return [last.event, last.from, last.to, last.actor];
+    }),
+    [
+      ["EXPIRE", "ACCEPTED", "EXPIRED", undefined],
+      ["EXPIRE", "OPEN", "EXPIRED", undefined],
+    ],
+  );
+  assert.equal(
+    expireExecutionTasks[2].history.at(-1)!.event,
+    "ACCEPT",
+  );
+  // The deadlines are the fixed literals from the demo source:
+  // DEMO-014 mirrors DEMO-002's ACCEPTED deadline exactly.
+  assert.equal(
+    expireExecutionTasks[0].getSlaDeadline("ACCEPTED"),
+    "2026-03-03T09:00:00.000Z",
+  );
+  assert.equal(
+    expireExecutionTasks[1].getSlaDeadline("OPEN"),
+    "2026-03-04T09:00:00.000Z",
+  );
+  assert.equal(
+    expireExecutionTasks[2].getSlaDeadline("ACCEPTED"),
+    "2026-03-10T09:00:00.000Z",
+  );
+  // Screening subset (captured before execution) and the
+  // executor's per-task results agree exactly: one entry per
+  // screened task, in batch order, both expired — and no entry
+  // at all for DEMO-016.
+  assert.deepEqual(
+    expireExecutionFound.map((t) => t.id),
+    ["DEMO-014", "DEMO-015"],
+  );
+  assert.deepEqual(
+    expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
+    [
+      ["DEMO-014", true, undefined],
+      ["DEMO-015", true, undefined],
+    ],
+  );
+  // An independent batch driven from the same fixed literals and
+  // run through expiredTasks + expireOverdueTasks under the same
+  // fixed now reproduces the same subsets and outcomes — the
+  // demo segment is not self-certifying.
+  const drive = (
+    id: string,
+    steps: Array<[string, string]>,
+    deadline: string,
+    deadlineState?: "OPEN" | "ACCEPTED",
+  ): TaskLifecycle => {
+    const t = new TaskLifecycle(id);
+    for (const [event, at] of steps) {
+      t.dispatch(event as never, { actor: "system", at });
+    }
+    t.setSlaDeadline(deadline, deadlineState);
+    return t;
+  };
+  const independent = [
+    drive(
+      "DEMO-014",
+      [
+        ["PUBLISH", "2026-03-01T09:00:00.000Z"],
+        ["ACCEPT", "2026-03-01T09:05:00.000Z"],
+      ],
+      "2026-03-03T09:00:00.000Z",
+    ),
+    drive(
+      "DEMO-015",
+      [["PUBLISH", "2026-03-02T09:00:00.000Z"]],
+      "2026-03-04T09:00:00.000Z",
+      "OPEN",
+    ),
+    drive(
+      "DEMO-016",
+      [
+        ["PUBLISH", "2026-03-01T09:00:00.000Z"],
+        ["ACCEPT", "2026-03-01T09:05:00.000Z"],
+      ],
+      "2026-03-10T09:00:00.000Z",
+    ),
+  ];
+  assert.deepEqual(
+    expiredTasks(independent, NOW).map((t) => t.id),
+    ["DEMO-014", "DEMO-015"],
+  );
+  const independentResults = expireOverdueTasks(independent, NOW);
+  assert.deepEqual(
+    independentResults.map((r) => [r.task.id, r.expired, r.error]),
+    expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
+  );
+  assert.deepEqual(
+    independent.map((t) => t.state),
+    expireExecutionTasks.map((t) => t.state),
+  );
+  // The branch is printed after the stale-task batch execution
+  // branch and before the closing event-sourcing replay segment,
+  // with its lines verbatim.
+  const execAt = text.indexOf("SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):");
+  assert.ok(
+    execAt > text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):"),
+    "SLA execution branch must follow the stale execution branch",
+  );
+  assert.ok(
+    text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") > execAt,
+    "event-sourcing segment must follow the SLA execution branch",
+  );
+  assert.match(text, /executed at: 2026-03-06T09:00:00\.000Z \(the SLA branch's fixed screening now, reused; no new screening instant\)/);
+  assert.match(
+    text,
+    /expiredTasks\(\[DEMO-014, DEMO-015, DEMO-016\], 2026-03-06T09:00:00\.000Z\): DEMO-014, DEMO-015 \(2 overdue\)/,
+  );
+  assert.match(text, /DEMO-014: expired=true -> state EXPIRED \(EXPIRE dispatched by the executor\)/);
+  assert.match(text, /DEMO-015: expired=true -> state EXPIRED \(EXPIRE dispatched by the executor\)/);
+  assert.match(
+    text,
+    /DEMO-016: not overdue at the fixed now \(deadline 2026-03-10T09:00:00\.000Z still ahead\) -> no result entry, untouched in ACCEPTED/,
+  );
+  assert.match(
+    text,
+    /screening vs execution: expiredTasks subset \[DEMO-014, DEMO-015\] == expireOverdueTasks acted set \[DEMO-014, DEMO-015\]: true \(same tasks, same batch order\)/,
+  );
+  assert.match(
+    text,
+    /execution: 2 attempted, 2 expired, 0 failed — the not-yet-overdue task was never attempted/,
+  );
+});
+
+test("demo SLA watchdog execution segment is deterministic in its printed lines: two runs print byte-identical execution lines", async () => {
+  const execLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):"),
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = execLines(a.lines);
+  // Header + executed-at + rebuilt note + (task header + 2
+  // transitions + deadline line) + (task header + 1 transition +
+  // deadline line) + (task header + 2 transitions + deadline
+  // line) + screening line + 2 result lines + the not-overdue
+  // line + the consistency line + the execution summary; every
+  // printed value is a fixed literal or derived from one — the
+  // executor's own wall-clock audit timestamps are never
+  // printed — so no normalization is needed.
+  assert.equal(segA.length, 20);
+  assert.deepEqual(segA, execLines(b.lines));
+  assert.deepEqual(
+    a.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
+    b.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
+  );
+  assert.deepEqual(
+    a.expireExecutionFound.map((t) => t.id),
+    b.expireExecutionFound.map((t) => t.id),
   );
 });
