@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for per-task payout mismatch judgement:
+  `payoutMismatch()` over a fixed set of 5 tasks (settled exactly
+  as quoted, settled for a different amount, missing quote,
+  missing settled amount, and one non-PAID task; fixed dispatch
+  timestamps) now appears in `npm run bench`. Per-iteration
+  self-checks pin every returned value to the hand-written
+  expectations in the bench comments (the mismatched task's delta
+  is computed by hand; the other four shapes yield `undefined`),
+  and an exhaustive check runs once outside the timed loop. No
+  network and no wall-clock reads. The README Benchmarks table
+  is refreshed from one real run. Benchmark only; no library
+  behavior change.
 - A dispatch subscription branch in the CLI demo: a sixth task
   (`DEMO-006`) is created under fixed-literal timestamps
   (2026-03-19; no network, no randomness, no wall clock) and a
