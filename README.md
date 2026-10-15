@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 514 tests, all local
+npm test   # 516 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -73,7 +73,14 @@ plus the two screens' subsets side by side: `staleTasks()` selects
 only the first task and `expiredTasks()` only the second, so the
 same batch reads differently under the dwell lens than under the
 deadline lens (both screens are pure; no task is dispatched or
-mutated) — and a closing event-sourcing
+mutated), a stale-task batch execution branch that runs
+`actOnStaleTasks()` over four more tasks at the same fixed `now`
+under 7-day dwell budgets for ACCEPTED / CAPTURING / SUBMITTED —
+the stale task stuck in SUBMITTED (a state with no ABANDON edge)
+is placed first and fails in isolation, left untouched, while the
+stale ACCEPTED and CAPTURING tasks after it are still abandoned
+and a fresh ACCEPTED task is never attempted (3 attempted,
+2 acted, 1 failed) — and a closing event-sourcing
 segment that exports the main task's audit history with
 `historyToNdjson()`, prints all 12 NDJSON lines, parses them back
 with `historyFromNdjson()`, and replays them with
@@ -1105,7 +1112,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 514 tests covering the happy path, reject→resubmit
+`npm test` runs 516 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

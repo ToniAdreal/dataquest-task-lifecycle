@@ -43,7 +43,13 @@
  * has sat in IN_REVIEW within its dwell budget but its SLA
  * deadline has passed, and one is within both — so `staleTasks()`
  * and `expiredTasks()` select different subsets of the same batch,
- * printed side by side), and finally an
+ * printed side by side), run four more tasks through the
+ * stale-task batch execution branch (at the same fixed `now`,
+ * `actOnStaleTasks()` runs an ABANDON action over the batch: a
+ * stale task stuck in SUBMITTED — a state with no ABANDON edge —
+ * fails in isolation and is left untouched, the stale ACCEPTED
+ * and CAPTURING tasks after it are still abandoned, and a fresh
+ * ACCEPTED task is never attempted), and finally an
  * event-sourcing replay
  * segment: the main task's audit history is exported with
  * `historyToNdjson()`, printed in full, parsed back with
@@ -77,6 +83,7 @@ import { fileURLToPath } from "node:url";
 import {
   PayoutEventDedupe,
   TaskLifecycle,
+  actOnStaleTasks,
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
@@ -94,6 +101,7 @@ import {
   type DeliverPayoutWebhookToManyResult,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
+  type StaleActionResult,
   type TaskEvent,
   type TaskState,
 } from "./index.js";
@@ -180,6 +188,8 @@ export interface DemoResult {
   staleDwellTasks: TaskLifecycle[];
   staleFound: TaskLifecycle[];
   staleExpiredFound: TaskLifecycle[];
+  staleActionTasks: TaskLifecycle[];
+  staleActionResults: StaleActionResult[];
   ndjsonText: string;
   replayedTask: TaskLifecycle;
   lines: string[];
@@ -187,7 +197,7 @@ export interface DemoResult {
 
 /**
  * Run the demo lifecycle without printing anything, and return the
- * nine tasks, the watchdog screening result, the built + verified
+ * thirteen tasks, the watchdog screening result, the built + verified
  * payout webhook, the receiver-side dedupe outcomes for its
  * `eventId`, the batch webhook results with their per-item
  * verification outcomes, the fan-out delivery result with the wire
@@ -196,7 +206,8 @@ export interface DemoResult {
  * notifications with their history-match verdict and the
  * post-unsubscribe notification count, the stale-task dwell
  * screening branch's three tasks with its stale and overdue
- * subsets, the NDJSON export of the main task's history
+ * subsets, the stale-task batch execution branch's four tasks
+ * with their per-task action results, the NDJSON export of the main task's history
  * and the task replayed from that export, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
@@ -802,6 +813,100 @@ export async function runDemo(): Promise<DemoResult> {
     "  screening is pure: no task was dispatched or mutated by either screen",
   );
 
+  // Stale-task batch execution branch: screening alone does not
+  // move anything — this branch is the execution half of the
+  // watchdog story, acted out on four more tasks at the SAME fixed
+  // now as the screening branch above (2026-03-22T09:00:00.000Z;
+  // no network, no randomness, no wall clock). The executor is
+  // `actOnStaleTasks()` with a custom action that dispatches
+  // ABANDON with the fixed execution instant as the audit
+  // timestamp (the library default action dispatches the same
+  // event with actor "system" at the wall clock; pinning `at`
+  // here keeps the demo byte-deterministic). Hand-written
+  // expectations under budgets of 7 days for ACCEPTED, CAPTURING
+  // and SUBMITTED:
+  //   DEMO-010 sits in SUBMITTED since 2026-03-10T09:00:00.000Z —
+  //     dwell 12 days, so stale — but SUBMITTED has no ABANDON
+  //     edge, so its action fails with
+  //     "invalid transition: ABANDON from SUBMITTED" and the task
+  //     is left untouched in SUBMITTED. It is placed FIRST in the
+  //     batch on purpose: its failure must not block the rest.
+  //   DEMO-011 sits in ACCEPTED since 2026-03-05T09:00:00.000Z —
+  //     dwell 17 days, so stale — and ABANDON is legal there, so
+  //     it lands in ABANDONED.
+  //   DEMO-012 sits in CAPTURING since 2026-03-08T09:00:00.000Z —
+  //     dwell 14 days, so stale — and ABANDON is legal there too,
+  //     so it also lands in ABANDONED.
+  //   DEMO-013 sits in ACCEPTED since 2026-03-21T09:00:00.000Z —
+  //     dwell 1 day, within budget, so it is not stale: the
+  //     executor never attempts it and it produces no result
+  //     entry, staying untouched in ACCEPTED.
+  // Results therefore read: 3 attempted, 2 acted, 1 failed — one
+  // unactionable stale task never blocks the rest of the batch.
+  const STALE_ACTION_NOW = STALE_BRANCH_NOW;
+  const STALE_ACTION_BUDGETS = {
+    ACCEPTED: 7 * DAY_MS,
+    CAPTURING: 7 * DAY_MS,
+    SUBMITTED: 7 * DAY_MS,
+  } as const;
+  const driveActionTask = driveStaleTask;
+  lines.push("", "Stale-task batch execution branch (actOnStaleTasks over four more tasks):");
+  lines.push(
+    `  executed at: ${STALE_ACTION_NOW.toISOString()} (fixed now; no wall clock)`,
+  );
+  lines.push(
+    `  budgets: ACCEPTED ${STALE_ACTION_BUDGETS.ACCEPTED} ms (7 days), CAPTURING ${STALE_ACTION_BUDGETS.CAPTURING} ms (7 days), SUBMITTED ${STALE_ACTION_BUDGETS.SUBMITTED} ms (7 days) — action dispatches ABANDON with the fixed execution instant as its audit timestamp`,
+  );
+  const actionSubmittedTask = driveActionTask("DEMO-010", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-02T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-02T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-02T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-10T09:00:00.000Z" },
+  ]);
+  const actionAcceptedTask = driveActionTask("DEMO-011", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-01T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-05T09:00:00.000Z" },
+  ]);
+  const actionCapturingTask = driveActionTask("DEMO-012", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-01T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-01T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-08T09:00:00.000Z" },
+  ]);
+  const actionFreshTask = driveActionTask("DEMO-013", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-21T08:55:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-21T09:00:00.000Z" },
+  ]);
+  const staleActionTasks = [
+    actionSubmittedTask,
+    actionAcceptedTask,
+    actionCapturingTask,
+    actionFreshTask,
+  ];
+  const staleActionResults = actOnStaleTasks(
+    staleActionTasks,
+    (t) =>
+      t.dispatch("ABANDON", {
+        actor: "watchdog",
+        at: STALE_ACTION_NOW.toISOString(),
+      }),
+    STALE_ACTION_BUDGETS,
+    STALE_ACTION_NOW,
+  );
+  for (const r of staleActionResults) {
+    lines.push(
+      r.acted
+        ? `  ${r.task.id}: acted=true -> state ${r.task.state} (ABANDON dispatched; the batch kept going)`
+        : `  ${r.task.id}: acted=false error="${r.error}" -> state ${r.task.state} (left untouched — the failure is isolated)`,
+    );
+  }
+  lines.push(
+    `  ${actionFreshTask.id}: not stale at the fixed now (dwell 86400000 ms (1 day) within the ACCEPTED budget) -> no result entry, untouched in ${actionFreshTask.state}`,
+  );
+  const staleActed = staleActionResults.filter((r) => r.acted).length;
+  lines.push(
+    `  execution: ${staleActionResults.length} attempted, ${staleActed} acted, ${staleActionResults.length - staleActed} failed — one unactionable stale task never blocks the rest of the batch`,
+  );
+
   // Event-sourcing replay segment (closing): the demo's thesis —
   // the audit history is the single source of truth — acted out on
   // the main task. Its 12-entry history is exported as NDJSON
@@ -841,7 +946,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, ndjsonText, replayedTask, lines };
+  return { task, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, ndjsonText, replayedTask, lines };
 }
 
 async function main(): Promise<void> {

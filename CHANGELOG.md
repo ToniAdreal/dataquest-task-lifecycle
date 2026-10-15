@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A stale-task batch execution branch in the CLI demo: four
+  more tasks (`DEMO-010` / `DEMO-011` / `DEMO-012` / `DEMO-013`)
+  are driven under fixed-literal timestamps and executed at the
+  screening branch's fixed `now` (2026-03-22T09:00:00.000Z; no
+  network, no randomness, no wall clock) with `actOnStaleTasks()`
+  under 7-day dwell budgets for ACCEPTED, CAPTURING and
+  SUBMITTED, using a custom action that dispatches `ABANDON`
+  with the fixed execution instant as its audit timestamp.
+  `DEMO-010` has sat in SUBMITTED for 12 days (stale, but
+  SUBMITTED has no ABANDON edge) and is placed first on purpose:
+  its action fails with `invalid transition: ABANDON from
+  SUBMITTED`, it is left untouched, and the batch keeps going —
+  `DEMO-011` (ACCEPTED for 17 days) and `DEMO-012` (CAPTURING
+  for 14 days) are both abandoned, while `DEMO-013` (ACCEPTED
+  for 1 day, within budget) is never attempted and produces no
+  result entry (3 attempted, 2 acted, 1 failed). `runDemo()`
+  returns the four tasks and the per-task results; the demo
+  tests pin the structured results (cross-checked by an
+  independent batch rebuilt from hand-written histories and run
+  through the same executor), the exact printed lines, and the
+  segment's byte-identical determinism across two runs. Demo
+  and tests only; no library behavior change.
 - A stale-task dwell screening branch in the CLI demo: three
   more tasks (`DEMO-007` / `DEMO-008` / `DEMO-009`) are driven
   under fixed-literal timestamps and screened at one fixed `now`

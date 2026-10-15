@@ -7,6 +7,7 @@ import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
 import {
   PayoutEventDedupe,
   TaskLifecycle,
+  actOnStaleTasks,
   expiredTasks,
   historyFromNdjson,
   historyToNdjson,
@@ -208,6 +209,30 @@ Task DEMO-009: DRAFT
   contrast: the two screens disagree on the same batch — DEMO-007 is stale but not overdue (dwell past budget, deadline still ahead), DEMO-008 is overdue but not stale (deadline passed, dwell within budget), DEMO-009 is neither
   screening is pure: no task was dispatched or mutated by either screen
 
+Stale-task batch execution branch (actOnStaleTasks over four more tasks):
+  executed at: <timestamp> (fixed now; no wall clock)
+  budgets: ACCEPTED 604800000 ms (7 days), CAPTURING 604800000 ms (7 days), SUBMITTED 604800000 ms (7 days) — action dispatches ABANDON with the fixed execution instant as its audit timestamp
+Task DEMO-010: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+Task DEMO-011: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+Task DEMO-012: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+Task DEMO-013: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  DEMO-010: acted=false error="invalid transition: ABANDON from SUBMITTED" -> state SUBMITTED (left untouched — the failure is isolated)
+  DEMO-011: acted=true -> state ABANDONED (ABANDON dispatched; the batch kept going)
+  DEMO-012: acted=true -> state ABANDONED (ABANDON dispatched; the batch kept going)
+  DEMO-013: not stale at the fixed now (dwell 86400000 ms (1 day) within the ACCEPTED budget) -> no result entry, untouched in ACCEPTED
+  execution: 3 attempted, 2 acted, 1 failed — one unactionable stale task never blocks the rest of the batch
+
 Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   historyToNdjson(DEMO-001): 12 lines (one JSON entry per line, trailing newline)
   {"seq":1,"event":"PUBLISH","from":"DRAFT","to":"OPEN","at":"<timestamp>","actor":"system","note":"Researcher publishes the data-collection task","prevHash":"GENESIS","hash":"<hash>"}
@@ -228,7 +253,7 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 182);
+  assert.equal(lines.length, 206);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -817,7 +842,7 @@ test("demo stale-task segment is deterministic: two runs print byte-identical st
   const staleLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):"),
-      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1057,8 +1082,152 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 182);
+  assert.equal(out.trimEnd().split("\n").length, 206);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
+});
+
+test("demo shows the stale-task batch execution branch in-process: the unactionable stale task fails in isolation and the rest of the batch is still acted on", async () => {
+  const { staleActionTasks, staleActionResults, lines } = await runDemo();
+  const text = lines.join("\n");
+  const NOW = new Date("2026-03-22T09:00:00.000Z");
+  const BUDGETS = {
+    ACCEPTED: 7 * 24 * 3600_000,
+    CAPTURING: 7 * 24 * 3600_000,
+    SUBMITTED: 7 * 24 * 3600_000,
+  };
+
+  // Final states and history lengths are the hand-written
+  // expectations: the failed task is untouched, the two actionable
+  // stale tasks gained exactly one ABANDON entry each (dispatched
+  // by the watchdog at the fixed execution instant), and the fresh
+  // task was never attempted.
+  assert.deepEqual(
+    staleActionTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-010", "SUBMITTED", 4],
+      ["DEMO-011", "ABANDONED", 3],
+      ["DEMO-012", "ABANDONED", 4],
+      ["DEMO-013", "ACCEPTED", 2],
+    ],
+  );
+  for (const t of [staleActionTasks[1], staleActionTasks[2]]) {
+    const last = t.history.at(-1)!;
+    assert.deepEqual([last.event, last.to, last.actor, last.at], [
+      "ABANDON",
+      "ABANDONED",
+      "watchdog",
+      "2026-03-22T09:00:00.000Z",
+    ]);
+  }
+  assert.equal(staleActionTasks[0].history.at(-1)!.event, "SUBMIT");
+  // One result per attempted task, in batch order: the SUBMITTED
+  // failure comes first and does not block the two successes.
+  assert.deepEqual(
+    staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
+    [
+      ["DEMO-010", false, "invalid transition: ABANDON from SUBMITTED"],
+      ["DEMO-011", true, undefined],
+      ["DEMO-012", true, undefined],
+    ],
+  );
+  // An independent batch rebuilt from hand-written histories and
+  // run through actOnStaleTasks under the same fixed now, budgets
+  // and action reproduces the same outcomes — the demo segment is
+  // not self-certifying.
+  const rebuild = (
+    id: string,
+    steps: Array<[string, string, string, string]>,
+  ): TaskLifecycle =>
+    TaskLifecycle.fromHistory(
+      id,
+      steps.map(([event, from, to, at], i) => ({
+        seq: i + 1,
+        event: event as never,
+        from: from as never,
+        to: to as never,
+        at,
+        actor: "system",
+      })),
+    );
+  const independent = [
+    rebuild("DEMO-010", [
+      ["PUBLISH", "DRAFT", "OPEN", "2026-03-02T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "2026-03-02T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "2026-03-02T09:10:00.000Z"],
+      ["SUBMIT", "CAPTURING", "SUBMITTED", "2026-03-10T09:00:00.000Z"],
+    ]),
+    rebuild("DEMO-011", [
+      ["PUBLISH", "DRAFT", "OPEN", "2026-03-01T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "2026-03-05T09:00:00.000Z"],
+    ]),
+    rebuild("DEMO-012", [
+      ["PUBLISH", "DRAFT", "OPEN", "2026-03-01T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "2026-03-01T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "2026-03-08T09:00:00.000Z"],
+    ]),
+    rebuild("DEMO-013", [
+      ["PUBLISH", "DRAFT", "OPEN", "2026-03-21T08:55:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "2026-03-21T09:00:00.000Z"],
+    ]),
+  ];
+  const independentResults = actOnStaleTasks(
+    independent,
+    (t) => t.dispatch("ABANDON", { actor: "watchdog", at: NOW.toISOString() }),
+    BUDGETS,
+    NOW,
+  );
+  assert.deepEqual(
+    independentResults.map((r) => [r.task.id, r.acted, r.error]),
+    staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
+  );
+  assert.deepEqual(
+    independent.map((t) => t.state),
+    staleActionTasks.map((t) => t.state),
+  );
+  // The branch is printed after the dwell screening branch and
+  // before the closing event-sourcing replay segment, with its
+  // lines verbatim.
+  const execAt = text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):");
+  assert.ok(
+    execAt > text.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):"),
+    "execution branch must follow the dwell screening branch",
+  );
+  assert.ok(
+    text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") > execAt,
+    "event-sourcing segment must follow the execution branch",
+  );
+  assert.match(text, /executed at: 2026-03-22T09:00:00\.000Z \(fixed now; no wall clock\)/);
+  assert.match(
+    text,
+    /DEMO-010: acted=false error="invalid transition: ABANDON from SUBMITTED" -> state SUBMITTED \(left untouched — the failure is isolated\)/,
+  );
+  assert.match(text, /DEMO-013: not stale at the fixed now \(dwell 86400000 ms \(1 day\)/);
+  assert.match(
+    text,
+    /execution: 3 attempted, 2 acted, 1 failed — one unactionable stale task never blocks the rest of the batch/,
+  );
+});
+
+test("demo stale-task execution segment is deterministic: two runs print byte-identical execution lines", async () => {
+  const execLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):"),
+      ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = execLines(a.lines);
+  // Header + executed-at + budgets + (task header + 4 transitions)
+  // + (task header + 2 transitions) + (task header + 3 transitions)
+  // + (task header + 2 transitions) + 3 result lines + the
+  // not-stale line + the execution summary; every timestamp in the
+  // segment is a fixed literal, so no normalization is needed.
+  assert.equal(segA.length, 23);
+  assert.deepEqual(segA, execLines(b.lines));
+  assert.deepEqual(
+    a.staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
+    b.staleActionResults.map((r) => [r.task.id, r.acted, r.error]),
+  );
 });
