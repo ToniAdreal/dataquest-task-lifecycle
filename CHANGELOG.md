@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for the allowed-events query:
+  `allowedEvents(state)` over all 13 states (in transition-table
+  declaration order) now appears in `npm run bench`. Per-iteration
+  self-checks pin every returned list to the hand-written
+  expectations in the bench comments (each non-terminal state
+  returns exactly its outgoing events; the terminal states PAID /
+  ABANDONED / EXPIRED return an empty list), and an exhaustive
+  check runs once outside the timed loop. No network and no
+  wall-clock reads. The README Benchmarks table is refreshed
+  from one real run. Benchmark only; no library behavior change.
 - An audit hash-chain segment in the CLI demo, printed right
   after the main task's history: `verifyHistoryChain` runs on
   the intact 12-entry history (genesis-linked, every hash

@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the thirteen hot-path
+ * Measures real, locally-observed throughput for the fourteen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -109,6 +109,17 @@
  *      one full set pass of 5 per-task calls. No network and no
  *      wall clock: every dispatch timestamp is fixed.
  *
+ *  14. allowed-events query — `allowedEvents(state)` over a fixed
+ *      set of all 13 states (see the allowed-events fixture below
+ *      for the hand-written expectation for every state). This is
+ *      the primitive a task-list UI and a watchdog check for every
+ *      row they render: which events may fire from this state right
+ *      now. Its cost was previously invisible inside the dispatch
+ *      totals. One timed pass is one full state-set pass of 13
+ *      per-state calls; the terminal states (PAID / ABANDONED /
+ *      EXPIRED) must return an empty list. No network and no wall
+ *      clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -121,6 +132,7 @@
 import { cpus } from "node:os";
 import {
   actOnStaleTasks,
+  allowedEvents,
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
@@ -144,6 +156,7 @@ import {
   type PayoutWebhookFetchImpl,
   type TaskEvent,
   type TaskHistoryEntry,
+  type TaskState,
 } from "../src/index.js";
 
 const ITERATIONS = 3000;
@@ -1063,6 +1076,61 @@ function checkPayoutMismatchCorpus(where: string): void {
 // in the set returns exactly its hand-written expectation.
 checkPayoutMismatchCorpus("payoutMismatch fixture");
 
+// Allowed-events fixture: all 13 states, in transition-table
+// declaration order, with the events allowed from each. Hand-written
+// expectations — written out here from the transition table in
+// src/taskLifecycle.ts, never derived by calling allowedEvents
+// itself:
+//   DRAFT          -> [PUBLISH]
+//   OPEN           -> [ACCEPT, EXPIRE]
+//   ACCEPTED       -> [START_CAPTURE, ABANDON, EXPIRE]
+//   CAPTURING      -> [SUBMIT, ABANDON, EXPIRE]
+//   SUBMITTED      -> [BEGIN_REVIEW, EXPIRE]
+//   IN_REVIEW      -> [APPROVE, REJECT]
+//   APPROVED       -> [REQUEST_PAYOUT]
+//   PAYOUT_PENDING -> [PAYOUT_COMPLETE]
+//   PAID           -> [] (terminal)
+//   REJECTED       -> [DISPUTE, RESUBMIT]
+//   DISPUTED       -> [ARBITRATE_APPROVE, ARBITRATE_REJECT]
+//   ABANDONED      -> [] (terminal)
+//   EXPIRED        -> [] (terminal)
+const allowedEventsFixture: Array<{
+  state: TaskState;
+  expected: TaskEvent[];
+}> = [
+  { state: "DRAFT", expected: ["PUBLISH"] },
+  { state: "OPEN", expected: ["ACCEPT", "EXPIRE"] },
+  { state: "ACCEPTED", expected: ["START_CAPTURE", "ABANDON", "EXPIRE"] },
+  { state: "CAPTURING", expected: ["SUBMIT", "ABANDON", "EXPIRE"] },
+  { state: "SUBMITTED", expected: ["BEGIN_REVIEW", "EXPIRE"] },
+  { state: "IN_REVIEW", expected: ["APPROVE", "REJECT"] },
+  { state: "APPROVED", expected: ["REQUEST_PAYOUT"] },
+  { state: "PAYOUT_PENDING", expected: ["PAYOUT_COMPLETE"] },
+  { state: "PAID", expected: [] },
+  { state: "REJECTED", expected: ["DISPUTE", "RESUBMIT"] },
+  { state: "DISPUTED", expected: ["ARBITRATE_APPROVE", "ARBITRATE_REJECT"] },
+  { state: "ABANDONED", expected: [] },
+  { state: "EXPIRED", expected: [] },
+];
+if (allowedEventsFixture.length !== 13) {
+  throw new Error("benchmark fixture failed: allowedEvents state set shape");
+}
+function checkAllowedEvents(where: string): void {
+  for (const { state, expected } of allowedEventsFixture) {
+    const actual = allowedEvents(state);
+    if (
+      actual.length !== expected.length ||
+      actual.some((event, i) => event !== expected[i])
+    ) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time exhaustive validation (outside the timed loop): every
+// state returns exactly its hand-written expectation, terminal
+// states included (empty list).
+checkAllowedEvents("allowedEvents fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1291,6 +1359,14 @@ function benchPayoutMismatch(): number {
   }, ITERATIONS);
 }
 
+function benchAllowedEvents(): number {
+  return measure(() => {
+    // Per-iteration self-check: every state returns exactly its
+    // hand-written expectation (see the fixture above).
+    checkAllowedEvents("allowedEvents");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1307,7 +1383,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1334,6 +1410,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "actOnStaleTasks (12 mixed-state tasks, fresh fixture)", ops: benchActOnStaleTasks() },
   { path: "parsePayoutRetryAfter (11-value corpus)", ops: benchParsePayoutRetryAfter() },
   { path: "payoutMismatch (5-task set)", ops: benchPayoutMismatch() },
+  { path: "allowedEvents (13 states)", ops: benchAllowedEvents() },
 ];
 
 console.log("path                                              throughput");
