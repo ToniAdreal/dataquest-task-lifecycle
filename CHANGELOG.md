@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for standalone history parsing:
+  `parseHistory(history)` over the fixed 8-entry chained
+  history now appears in `npm run bench`. Per-iteration
+  self-checks pin the returned entry count and the last
+  entry's `seq` / state to the hand-written expectations
+  (8 entries, last `seq` 8, final state PAID), and a detached
+  tampered copy (its `PAYOUT_COMPLETE` entry's `payoutAmount`
+  altered from 125 to 126) is rejected once, outside the timed
+  loop, with the hash-chain error. No network and no
+  wall-clock reads. The README Benchmarks table is refreshed
+  from one real run. Benchmark only; no library behavior change.
 - An SLA watchdog batch execution branch in the CLI demo:
   three more tasks (`DEMO-014` / `DEMO-015` / `DEMO-016`) rebuild
   the SLA screening branch's batch fresh from the same fixed

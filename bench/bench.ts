@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the fourteen hot-path
+ * Measures real, locally-observed throughput for the fifteen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -120,6 +120,18 @@
  *      EXPIRED) must return an empty list. No network and no wall
  *      clock.
  *
+ *  15. standalone history parsing — `parseHistory(history)` over
+ *      the same fixed 8-entry chained history as groups 2 and 5
+ *      (see the parse-history fixture below). This is the direct
+ *      validation a holder of a bare history array pays:
+ *      unknown-field fail-closed checks, gapless `seq`, from/to
+ *      chain continuity, and a full hash-chain re-verification —
+ *      without the per-line JSON parsing the NDJSON import path
+ *      (group 5) bundles into its number. One timed pass is one
+ *      parse of the 8-entry history; a detached tampered copy is
+ *      rejected once, outside the timed loop. No network and no
+ *      wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -141,6 +153,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   mismatchedPayouts,
+  parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
   PayoutEventDedupe,
@@ -1131,6 +1144,55 @@ function checkAllowedEvents(where: string): void {
 // states included (empty list).
 checkAllowedEvents("allowedEvents fixture");
 
+// Parse-history fixture: reuse the module-scope `historyFixture`
+// above — the same detached 8-entry chained history the replay /
+// fromHistory paths (group 2) and the NDJSON paths (group 5) use.
+// Hand-written expectations — written out here from the fixture
+// composition, never derived by calling parseHistory itself:
+//   - the parse returns exactly 8 entries;
+//   - the last entry has seq 8 and lands in PAID (the fixture's
+//     full DRAFT -> PAID lifecycle).
+function checkParseHistory(where: string): void {
+  const entries = parseHistory(historyFixture);
+  if (
+    entries.length !== 8 ||
+    entries[7].seq !== 8 ||
+    entries[7].to !== "PAID"
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the intact fixture
+// parses to exactly the hand-written expectations above.
+checkParseHistory("parseHistory fixture");
+// Tamper rejection (outside the timed loop): a detached copy whose
+// PAYOUT_COMPLETE entry's payoutAmount is altered from 125 to 126
+// no longer recomputes its stored hash, so parseHistory must reject
+// it explicitly with the hash-chain error — and the original
+// fixture must still parse afterwards, proving the tamper copy was
+// detached.
+const parseHistoryTampered: TaskHistoryEntry[] = historyFixture.map(
+  (e) => ({ ...e }),
+);
+parseHistoryTampered[7] = {
+  ...parseHistoryTampered[7],
+  payoutAmount: 126,
+};
+let parseHistoryTamperRejected = false;
+try {
+  parseHistory(parseHistoryTampered);
+} catch (err) {
+  parseHistoryTamperRejected =
+    err instanceof Error &&
+    err.message.includes("history hash chain is broken");
+}
+if (!parseHistoryTamperRejected) {
+  throw new Error(
+    "benchmark fixture failed: parseHistory accepted a tampered history",
+  );
+}
+checkParseHistory("parseHistory fixture after tamper check");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1367,6 +1429,14 @@ function benchAllowedEvents(): number {
   }, ITERATIONS);
 }
 
+function benchParseHistory(): number {
+  return measure(() => {
+    // Per-iteration self-check: the returned entry count and the
+    // last entry's seq/state match the fixture (see above).
+    checkParseHistory("parseHistory");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1383,7 +1453,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1411,6 +1481,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "parsePayoutRetryAfter (11-value corpus)", ops: benchParsePayoutRetryAfter() },
   { path: "payoutMismatch (5-task set)", ops: benchPayoutMismatch() },
   { path: "allowedEvents (13 states)", ops: benchAllowedEvents() },
+  { path: "parseHistory (8-entry history)", ops: benchParseHistory() },
 ];
 
 console.log("path                                              throughput");
