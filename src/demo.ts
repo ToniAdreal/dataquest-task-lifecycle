@@ -67,13 +67,20 @@
  * `expireOverdueTasks()` dispatches EXPIRE for both overdue tasks
  * while the not-yet-overdue task produces no result entry at all,
  * and the screening subset is printed beside the execution's
- * acted set: the two agree), and finally an
+ * acted set: the two agree), an
  * event-sourcing replay
  * segment: the main task's audit history is exported with
  * `historyToNdjson()`, printed in full, parsed back with
  * `historyFromNdjson()`, and replayed with
  * `TaskLifecycle.fromHistory()` — the history alone, as the single
- * source of truth, rebuilds the same PAID terminal state.
+ * source of truth, rebuilds the same PAID terminal state — and
+ * finally an allowed-events listing segment: `allowedEvents(state)`
+ * is run over all 13 states in transition-table order and printed
+ * as a one-line-per-state overview — the query a task-list UI or a
+ * watchdog consults to decide what a task can do next — with the
+ * three terminal states (PAID / ABANDONED / EXPIRED) returning the
+ * empty list, and the main task's own PAID state called out on its
+ * own line as that same empty set.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -87,7 +94,8 @@
  * injected fake fetch received, the Retry-After parsing results
  * for the fixed corpus under the fan-out instant, the
  * NDJSON export of the main task's history and the task replayed
- * from it, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * from it, the allowed-events listing for all 13 states with the
+ * main task's own (empty) allowed set, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -103,6 +111,7 @@ import {
   PayoutEventDedupe,
   TaskLifecycle,
   actOnStaleTasks,
+  allowedEvents,
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhookToMany,
@@ -226,6 +235,10 @@ export interface DemoResult {
   expireExecutionResults: ExpireOverdueResult[];
   ndjsonText: string;
   replayedTask: TaskLifecycle;
+  /** `allowedEvents(state)` for every state, in transition-table order. */
+  allowedEventsByState: Array<{ state: TaskState; events: TaskEvent[] }>;
+  /** `allowedEvents` for the main task's PAID state — the empty list. */
+  mainTaskAllowedEvents: TaskEvent[];
   lines: string[];
 }
 
@@ -246,7 +259,9 @@ export interface DemoResult {
  * with their per-task action results, the SLA watchdog batch
  * execution branch's three rebuilt tasks with its screening
  * subset and per-task expiry results, the NDJSON export of the main task's history
- * and the task replayed from that export, and the exact lines
+ * and the task replayed from that export, the allowed-events
+ * listing for all 13 states with the main task's own (empty)
+ * allowed set, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1200,7 +1215,65 @@ export async function runDemo(): Promise<DemoResult> {
     `  replay matches the original (state + full history): ${replayMatches} — last entry seq ${replayedLast.seq} ${replayedLast.event} ${replayedLast.from} -> ${replayedLast.to}`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, lines };
+  // Allowed-events listing segment (closing): every segment above
+  // dispatches a fixed script, so a reader never sees the query a
+  // task-list UI or a watchdog consults BEFORE dispatching —
+  // "what can this task do next?" `allowedEvents(state)` answers
+  // it from the transition table alone: pure, no task instance, no
+  // dispatch, no mutation (no network, no randomness, no wall
+  // clock). All 13 states are listed in transition-table
+  // declaration order. Hand-written expectations — written out
+  // here from the transition table in src/taskLifecycle.ts, never
+  // derived by calling allowedEvents itself (the demo tests
+  // cross-check the printed listing against the committed
+  // transition-table snapshot as well):
+  //   DRAFT          -> [PUBLISH]
+  //   OPEN           -> [ACCEPT, EXPIRE]
+  //   ACCEPTED       -> [START_CAPTURE, ABANDON, EXPIRE]
+  //   CAPTURING      -> [SUBMIT, ABANDON, EXPIRE]
+  //   SUBMITTED      -> [BEGIN_REVIEW, EXPIRE]
+  //   IN_REVIEW      -> [APPROVE, REJECT]
+  //   APPROVED       -> [REQUEST_PAYOUT]
+  //   PAYOUT_PENDING -> [PAYOUT_COMPLETE]
+  //   PAID           -> [] (terminal)
+  //   REJECTED       -> [DISPUTE, RESUBMIT]
+  //   DISPUTED       -> [ARBITRATE_APPROVE, ARBITRATE_REJECT]
+  //   ABANDONED      -> [] (terminal)
+  //   EXPIRED        -> [] (terminal)
+  const ALL_STATES: TaskState[] = [
+    "DRAFT",
+    "OPEN",
+    "ACCEPTED",
+    "CAPTURING",
+    "SUBMITTED",
+    "IN_REVIEW",
+    "APPROVED",
+    "PAYOUT_PENDING",
+    "PAID",
+    "REJECTED",
+    "DISPUTED",
+    "ABANDONED",
+    "EXPIRED",
+  ];
+  const allowedEventsByState = ALL_STATES.map((state) => ({
+    state,
+    events: allowedEvents(state),
+  }));
+  const mainTaskAllowedEvents = allowedEvents(task.state);
+  lines.push(
+    "",
+    "Allowed events by state (allowedEvents over all 13 states):",
+  );
+  for (const { state, events } of allowedEventsByState) {
+    lines.push(
+      `  ${state.padEnd(15)} -> ${events.length > 0 ? events.join(", ") : "(none — terminal)"}`,
+    );
+  }
+  lines.push(
+    `  main task ${task.id} (${task.state}): allowedEvents -> ${mainTaskAllowedEvents.length > 0 ? mainTaskAllowedEvents.join(", ") : "(none)"} — a terminal task offers no further events, so a task-list UI renders no actions for it`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, lines };
 }
 
 async function main(): Promise<void> {

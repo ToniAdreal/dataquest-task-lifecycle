@@ -8,6 +8,7 @@ import {
   PayoutEventDedupe,
   TaskLifecycle,
   actOnStaleTasks,
+  allowedEvents,
   expireOverdueTasks,
   expiredTasks,
   historyFromNdjson,
@@ -15,6 +16,7 @@ import {
   isOverdue,
   parsePayoutRetryAfter,
   staleTasks,
+  transitionTable,
   verifyHistoryChain,
   verifyPayoutWebhook,
 } from "../src/index.js";
@@ -288,11 +290,27 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   {"seq":12,"event":"PAYOUT_COMPLETE","from":"PAYOUT_PENDING","to":"PAID","at":"<timestamp>","actor":"system","note":"Finance settles the payout","payoutRef":"xfer-88f2","payoutAmount":10098.5,"prevHash":"<hash>","hash":"<hash>"}
   historyFromNdjson: 12 entries parsed back
   TaskLifecycle.fromHistory(DEMO-001, entries): state PAID, 12 history entries
-  replay matches the original (state + full history): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID`;
+  replay matches the original (state + full history): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID
+
+Allowed events by state (allowedEvents over all 13 states):
+  DRAFT           -> PUBLISH
+  OPEN            -> ACCEPT, EXPIRE
+  ACCEPTED        -> START_CAPTURE, ABANDON, EXPIRE
+  CAPTURING       -> SUBMIT, ABANDON, EXPIRE
+  SUBMITTED       -> BEGIN_REVIEW, EXPIRE
+  IN_REVIEW       -> APPROVE, REJECT
+  APPROVED        -> REQUEST_PAYOUT
+  PAYOUT_PENDING  -> PAYOUT_COMPLETE
+  PAID            -> (none — terminal)
+  REJECTED        -> DISPUTE, RESUBMIT
+  DISPUTED        -> ARBITRATE_APPROVE, ARBITRATE_REJECT
+  ABANDONED       -> (none — terminal)
+  EXPIRED         -> (none — terminal)
+  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 242);
+  assert.equal(lines.length, 258);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1041,6 +1059,7 @@ test("demo event-sourcing segment agrees across two runs once the main task's ow
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
+      ls.indexOf("Allowed events by state (allowedEvents over all 13 states):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1266,6 +1285,92 @@ test("demo Retry-After segment is deterministic: two runs print byte-identical p
   assert.deepEqual(a.retryAfterParsed, b.retryAfterParsed);
 });
 
+test("demo shows the allowed-events listing segment in-process: every state's events match the hand-written table, cross-checked against the transition table", async () => {
+  const { allowedEventsByState, mainTaskAllowedEvents, task, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // transition table, in declaration order, never derived by
+  // calling allowedEvents itself. Terminal states (PAID /
+  // ABANDONED / EXPIRED) expect the empty list.
+  const EXPECTED: Array<{ state: string; events: string[] }> = [
+    { state: "DRAFT", events: ["PUBLISH"] },
+    { state: "OPEN", events: ["ACCEPT", "EXPIRE"] },
+    { state: "ACCEPTED", events: ["START_CAPTURE", "ABANDON", "EXPIRE"] },
+    { state: "CAPTURING", events: ["SUBMIT", "ABANDON", "EXPIRE"] },
+    { state: "SUBMITTED", events: ["BEGIN_REVIEW", "EXPIRE"] },
+    { state: "IN_REVIEW", events: ["APPROVE", "REJECT"] },
+    { state: "APPROVED", events: ["REQUEST_PAYOUT"] },
+    { state: "PAYOUT_PENDING", events: ["PAYOUT_COMPLETE"] },
+    { state: "PAID", events: [] },
+    { state: "REJECTED", events: ["DISPUTE", "RESUBMIT"] },
+    { state: "DISPUTED", events: ["ARBITRATE_APPROVE", "ARBITRATE_REJECT"] },
+    { state: "ABANDONED", events: [] },
+    { state: "EXPIRED", events: [] },
+  ];
+  assert.deepEqual(allowedEventsByState, EXPECTED);
+  // Cross-check against the transition table itself (the source
+  // of the committed snapshot in test/__snapshots__): grouping
+  // its edges by `from` must reproduce the same per-state lists —
+  // the demo segment is not self-certifying.
+  const fromTable = new Map<string, string[]>();
+  for (const { from, event } of transitionTable()) {
+    const list = fromTable.get(from) ?? [];
+    list.push(event);
+    fromTable.set(from, list);
+  }
+  for (const { state, events } of EXPECTED) {
+    assert.deepEqual(events, fromTable.get(state) ?? [], `state ${state}`);
+    assert.deepEqual(allowedEvents(state as never), events, `state ${state}`);
+  }
+  // The main task is PAID, so its own allowed set is the empty
+  // list — the boundary the segment calls out on its own line.
+  assert.equal(task.state, "PAID");
+  assert.deepEqual(mainTaskAllowedEvents, []);
+  // The segment closes the demo: it follows the replay segment,
+  // prints every state line verbatim, and its main-task line is
+  // the demo's last line.
+  const allowedAt = text.indexOf(
+    "Allowed events by state (allowedEvents over all 13 states):",
+  );
+  assert.ok(
+    allowedAt >
+      text.indexOf(
+        "Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):",
+      ),
+    "allowed-events segment must follow the replay segment",
+  );
+  for (const { state, events } of EXPECTED) {
+    const line =
+      events.length > 0
+        ? `  ${state.padEnd(15)} -> ${events.join(", ")}`
+        : `  ${state.padEnd(15)} -> (none — terminal)`;
+    assert.ok(text.includes(line), `missing listing line for ${state}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it",
+  );
+});
+
+test("demo allowed-events segment is deterministic: two runs print byte-identical listing lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Allowed events by state (allowedEvents over all 13 states):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + 13 state lines + the main-task line; every value is
+  // derived from the transition table alone, so no normalization
+  // is needed.
+  assert.equal(segA.length, 15);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.allowedEventsByState, b.allowedEventsByState);
+  assert.deepEqual(a.mainTaskAllowedEvents, b.mainTaskAllowedEvents);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
@@ -1273,7 +1378,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 242);
+  assert.equal(out.trimEnd().split("\n").length, 258);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An allowed-events listing segment closing the CLI demo:
+  `allowedEvents(state)` is run over all 13 states in
+  transition-table order and printed as one line per state — the
+  query a task-list UI or a watchdog consults to decide what a
+  task can do next. The three terminal states (PAID / ABANDONED /
+  EXPIRED) return the empty list, and the main task's own PAID
+  state is called out on its own line as that same empty set.
+  The query is pure — no task instance, no dispatch, no
+  mutation — so the segment adds no network, no randomness, and
+  no wall clock. `runDemo()` returns the per-state listing plus
+  the main task's (empty) allowed set; the demo tests pin the
+  structured results against hand-written expectations
+  cross-checked against the transition table, the exact printed
+  lines in the golden output, and the segment's printed-line
+  determinism across two runs. Demo and tests only; no library
+  behavior change.
 - A payout Retry-After parsing segment in the CLI demo: a fixed
   6-value corpus (`"2"`, `"  30 "`, a future HTTP-date, a past
   HTTP-date, `"banana"`, and `null`) is parsed with

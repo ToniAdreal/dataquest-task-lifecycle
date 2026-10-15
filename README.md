@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 522 tests, all local
+npm test   # 524 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -113,7 +113,13 @@ with `historyFromNdjson()`, and replays them with
 `TaskLifecycle.fromHistory()`: the replayed task lands in the same
 PAID state with the same 12-entry history, last entry included (the
 segment adds no new nondeterminism — it only serializes the main
-task's existing history).
+task's existing history) — and a closing allowed-events listing
+segment that runs `allowedEvents()` over all 13 states in
+transition-table order and prints one line per state — the query
+a task-list UI or a watchdog consults to decide what a task can
+do next — with the three terminal states (PAID / ABANDONED /
+EXPIRED) returning the empty list, and the main task's own PAID
+state called out on its own line as that same empty set.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1138,7 +1144,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 522 tests covering the happy path, reject→resubmit
+`npm test` runs 524 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
