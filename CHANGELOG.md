@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for transition-table JSON export:
+  `transitionTableJson()` with no arguments now appears in
+  `npm run bench`. Per-iteration self-checks parse the output
+  back and pin it to the hand-written expectations in the bench
+  comments (exactly 19 edges — the count pinned by the committed
+  snapshot — with the first edge DRAFT / PUBLISH / OPEN, the
+  payout edge PAYOUT_PENDING / PAYOUT_COMPLETE / PAID present,
+  and the last edge DISPUTED / ARBITRATE_REJECT / REJECTED in
+  place, and a trailing newline on the raw text), and an
+  exhaustive check runs once outside the timed loop. No network
+  and no wall-clock reads. The README Benchmarks table is
+  refreshed from one real run. Benchmark only; no library
+  behavior change.
 - A standalone history parsing segment closing the CLI demo:
   a fixed JSON text carrying the same five-entry
   PUBLISH..BEGIN_REVIEW chain that opens the main task (fixed

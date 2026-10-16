@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the sixteen hot-path
+ * Measures real, locally-observed throughput for the seventeen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -142,6 +142,18 @@
  *      calls; exactly the terminal states (PAID / ABANDONED /
  *      EXPIRED) must return true. No network and no wall clock.
  *
+ *  17. transition-table JSON export — `transitionTableJson()` with
+ *      no arguments (see the transition-table JSON fixture below).
+ *      This is the export a frontend / documentation tool pays to
+ *      consume the state machine: a full enumeration of every
+ *      transition edge, serialized as canonical JSON (declaration
+ *      order, 2-space indent, trailing newline). Its cost was
+ *      previously invisible inside the diagram / snapshot totals.
+ *      One timed pass is one full export call; the output must
+ *      parse back to exactly the 19 edges pinned by the committed
+ *      snapshot, with the key edges in place. No network and no
+ *      wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -172,6 +184,7 @@ import {
   staleTasks,
   TaskLifecycle,
   totalPaidOut,
+  transitionTableJson,
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
@@ -1255,6 +1268,54 @@ function checkIsTerminal(where: string): void {
 // states included.
 checkIsTerminal("isTerminal fixture");
 
+// Transition-table JSON fixture: the canonical export of the full
+// transition table. Hand-written expectations — written out here
+// from the committed snapshot
+// (test/__snapshots__/transitionTable.snapshot.json) and the
+// transition table in src/taskLifecycle.ts, never derived by
+// calling transitionTableJson itself:
+//   - the parsed output is an array of exactly 19 edges;
+//   - the first edge is DRAFT --PUBLISH--> OPEN;
+//   - the payout edge PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
+//     is present;
+//   - the last edge is DISPUTED --ARBITRATE_REJECT--> REJECTED;
+//   - the raw text ends with a trailing newline (canonical form).
+const TRANSITION_TABLE_JSON_EDGE_COUNT = 19;
+function checkTransitionTableJson(where: string): void {
+  const text = transitionTableJson();
+  if (!text.endsWith("\n")) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== TRANSITION_TABLE_JSON_EDGE_COUNT ||
+    parsed[0]?.from !== "DRAFT" ||
+    parsed[0]?.event !== "PUBLISH" ||
+    parsed[0]?.to !== "OPEN" ||
+    !parsed.some(
+      (e) =>
+        e?.from === "PAYOUT_PENDING" &&
+        e?.event === "PAYOUT_COMPLETE" &&
+        e?.to === "PAID",
+    ) ||
+    parsed[TRANSITION_TABLE_JSON_EDGE_COUNT - 1]?.from !== "DISPUTED" ||
+    parsed[TRANSITION_TABLE_JSON_EDGE_COUNT - 1]?.event !==
+      "ARBITRATE_REJECT" ||
+    parsed[TRANSITION_TABLE_JSON_EDGE_COUNT - 1]?.to !== "REJECTED"
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the export parses
+// to exactly the hand-written expectations above.
+checkTransitionTableJson("transitionTableJson fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1507,6 +1568,15 @@ function benchIsTerminal(): number {
   }, ITERATIONS);
 }
 
+function benchTransitionTableJson(): number {
+  return measure(() => {
+    // Per-iteration self-check: the export parses, the edge count
+    // matches the snapshot-pinned count, and the key edges are in
+    // place (see the fixture above).
+    checkTransitionTableJson("transitionTableJson");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1523,7 +1593,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1553,6 +1623,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "allowedEvents (13 states)", ops: benchAllowedEvents() },
   { path: "parseHistory (8-entry history)", ops: benchParseHistory() },
   { path: "isTerminal (13 states)", ops: benchIsTerminal() },
+  { path: "transitionTableJson (19 edges)", ops: benchTransitionTableJson() },
 ];
 
 console.log("path                                              throughput");
