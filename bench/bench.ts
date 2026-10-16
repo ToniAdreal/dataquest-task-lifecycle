@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the nineteen hot-path
+ * Measures real, locally-observed throughput for the twenty hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -183,6 +183,17 @@
  *      read is this repo's README.md; no network, no randomness,
  *      and no wall clock.
  *
+ *  20. SLA overdue judgement — `isOverdue(task, now)` over a
+ *      fixed corpus of 4 tasks (see the isOverdue fixture below)
+ *      under one injected fixed `now`. This is the per-task
+ *      primitive the watchdog screening in group 10 is built
+ *      on: the call a watchdog makes for one task at a time
+ *      before it may dispatch EXPIRE. One timed pass is one
+ *      full corpus pass of 4 per-task calls; the hand-written
+ *      expectations pin the inclusive boundary (a task whose
+ *      deadline is exactly `now` is overdue). No network and
+ *      no wall clock: `now` is injected, never read.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -203,6 +214,7 @@ import {
   expireOverdueTasks,
   historyFromNdjson,
   historyToNdjson,
+  isOverdue,
   isTerminal,
   mismatchedPayouts,
   parseHistory,
@@ -1446,6 +1458,77 @@ function checkReadmeDiagramInSync(where: string): void {
 // disk is in sync with the generated diagram.
 checkReadmeDiagramInSync("readmeDiagramInSync fixture");
 
+// IsOverdue fixture: a fixed corpus of 4 tasks, all in ACCEPTED
+// (PUBLISH then ACCEPT, fixed dispatch timestamps at BASE_MS and
+// BASE_MS + 1s), judged under one injected fixed `now`
+// (2026-10-04T00:00:00.000Z — the same fixed instant the SLA tests
+// in test/sla.test.ts judge at). Hand-written expectations —
+// written out here from src/taskLifecycle.ts (`isOverdue` reads
+// the deadline attached to the task's CURRENT state, returns
+// false when no deadline is set or the task is terminal, and
+// otherwise `now >= deadline`) and cross-checked against
+// test/sla.test.ts, never derived by calling isOverdue itself:
+//   BENCH-OD-01 deadline 2020-01-01 (past)     -> true
+//                    (sla test: true after the deadline)
+//   BENCH-OD-02 deadline exactly `now`       -> true
+//                    (sla test: true exactly at the deadline,
+//                     inclusive boundary — `>=`, not `>`)
+//   BENCH-OD-03 deadline 2099-01-01 (future) -> false
+//                    (sla test: false before the deadline)
+//   BENCH-OD-04 no SLA deadline              -> false
+//                    (sla test: false when no deadline is set)
+const IS_OVERDUE_NOW = new Date("2026-10-04T00:00:00.000Z");
+function buildIsOverdueTask(id: string, deadline?: Date): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  task.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: new Date(BASE_MS).toISOString(),
+  });
+  task.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 1000).toISOString(),
+  });
+  if (deadline !== undefined) task.setSlaDeadline(deadline);
+  return task;
+}
+const isOverdueFixture: Array<{
+  task: TaskLifecycle;
+  expected: boolean;
+}> = [
+  {
+    task: buildIsOverdueTask(
+      "BENCH-OD-01",
+      new Date("2020-01-01T00:00:00.000Z"),
+    ),
+    expected: true,
+  },
+  { task: buildIsOverdueTask("BENCH-OD-02", IS_OVERDUE_NOW), expected: true },
+  {
+    task: buildIsOverdueTask(
+      "BENCH-OD-03",
+      new Date("2099-01-01T00:00:00.000Z"),
+    ),
+    expected: false,
+  },
+  { task: buildIsOverdueTask("BENCH-OD-04"), expected: false },
+];
+if (
+  isOverdueFixture.length !== 4 ||
+  isOverdueFixture.some((e) => e.task.state !== "ACCEPTED")
+) {
+  throw new Error("benchmark fixture failed: isOverdue corpus shape");
+}
+function checkIsOverdue(where: string): void {
+  for (const { task, expected } of isOverdueFixture) {
+    if (isOverdue(task, IS_OVERDUE_NOW) !== expected) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time exhaustive validation (outside the timed loop): every
+// corpus task returns exactly its hand-written expectation.
+checkIsOverdue("isOverdue fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1716,6 +1799,14 @@ function benchStateDiagram(): number {
   }, ITERATIONS);
 }
 
+function benchIsOverdue(): number {
+  return measure(() => {
+    // Per-iteration self-check: every corpus task returns exactly
+    // its hand-written expectation (see the fixture above).
+    checkIsOverdue("isOverdue");
+  }, ITERATIONS);
+}
+
 function benchReadmeDiagramInSync(): number {
   return measure(() => {
     // Per-iteration self-check: the return value is the
@@ -1741,7 +1832,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1774,6 +1865,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "transitionTableJson (19 edges)", ops: benchTransitionTableJson() },
   { path: "stateDiagram (19 edges)", ops: benchStateDiagram() },
   { path: "readmeDiagramInSync (README file read)", ops: benchReadmeDiagramInSync() },
+  { path: "isOverdue (4-task corpus)", ops: benchIsOverdue() },
 ];
 
 console.log("path                                              throughput");

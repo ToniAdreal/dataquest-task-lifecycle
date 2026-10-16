@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for SLA overdue judgement:
+  `isOverdue(task, now)` over a fixed corpus of 4 tasks now
+  appears in `npm run bench`. All four tasks sit in ACCEPTED
+  under one injected fixed `now`
+  (`2026-10-04T00:00:00.000Z`): one already past its deadline,
+  one whose deadline is exactly `now`, one whose deadline is
+  still ahead, and one with no SLA deadline at all.
+  Per-iteration self-checks pin every returned value to the
+  hand-written expectations in the bench comments (`true` /
+  `true` / `false` / `false`, cross-checked against the SLA
+  tests; the exactly-at case pins the inclusive boundary —
+  `now >= deadline`, not `>`), and an exhaustive check runs
+  once outside the timed loop. No network, no randomness,
+  and no wall-clock reads. The README Benchmarks table is
+  refreshed from one real run. Benchmark only; no library
+  behavior change.
 - A state diagram generation segment closing the CLI demo:
   `stateDiagram()` renders the transition table as the Mermaid
   stateDiagram-v2 block the README embeds verbatim, and the
