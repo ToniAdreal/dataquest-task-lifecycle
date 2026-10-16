@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for state diagram generation:
+  `stateDiagram()` with no arguments now appears in
+  `npm run bench`. Per-iteration self-checks pin the output
+  to the hand-written expectations in the bench comments
+  (exactly 24 lines — the opening fence, the
+  `stateDiagram-v2` / direction / initial lines, the
+  19 edges — the count pinned by the committed snapshot —
+  and the closing fence — with all 13 states present, the
+  first edge DRAFT / PUBLISH / OPEN, the payout edge
+  PAYOUT_PENDING / PAYOUT_COMPLETE / PAID present, and the
+  last edge DISPUTED / ARBITRATE_REJECT / REJECTED in
+  place), and an exhaustive check runs once outside the
+  timed loop. No network and no wall-clock reads. The
+  README Benchmarks table is refreshed from one real run.
+  Benchmark only; no library behavior change.
 - Benchmark coverage for transition-table JSON export:
   `transitionTableJson()` with no arguments now appears in
   `npm run bench`. Per-iteration self-checks parse the output

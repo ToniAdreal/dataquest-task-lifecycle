@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the seventeen hot-path
+ * Measures real, locally-observed throughput for the eighteen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -154,6 +154,19 @@
  *      snapshot, with the key edges in place. No network and no
  *      wall clock.
  *
+ *  18. state diagram generation — `stateDiagram()` with no
+ *      arguments (see the state-diagram fixture below). This is
+ *      the rendering a documentation site / tool chain pays every
+ *      time it renders the docs: a full enumeration of every
+ *      transition edge plus Mermaid text assembly into a
+ *      stateDiagram-v2 block (the block the README embeds verbatim,
+ *      guarded against drift by test/stateDiagram.test.ts). Its
+ *      cost was previously invisible inside the snapshot totals.
+ *      One timed pass is one full render call; the output must
+ *      contain every state, exactly the 19 edges pinned by the
+ *      committed transition-table snapshot, and the hand-pinned
+ *      first / last lines. No network and no wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -182,6 +195,7 @@ import {
   PayoutEventDedupe,
   replay,
   staleTasks,
+  stateDiagram,
   TaskLifecycle,
   totalPaidOut,
   transitionTableJson,
@@ -1316,6 +1330,81 @@ function checkTransitionTableJson(where: string): void {
 // to exactly the hand-written expectations above.
 checkTransitionTableJson("transitionTableJson fixture");
 
+// State-diagram fixture: the Mermaid rendering of the full
+// transition table. Hand-written expectations — written out here
+// from src/taskLifecycle.ts and the committed snapshot
+// (test/__snapshots__/transitionTable.snapshot.json), never derived
+// by calling stateDiagram itself:
+//   - the output is exactly 24 lines: the opening ```mermaid
+//     fence, `stateDiagram-v2`, `    direction LR`, the initial
+//     `    [*] --> DRAFT` line, 19 edge lines, and the closing
+//     ``` fence;
+//   - the first edge line is `    DRAFT --> OPEN : PUBLISH`;
+//   - the payout edge line
+//     `    PAYOUT_PENDING --> PAID : PAYOUT_COMPLETE` is present;
+//   - the last edge line is
+//     `    DISPUTED --> REJECTED : ARBITRATE_REJECT`;
+//   - every one of the 13 hand-written states below appears as
+//     the source or target of at least one edge / initial line.
+const STATE_DIAGRAM_STATES: TaskState[] = [
+  "DRAFT",
+  "OPEN",
+  "ACCEPTED",
+  "CAPTURING",
+  "SUBMITTED",
+  "IN_REVIEW",
+  "APPROVED",
+  "PAYOUT_PENDING",
+  "PAID",
+  "REJECTED",
+  "DISPUTED",
+  "ABANDONED",
+  "EXPIRED",
+];
+const STATE_DIAGRAM_EDGE_COUNT = 19;
+const STATE_DIAGRAM_LINE_COUNT = 24;
+function checkStateDiagram(where: string): void {
+  const lines = stateDiagram().split("\n");
+  if (
+    lines.length !== STATE_DIAGRAM_LINE_COUNT ||
+    lines[0] !== "```mermaid" ||
+    lines[1] !== "stateDiagram-v2" ||
+    lines[2] !== "    direction LR" ||
+    lines[3] !== "    [*] --> DRAFT" ||
+    lines[STATE_DIAGRAM_LINE_COUNT - 1] !== "```"
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  const edgeLines = lines.slice(4, STATE_DIAGRAM_LINE_COUNT - 1);
+  if (
+    edgeLines.length !== STATE_DIAGRAM_EDGE_COUNT ||
+    edgeLines[0] !== "    DRAFT --> OPEN : PUBLISH" ||
+    !edgeLines.includes("    PAYOUT_PENDING --> PAID : PAYOUT_COMPLETE") ||
+    edgeLines[STATE_DIAGRAM_EDGE_COUNT - 1] !==
+      "    DISPUTED --> REJECTED : ARBITRATE_REJECT"
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  const seen = new Set<string>();
+  for (const line of [lines[3], ...edgeLines]) {
+    const m = /^    (\S+) --> (\S+)(?: : .+)?$/.exec(line);
+    if (!m) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+    if (m[1] !== "[*]") seen.add(m[1]);
+    seen.add(m[2]);
+  }
+  if (
+    seen.size !== STATE_DIAGRAM_STATES.length ||
+    STATE_DIAGRAM_STATES.some((s) => !seen.has(s))
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the rendering
+// matches exactly the hand-written expectations above.
+checkStateDiagram("stateDiagram fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1577,6 +1666,15 @@ function benchTransitionTableJson(): number {
   }, ITERATIONS);
 }
 
+function benchStateDiagram(): number {
+  return measure(() => {
+    // Per-iteration self-check: every state is present, the edge
+    // count matches the snapshot-pinned count, and the first /
+    // last lines are in place (see the fixture above).
+    checkStateDiagram("stateDiagram");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1593,7 +1691,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1624,6 +1722,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "parseHistory (8-entry history)", ops: benchParseHistory() },
   { path: "isTerminal (13 states)", ops: benchIsTerminal() },
   { path: "transitionTableJson (19 edges)", ops: benchTransitionTableJson() },
+  { path: "stateDiagram (19 edges)", ops: benchStateDiagram() },
 ];
 
 console.log("path                                              throughput");
