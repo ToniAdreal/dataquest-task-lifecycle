@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A standalone history parsing segment closing the CLI demo:
+  a fixed JSON text carrying the same five-entry
+  PUBLISH..BEGIN_REVIEW chain that opens the main task (fixed
+  timestamps, hashless legacy form) is parsed with
+  `parseHistory()` alone — no `TaskLifecycle` instance
+  involved — printed entry by entry, and compared against the
+  main task's own history prefix on one line; a detached copy
+  whose third entry's `from` is rewritten is rejected with the
+  chain-break error, asserted outside the printed parse and
+  reported on one closing line. `runDemo()` returns the parsed
+  entries, the prefix-match verdict, and the rejection message;
+  the demo tests pin the structured results against
+  hand-written expectations cross-checked by an independent
+  re-parse, the exact printed lines in the golden output, and
+  the segment's printed-line determinism across two runs. No
+  network, no randomness, and no wall clock. Demo and tests
+  only; no library behavior change.
 - Benchmark coverage for terminal-state judgement:
   `isTerminal(state)` over all 13 states (in transition-table
   declaration order) now appears in `npm run bench`.

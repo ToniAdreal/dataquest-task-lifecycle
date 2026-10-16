@@ -80,7 +80,15 @@
  * watchdog consults to decide what a task can do next — with the
  * three terminal states (PAID / ABANDONED / EXPIRED) returning the
  * empty list, and the main task's own PAID state called out on its
- * own line as that same empty set.
+ * own line as that same empty set — and finally a standalone
+ * history parsing segment: a fixed JSON text carrying the same
+ * five-entry PUBLISH..BEGIN_REVIEW chain that opens the main
+ * task (fixed timestamps, hashless legacy form) is parsed with
+ * `parseHistory` alone — no `TaskLifecycle` instance involved —
+ * printed entry by entry, and compared against the main task's
+ * own history prefix on one line; a detached copy whose third
+ * entry's `from` is rewritten is rejected, asserted outside the
+ * printed parse and reported on one closing line.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -95,7 +103,9 @@
  * for the fixed corpus under the fan-out instant, the
  * NDJSON export of the main task's history and the task replayed
  * from it, the allowed-events listing for all 13 states with the
- * main task's own (empty) allowed set, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * main task's own (empty) allowed set, the standalone-parsed
+ * external history entries with their main-prefix match verdict
+ * and the invalid copy's rejection message, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -121,6 +131,7 @@ import {
   historyToNdjson,
   isOverdue,
   mismatchedPayouts,
+  parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
   staleTasks,
@@ -135,6 +146,7 @@ import {
   type PayoutWebhookFetchImpl,
   type StaleActionResult,
   type TaskEvent,
+  type TaskHistoryEntry,
   type TaskState,
 } from "./index.js";
 
@@ -239,6 +251,14 @@ export interface DemoResult {
   allowedEventsByState: Array<{ state: TaskState; events: TaskEvent[] }>;
   /** `allowedEvents` for the main task's PAID state — the empty list. */
   mainTaskAllowedEvents: TaskEvent[];
+  /** Entries `parseHistory` returns for the fixed external JSON text. */
+  parsedHistoryEntries: TaskHistoryEntry[];
+  /** Whether the parsed chain equals the main history's first-5 chain. */
+  parsedHistoryMatchesMainPrefix: boolean;
+  /** Whether the detached chain-broken copy was rejected. */
+  parsedHistoryInvalidRejected: boolean;
+  /** The rejection message for the invalid copy ("" if it parsed). */
+  parsedHistoryInvalidError: string;
   lines: string[];
 }
 
@@ -261,7 +281,9 @@ export interface DemoResult {
  * subset and per-task expiry results, the NDJSON export of the main task's history
  * and the task replayed from that export, the allowed-events
  * listing for all 13 states with the main task's own (empty)
- * allowed set, and the exact lines
+ * allowed set, the standalone-parsed external history entries
+ * with their main-prefix match verdict and the invalid copy's
+ * rejection message, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1273,7 +1295,94 @@ export async function runDemo(): Promise<DemoResult> {
     `  main task ${task.id} (${task.state}): allowedEvents -> ${mainTaskAllowedEvents.length > 0 ? mainTaskAllowedEvents.join(", ") : "(none)"} — a terminal task offers no further events, so a task-list UI renders no actions for it`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, lines };
+  // Standalone history parsing segment (closing): every segment
+  // above either drives a TaskLifecycle or parses text back
+  // through one (the replay segment's historyFromNdjson feeds
+  // TaskLifecycle.fromHistory). An import / migration / audit
+  // review tool often holds only a bare history value — a JSON
+  // text from a snapshot file or another store — and needs it
+  // validated on its own, with no task instance at all. That is
+  // `parseHistory(history)`: strict structural validation
+  // (unknown fields fail closed, gapless seq, from/to chain
+  // continuity, legal transitions, canonical timestamps, and a
+  // full hash-chain re-verification when the entries carry
+  // hashes) returning fresh sanitized entries. The corpus here
+  // is a fixed JSON text (no network, no randomness, no wall
+  // clock) carrying the same five-entry chain that opens the
+  // main task, in hashless legacy form with fixed timestamps.
+  // Hand-written expectations — written out here from the main
+  // task's opening steps above, never derived by calling
+  // parseHistory itself:
+  //   seq 1 PUBLISH       DRAFT     -> OPEN      (system)
+  //   seq 2 ACCEPT        OPEN      -> ACCEPTED  (contributor)
+  //   seq 3 START_CAPTURE ACCEPTED  -> CAPTURING (contributor)
+  //   seq 4 SUBMIT        CAPTURING -> SUBMITTED (contributor)
+  //   seq 5 BEGIN_REVIEW  SUBMITTED -> IN_REVIEW (reviewer)
+  // so the parse returns exactly 5 entries and the final state
+  // (the last entry's `to`) is IN_REVIEW; the parsed seq/event/
+  // from/to chain equals the main task history's first 5 entries.
+  // The invalid check runs outside the printed parse: a detached
+  // copy whose third entry's `from` is rewritten from ACCEPTED
+  // to OPEN breaks the chain, so parseHistory must throw
+  // "invalid history: entry[2]: from OPEN does not continue
+  // previous to ACCEPTED" — and the original parse is untouched.
+  const PARSE_HISTORY_TEXT = JSON.stringify([
+    { seq: 1, event: "PUBLISH", from: "DRAFT", to: "OPEN", at: "2026-03-23T09:00:00.000Z", actor: "system", note: "Researcher publishes the data-collection task" },
+    { seq: 2, event: "ACCEPT", from: "OPEN", to: "ACCEPTED", at: "2026-03-23T09:05:00.000Z", actor: "contributor", note: "Contributor picks up the task" },
+    { seq: 3, event: "START_CAPTURE", from: "ACCEPTED", to: "CAPTURING", at: "2026-03-23T09:10:00.000Z", actor: "contributor", note: "Data capture begins" },
+    { seq: 4, event: "SUBMIT", from: "CAPTURING", to: "SUBMITTED", at: "2026-03-23T09:15:00.000Z", actor: "contributor", note: "Batch uploaded for QA" },
+    { seq: 5, event: "BEGIN_REVIEW", from: "SUBMITTED", to: "IN_REVIEW", at: "2026-03-23T09:20:00.000Z", actor: "reviewer", note: "QA specialist starts review" },
+  ]);
+  const parsedHistoryEntries = parseHistory(
+    JSON.parse(PARSE_HISTORY_TEXT) as unknown,
+  );
+  const parsedHistoryMatchesMainPrefix =
+    parsedHistoryEntries.length === 5 &&
+    parsedHistoryEntries.every((entry, i) => {
+      const main = task.history[i];
+      return (
+        main !== undefined &&
+        entry.seq === main.seq &&
+        entry.event === main.event &&
+        entry.from === main.from &&
+        entry.to === main.to
+      );
+    });
+  let parsedHistoryInvalidRejected = false;
+  let parsedHistoryInvalidError = "";
+  const parsedHistoryInvalidCopy = parsedHistoryEntries.map((entry) => ({
+    ...entry,
+  }));
+  parsedHistoryInvalidCopy[2] = {
+    ...parsedHistoryInvalidCopy[2],
+    from: "OPEN",
+  };
+  try {
+    parseHistory(parsedHistoryInvalidCopy);
+  } catch (err) {
+    parsedHistoryInvalidError = err instanceof Error ? err.message : String(err);
+    parsedHistoryInvalidRejected = parsedHistoryInvalidError.includes(
+      "does not continue previous to",
+    );
+  }
+  lines.push(
+    "",
+    "Standalone history parsing (parseHistory on a fixed external history):",
+    "  source: fixed JSON text with 5 hashless entries (the PUBLISH..BEGIN_REVIEW chain that opens DEMO-001, fixed timestamps; no TaskLifecycle instance involved)",
+  );
+  for (const entry of parsedHistoryEntries) {
+    lines.push(
+      `  entry seq ${entry.seq}: ${entry.event} ${entry.from} -> ${entry.to} (actor ${entry.actor}, at ${entry.at})`,
+    );
+  }
+  const parsedHistoryLast = parsedHistoryEntries.at(-1)!;
+  lines.push(
+    `  parsed: ${parsedHistoryEntries.length} entries, final state ${parsedHistoryLast.to} (last entry seq ${parsedHistoryLast.seq} ${parsedHistoryLast.event} ${parsedHistoryLast.from} -> ${parsedHistoryLast.to})`,
+    `  matches DEMO-001 prefix: ${parsedHistoryMatchesMainPrefix} (the parsed seq/event/from/to chain equals the main task history's first 5 entries)`,
+    `  invalid copy: parseHistory FAILED — ${parsedHistoryInvalidError} (a broken chain is rejected and the original parse is untouched)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, lines };
 }
 
 async function main(): Promise<void> {

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 524 tests, all local
+npm test   # 526 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -119,7 +119,17 @@ transition-table order and prints one line per state — the query
 a task-list UI or a watchdog consults to decide what a task can
 do next — with the three terminal states (PAID / ABANDONED /
 EXPIRED) returning the empty list, and the main task's own PAID
-state called out on its own line as that same empty set.
+state called out on its own line as that same empty set — and a
+closing standalone history parsing segment that parses a fixed
+JSON text with `parseHistory()` alone (no `TaskLifecycle`
+instance involved): the text carries the same five-entry
+PUBLISH..BEGIN_REVIEW chain that opens the main task, in
+hashless legacy form with fixed timestamps, the parsed entries
+print one line each, a comparison line confirms the parsed
+seq/event/from/to chain equals the main task history's first
+five entries, and a detached copy whose third entry's `from`
+is rewritten is rejected with the chain-break error on one
+closing line (asserted outside the printed parse).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1144,7 +1154,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 524 tests covering the happy path, reject→resubmit
+`npm test` runs 526 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

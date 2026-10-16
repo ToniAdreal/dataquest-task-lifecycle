@@ -14,6 +14,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
+  parseHistory,
   parsePayoutRetryAfter,
   staleTasks,
   transitionTable,
@@ -306,11 +307,22 @@ Allowed events by state (allowedEvents over all 13 states):
   DISPUTED        -> ARBITRATE_APPROVE, ARBITRATE_REJECT
   ABANDONED       -> (none — terminal)
   EXPIRED         -> (none — terminal)
-  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it`;
+  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it
+
+Standalone history parsing (parseHistory on a fixed external history):
+  source: fixed JSON text with 5 hashless entries (the PUBLISH..BEGIN_REVIEW chain that opens DEMO-001, fixed timestamps; no TaskLifecycle instance involved)
+  entry seq 1: PUBLISH DRAFT -> OPEN (actor system, at <timestamp>)
+  entry seq 2: ACCEPT OPEN -> ACCEPTED (actor contributor, at <timestamp>)
+  entry seq 3: START_CAPTURE ACCEPTED -> CAPTURING (actor contributor, at <timestamp>)
+  entry seq 4: SUBMIT CAPTURING -> SUBMITTED (actor contributor, at <timestamp>)
+  entry seq 5: BEGIN_REVIEW SUBMITTED -> IN_REVIEW (actor reviewer, at <timestamp>)
+  parsed: 5 entries, final state IN_REVIEW (last entry seq 5 BEGIN_REVIEW SUBMITTED -> IN_REVIEW)
+  matches DEMO-001 prefix: true (the parsed seq/event/from/to chain equals the main task history's first 5 entries)
+  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 258);
+  assert.equal(lines.length, 269);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1328,9 +1340,9 @@ test("demo shows the allowed-events listing segment in-process: every state's ev
   // list — the boundary the segment calls out on its own line.
   assert.equal(task.state, "PAID");
   assert.deepEqual(mainTaskAllowedEvents, []);
-  // The segment closes the demo: it follows the replay segment,
-  // prints every state line verbatim, and its main-task line is
-  // the demo's last line.
+  // The segment follows the replay segment and is itself
+  // followed by the standalone history parsing segment; it
+  // prints every state line verbatim.
   const allowedAt = text.indexOf(
     "Allowed events by state (allowedEvents over all 13 states):",
   );
@@ -1341,6 +1353,12 @@ test("demo shows the allowed-events listing segment in-process: every state's ev
       ),
     "allowed-events segment must follow the replay segment",
   );
+  assert.ok(
+    text.indexOf(
+      "Standalone history parsing (parseHistory on a fixed external history):",
+    ) > allowedAt,
+    "standalone history parsing segment must follow the allowed-events segment",
+  );
   for (const { state, events } of EXPECTED) {
     const line =
       events.length > 0
@@ -1348,9 +1366,10 @@ test("demo shows the allowed-events listing segment in-process: every state's ev
         : `  ${state.padEnd(15)} -> (none — terminal)`;
     assert.ok(text.includes(line), `missing listing line for ${state}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it",
+  assert.ok(
+    lines.includes(
+      "  main task DEMO-001 (PAID): allowedEvents -> (none) — a terminal task offers no further events, so a task-list UI renders no actions for it",
+    ),
   );
 });
 
@@ -1358,6 +1377,7 @@ test("demo allowed-events segment is deterministic: two runs print byte-identica
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Allowed events by state (allowedEvents over all 13 states):"),
+      ls.indexOf("Standalone history parsing (parseHistory on a fixed external history):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1371,6 +1391,109 @@ test("demo allowed-events segment is deterministic: two runs print byte-identica
   assert.deepEqual(a.mainTaskAllowedEvents, b.mainTaskAllowedEvents);
 });
 
+test("demo shows the standalone history parsing segment in-process: a fixed external history parses entry by entry, matches the main prefix, and a broken copy is rejected", async () => {
+  const {
+    parsedHistoryEntries,
+    parsedHistoryMatchesMainPrefix,
+    parsedHistoryInvalidRejected,
+    parsedHistoryInvalidError,
+    task,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — the fixed JSON corpus written out
+  // here entry by entry, never derived by calling the demo.
+  const EXPECTED_RAW = [
+    { seq: 1, event: "PUBLISH", from: "DRAFT", to: "OPEN", at: "2026-03-23T09:00:00.000Z", actor: "system", note: "Researcher publishes the data-collection task" },
+    { seq: 2, event: "ACCEPT", from: "OPEN", to: "ACCEPTED", at: "2026-03-23T09:05:00.000Z", actor: "contributor", note: "Contributor picks up the task" },
+    { seq: 3, event: "START_CAPTURE", from: "ACCEPTED", to: "CAPTURING", at: "2026-03-23T09:10:00.000Z", actor: "contributor", note: "Data capture begins" },
+    { seq: 4, event: "SUBMIT", from: "CAPTURING", to: "SUBMITTED", at: "2026-03-23T09:15:00.000Z", actor: "contributor", note: "Batch uploaded for QA" },
+    { seq: 5, event: "BEGIN_REVIEW", from: "SUBMITTED", to: "IN_REVIEW", at: "2026-03-23T09:20:00.000Z", actor: "reviewer", note: "QA specialist starts review" },
+  ];
+  assert.deepEqual(parsedHistoryEntries, EXPECTED_RAW);
+  // Cross-check by an independent parse of the same raw corpus —
+  // the demo segment is not self-certifying.
+  assert.deepEqual(parseHistory(EXPECTED_RAW), parsedHistoryEntries);
+  assert.deepEqual(parseHistory(JSON.parse(JSON.stringify(EXPECTED_RAW))), parsedHistoryEntries);
+  // The parsed chain equals the main task history's first 5 entries
+  // on seq/event/from/to (the main history's timestamps and hashes
+  // are its own; the chain is the shared part).
+  assert.equal(parsedHistoryMatchesMainPrefix, true);
+  assert.deepEqual(
+    parsedHistoryEntries.map((e) => [e.seq, e.event, e.from, e.to]),
+    task.history.slice(0, 5).map((h) => [h.seq, h.event, h.from, h.to]),
+  );
+  assert.equal(parsedHistoryEntries.at(-1)?.to, "IN_REVIEW");
+  // The invalid copy is rejected outside the printed parse, with
+  // the exact chain-break message, and the original parse is
+  // untouched (re-parsing the good corpus still succeeds).
+  assert.equal(parsedHistoryInvalidRejected, true);
+  assert.equal(
+    parsedHistoryInvalidError,
+    "invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED",
+  );
+  assert.throws(
+    () =>
+      parseHistory(
+        EXPECTED_RAW.map((e, i) => (i === 2 ? { ...e, from: "OPEN" } : e)),
+      ),
+    /does not continue previous to/,
+  );
+  assert.deepEqual(parseHistory(EXPECTED_RAW), parsedHistoryEntries);
+  // The segment closes the demo: it follows the allowed-events
+  // segment, prints every entry line verbatim, and its invalid
+  // line is the demo's last line.
+  const parseAt = text.indexOf(
+    "Standalone history parsing (parseHistory on a fixed external history):",
+  );
+  assert.ok(
+    parseAt >
+      text.indexOf("Allowed events by state (allowedEvents over all 13 states):"),
+    "standalone history parsing segment must follow the allowed-events segment",
+  );
+  for (const e of EXPECTED_RAW) {
+    assert.ok(
+      text.includes(
+        `  entry seq ${e.seq}: ${e.event} ${e.from} -> ${e.to} (actor ${e.actor}, at ${e.at})`,
+      ),
+      `missing parsed entry line for seq ${e.seq}`,
+    );
+  }
+  assert.ok(
+    text.includes(
+      "  parsed: 5 entries, final state IN_REVIEW (last entry seq 5 BEGIN_REVIEW SUBMITTED -> IN_REVIEW)",
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "  matches DEMO-001 prefix: true (the parsed seq/event/from/to chain equals the main task history's first 5 entries)",
+    ),
+  );
+  assert.equal(
+    lines[lines.length - 1],
+    "  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)",
+  );
+});
+
+test("demo standalone history parsing segment is deterministic: two runs print byte-identical parsing lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Standalone history parsing (parseHistory on a fixed external history):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + source line + 5 entry lines + parsed / matches /
+  // invalid lines; every value is a fixed literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 10);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.parsedHistoryEntries, b.parsedHistoryEntries);
+  assert.equal(a.parsedHistoryMatchesMainPrefix, b.parsedHistoryMatchesMainPrefix);
+  assert.equal(a.parsedHistoryInvalidError, b.parsedHistoryInvalidError);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
@@ -1378,7 +1501,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 258);
+  assert.equal(out.trimEnd().split("\n").length, 269);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
