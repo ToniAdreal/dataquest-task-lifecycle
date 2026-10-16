@@ -57,4 +57,8 @@ function main(): void {
   console.log(DIAGRAM);
 }
 
-main();
+// Run only when executed directly (`node dist/src/diagram.js`), not
+// when imported by the benchmark — the same guard src/demo.ts uses.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}

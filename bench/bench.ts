@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the eighteen hot-path
+ * Measures real, locally-observed throughput for the nineteen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -167,6 +167,22 @@
  *      committed transition-table snapshot, and the hand-pinned
  *      first / last lines. No network and no wall clock.
  *
+ *  19. README diagram sync check — `readmeDiagramInSync()` with
+ *      no arguments (see the sync-check fixture below), imported
+ *      directly from src/diagram.ts (it is not re-exported from
+ *      src/index.ts). This is the check a documentation CI pays
+ *      on every run: read this repo's own README.md from disk,
+ *      and confirm it embeds the exact diagram block generated
+ *      from the transition table at module load. Its cost was
+ *      previously invisible inside the test-suite totals. One
+ *      timed pass is one full check call, whose return value
+ *      must be the hand-written in-sync expectation (true — the
+ *      state the test suite pins: test/diagram.test.ts runs the
+ *      CLI `--check` form and test/stateDiagram.test.ts asserts
+ *      the README embeds the generated diagram). The only file
+ *      read is this repo's README.md; no network, no randomness,
+ *      and no wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -209,6 +225,7 @@ import {
   type TaskHistoryEntry,
   type TaskState,
 } from "../src/index.js";
+import { readmeDiagramInSync } from "../src/diagram.js";
 
 const ITERATIONS = 3000;
 const WARMUP = 200;
@@ -1405,6 +1422,30 @@ function checkStateDiagram(where: string): void {
 // matches exactly the hand-written expectations above.
 checkStateDiagram("stateDiagram fixture");
 
+// README diagram sync-check fixture: no corpus to build — the
+// check reads this repo's own README.md from disk on every call
+// and compares it against the diagram block generated from the
+// transition table when src/diagram.ts was loaded. Hand-written
+// expectation — written out here from the state the test suite
+// pins, never derived by calling readmeDiagramInSync itself:
+//   - the return value is exactly true: test/diagram.test.ts
+//     runs the CLI `--check` form of this same function and
+//     requires the in-sync outcome, and
+//     test/stateDiagram.test.ts asserts the README embeds the
+//     exact generated diagram (no drift). A drifted README
+//     would fail the test suite before it could fail here, so
+//     true is the only expectation consistent with a green
+//     suite; the bench self-check would catch a drift the
+//     moment the README and the table diverged.
+function checkReadmeDiagramInSync(where: string): void {
+  if (readmeDiagramInSync() !== true) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the README on
+// disk is in sync with the generated diagram.
+checkReadmeDiagramInSync("readmeDiagramInSync fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1675,6 +1716,15 @@ function benchStateDiagram(): number {
   }, ITERATIONS);
 }
 
+function benchReadmeDiagramInSync(): number {
+  return measure(() => {
+    // Per-iteration self-check: the return value is the
+    // hand-written in-sync expectation, true (see the fixture
+    // above). The only file read is this repo's README.md.
+    checkReadmeDiagramInSync("readmeDiagramInSync");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1691,7 +1741,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1723,6 +1773,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "isTerminal (13 states)", ops: benchIsTerminal() },
   { path: "transitionTableJson (19 edges)", ops: benchTransitionTableJson() },
   { path: "stateDiagram (19 edges)", ops: benchStateDiagram() },
+  { path: "readmeDiagramInSync (README file read)", ops: benchReadmeDiagramInSync() },
 ];
 
 console.log("path                                              throughput");

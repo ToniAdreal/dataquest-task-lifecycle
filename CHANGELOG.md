@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for the README diagram sync check:
+  `readmeDiagramInSync()` with no arguments now appears in
+  `npm run bench`, imported directly from `src/diagram.ts`
+  (it is not re-exported from the package entry). To make
+  that import side-effect free, the diagram CLI now runs
+  only when executed directly — the same guard
+  `src/demo.ts` uses — with no change to the CLI's behavior
+  or output. Per-iteration self-checks pin the return value
+  to the hand-written expectation in the bench comments
+  (exactly `true` — the in-sync state the test suite pins
+  via the CLI `--check` test and the README drift test),
+  and an exhaustive check runs once outside the timed loop.
+  The only file read is this repo's `README.md`; no network
+  and no wall-clock reads. The README Benchmarks table is
+  refreshed from one real run. Benchmark and diagram CLI
+  guard only; no library behavior change.
 - A transition-table JSON export segment closing the CLI demo:
   `transitionTableJson()` exports the whole transition table
   as canonical JSON, and the demo prints an export summary —
