@@ -88,7 +88,15 @@
  * printed entry by entry, and compared against the main task's
  * own history prefix on one line; a detached copy whose third
  * entry's `from` is rewritten is rejected, asserted outside the
- * printed parse and reported on one closing line.
+ * printed parse and reported on one closing line — and finally a
+ * transition-table JSON export segment: `transitionTableJson()`
+ * exports the whole transition table as canonical JSON for
+ * front-end / docs tooling, and the demo prints an export summary
+ * (the 19-edge total plus the first, payout, and last edges,
+ * hand-pinned in the segment comment and cross-checked against
+ * the committed transition-table snapshot by the demo tests) —
+ * the machine-readable counterpart of the state diagram a reader
+ * has only seen rendered as Mermaid so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -105,7 +113,8 @@
  * from it, the allowed-events listing for all 13 states with the
  * main task's own (empty) allowed set, the standalone-parsed
  * external history entries with their main-prefix match verdict
- * and the invalid copy's rejection message, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * and the invalid copy's rejection message, the transition-table
+ * JSON export text with its parsed-back edges, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -136,6 +145,7 @@ import {
   payoutMismatch,
   staleTasks,
   totalPaidOut,
+  transitionTableJson,
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
@@ -148,6 +158,7 @@ import {
   type TaskEvent,
   type TaskHistoryEntry,
   type TaskState,
+  type TransitionEdge,
 } from "./index.js";
 
 /**
@@ -259,6 +270,10 @@ export interface DemoResult {
   parsedHistoryInvalidRejected: boolean;
   /** The rejection message for the invalid copy ("" if it parsed). */
   parsedHistoryInvalidError: string;
+  /** Raw `transitionTableJson()` export text (trailing newline included). */
+  transitionTableJsonText: string;
+  /** Edges parsed back from `transitionTableJsonText`. */
+  transitionTableEdges: TransitionEdge[];
   lines: string[];
 }
 
@@ -283,7 +298,8 @@ export interface DemoResult {
  * listing for all 13 states with the main task's own (empty)
  * allowed set, the standalone-parsed external history entries
  * with their main-prefix match verdict and the invalid copy's
- * rejection message, and the exact lines
+ * rejection message, the transition-table JSON export text with
+ * its parsed-back edges, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1382,7 +1398,48 @@ export async function runDemo(): Promise<DemoResult> {
     `  invalid copy: parseHistory FAILED — ${parsedHistoryInvalidError} (a broken chain is rejected and the original parse is untouched)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, lines };
+  // Transition-table JSON export segment (closing): every segment
+  // above either runs tasks through the table or renders it as a
+  // Mermaid diagram, but a front-end or docs tool consumes the
+  // table itself — as JSON. `transitionTableJson()` is that
+  // export: the whole table in declaration order, canonical
+  // 2-space JSON with a trailing newline (the exact text the
+  // committed snapshot in test/__snapshots__ pins). The demo
+  // prints a summary, not the 97-line document: the edge total
+  // plus the first, payout, and last edges parsed back from the
+  // export text. Hand-written expectations — written out here
+  // from the transition table in src/taskLifecycle.ts, never
+  // derived by calling transitionTableJson itself (the demo
+  // tests cross-check the full parsed edge list against the
+  // committed snapshot as well):
+  //   19 edges in total
+  //   index 0  (first):  DRAFT --PUBLISH--> OPEN
+  //   index 14 (payout): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
+  //   index 18 (last):   DISPUTED --ARBITRATE_REJECT--> REJECTED
+  //   every edge carries its keys in from, event, to order
+  // The segment is pure: no task instance, no dispatch, no
+  // network, no randomness, no wall clock.
+  const transitionTableJsonText = transitionTableJson();
+  const transitionTableEdges = JSON.parse(
+    transitionTableJsonText,
+  ) as TransitionEdge[];
+  const transitionTableFirst = transitionTableEdges[0]!;
+  const transitionTablePayout = transitionTableEdges[14]!;
+  const transitionTableLast = transitionTableEdges.at(-1)!;
+  const transitionTableKeyOrder = transitionTableEdges.every(
+    (edge) => Object.keys(edge).join(",") === "from,event,to",
+  );
+  lines.push(
+    "",
+    "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
+    `  transitionTableJson(): ${transitionTableEdges.length} edges as canonical JSON (2-space indent, trailing newline; parsed back: ${transitionTableEdges.length} edges)`,
+    `  first edge (index 0): ${transitionTableFirst.from} --${transitionTableFirst.event}--> ${transitionTableFirst.to}`,
+    `  payout edge (index 14): ${transitionTablePayout.from} --${transitionTablePayout.event}--> ${transitionTablePayout.to}`,
+    `  last edge (index ${transitionTableEdges.length - 1}): ${transitionTableLast.from} --${transitionTableLast.event}--> ${transitionTableLast.to}`,
+    `  key order per edge: from, event, to on every edge: ${transitionTableKeyOrder} (the canonical field order a consumer can rely on)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, lines };
 }
 
 async function main(): Promise<void> {

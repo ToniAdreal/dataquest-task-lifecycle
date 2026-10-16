@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import {
   parsePayoutRetryAfter,
   staleTasks,
   transitionTable,
+  transitionTableJson,
   verifyHistoryChain,
   verifyPayoutWebhook,
 } from "../src/index.js";
@@ -318,11 +320,18 @@ Standalone history parsing (parseHistory on a fixed external history):
   entry seq 5: BEGIN_REVIEW SUBMITTED -> IN_REVIEW (actor reviewer, at <timestamp>)
   parsed: 5 entries, final state IN_REVIEW (last entry seq 5 BEGIN_REVIEW SUBMITTED -> IN_REVIEW)
   matches DEMO-001 prefix: true (the parsed seq/event/from/to chain equals the main task history's first 5 entries)
-  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)`;
+  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)
+
+Transition table JSON export (transitionTableJson for front-end / docs tooling):
+  transitionTableJson(): 19 edges as canonical JSON (2-space indent, trailing newline; parsed back: 19 edges)
+  first edge (index 0): DRAFT --PUBLISH--> OPEN
+  payout edge (index 14): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
+  last edge (index 18): DISPUTED --ARBITRATE_REJECT--> REJECTED
+  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 269);
+  assert.equal(lines.length, 276);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1441,9 +1450,9 @@ test("demo shows the standalone history parsing segment in-process: a fixed exte
     /does not continue previous to/,
   );
   assert.deepEqual(parseHistory(EXPECTED_RAW), parsedHistoryEntries);
-  // The segment closes the demo: it follows the allowed-events
-  // segment, prints every entry line verbatim, and its invalid
-  // line is the demo's last line.
+  // The segment follows the allowed-events segment, prints every
+  // entry line verbatim, and is itself followed by the
+  // transition-table JSON export segment.
   const parseAt = text.indexOf(
     "Standalone history parsing (parseHistory on a fixed external history):",
   );
@@ -1451,6 +1460,12 @@ test("demo shows the standalone history parsing segment in-process: a fixed exte
     parseAt >
       text.indexOf("Allowed events by state (allowedEvents over all 13 states):"),
     "standalone history parsing segment must follow the allowed-events segment",
+  );
+  assert.ok(
+    text.indexOf(
+      "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
+    ) > parseAt,
+    "transition-table JSON export segment must follow the standalone history parsing segment",
   );
   for (const e of EXPECTED_RAW) {
     assert.ok(
@@ -1470,9 +1485,10 @@ test("demo shows the standalone history parsing segment in-process: a fixed exte
       "  matches DEMO-001 prefix: true (the parsed seq/event/from/to chain equals the main task history's first 5 entries)",
     ),
   );
-  assert.equal(
-    lines[lines.length - 1],
-    "  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)",
+  assert.ok(
+    lines.includes(
+      "  invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)",
+    ),
   );
 });
 
@@ -1480,6 +1496,7 @@ test("demo standalone history parsing segment is deterministic: two runs print b
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Standalone history parsing (parseHistory on a fixed external history):"),
+      ls.indexOf("Transition table JSON export (transitionTableJson for front-end / docs tooling):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1494,6 +1511,97 @@ test("demo standalone history parsing segment is deterministic: two runs print b
   assert.equal(a.parsedHistoryInvalidError, b.parsedHistoryInvalidError);
 });
 
+test("demo shows the transition-table JSON export segment in-process: the parsed-back edges match the hand-written table and the committed snapshot", async () => {
+  const { transitionTableJsonText, transitionTableEdges, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — the full 19-edge table written
+  // out here in declaration order, never derived by calling
+  // transitionTableJson itself.
+  const EXPECTED = [
+    { from: "DRAFT", event: "PUBLISH", to: "OPEN" },
+    { from: "OPEN", event: "ACCEPT", to: "ACCEPTED" },
+    { from: "OPEN", event: "EXPIRE", to: "EXPIRED" },
+    { from: "ACCEPTED", event: "START_CAPTURE", to: "CAPTURING" },
+    { from: "ACCEPTED", event: "ABANDON", to: "ABANDONED" },
+    { from: "ACCEPTED", event: "EXPIRE", to: "EXPIRED" },
+    { from: "CAPTURING", event: "SUBMIT", to: "SUBMITTED" },
+    { from: "CAPTURING", event: "ABANDON", to: "ABANDONED" },
+    { from: "CAPTURING", event: "EXPIRE", to: "EXPIRED" },
+    { from: "SUBMITTED", event: "BEGIN_REVIEW", to: "IN_REVIEW" },
+    { from: "SUBMITTED", event: "EXPIRE", to: "EXPIRED" },
+    { from: "IN_REVIEW", event: "APPROVE", to: "APPROVED" },
+    { from: "IN_REVIEW", event: "REJECT", to: "REJECTED" },
+    { from: "APPROVED", event: "REQUEST_PAYOUT", to: "PAYOUT_PENDING" },
+    { from: "PAYOUT_PENDING", event: "PAYOUT_COMPLETE", to: "PAID" },
+    { from: "REJECTED", event: "DISPUTE", to: "DISPUTED" },
+    { from: "REJECTED", event: "RESUBMIT", to: "CAPTURING" },
+    { from: "DISPUTED", event: "ARBITRATE_APPROVE", to: "APPROVED" },
+    { from: "DISPUTED", event: "ARBITRATE_REJECT", to: "REJECTED" },
+  ];
+  assert.deepEqual(transitionTableEdges, EXPECTED);
+  // Cross-check against the committed snapshot file and the
+  // library export itself — the demo segment is not
+  // self-certifying.
+  const snapshotText = readFileSync(
+    path.join(repoRoot, "test", "__snapshots__", "transitionTable.snapshot.json"),
+    "utf8",
+  );
+  assert.equal(transitionTableJsonText, snapshotText);
+  assert.deepEqual(JSON.parse(snapshotText), transitionTableEdges);
+  assert.equal(transitionTableJsonText, transitionTableJson());
+  assert.deepEqual(transitionTable(), transitionTableEdges);
+  // Canonical shape: trailing newline, and every edge carries
+  // its keys in from, event, to order.
+  assert.ok(transitionTableJsonText.endsWith("]\n"));
+  for (const edge of transitionTableEdges) {
+    assert.deepEqual(Object.keys(edge), ["from", "event", "to"]);
+  }
+  // The segment closes the demo: it follows the standalone
+  // history parsing segment, prints its summary lines verbatim,
+  // and its key-order line is the demo's last line.
+  const exportAt = text.indexOf(
+    "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
+  );
+  assert.ok(
+    exportAt >
+      text.indexOf(
+        "Standalone history parsing (parseHistory on a fixed external history):",
+      ),
+    "transition-table JSON export segment must follow the standalone history parsing segment",
+  );
+  for (const line of [
+    "  transitionTableJson(): 19 edges as canonical JSON (2-space indent, trailing newline; parsed back: 19 edges)",
+    "  first edge (index 0): DRAFT --PUBLISH--> OPEN",
+    "  payout edge (index 14): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID",
+    "  last edge (index 18): DISPUTED --ARBITRATE_REJECT--> REJECTED",
+  ]) {
+    assert.ok(text.includes(line), `missing export line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)",
+  );
+});
+
+test("demo transition-table JSON export segment is deterministic: two runs print byte-identical export lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Transition table JSON export (transitionTableJson for front-end / docs tooling):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + total / first / payout / last / key-order lines;
+  // every value is derived from the transition table alone, so
+  // no normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.transitionTableJsonText, b.transitionTableJsonText);
+  assert.deepEqual(a.transitionTableEdges, b.transitionTableEdges);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
@@ -1501,7 +1609,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 269);
+  assert.equal(out.trimEnd().split("\n").length, 276);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A transition-table JSON export segment closing the CLI demo:
+  `transitionTableJson()` exports the whole transition table
+  as canonical JSON, and the demo prints an export summary —
+  the 19-edge total plus the first, payout (index 14), and
+  last edges parsed back from the export text, with the
+  per-edge `from, event, to` key order confirmed on every
+  edge. `runDemo()` returns the raw export text and the
+  parsed-back edges; the demo tests pin the structured
+  results against hand-written expectations cross-checked
+  against the committed transition-table snapshot file, the
+  exact printed lines in the golden output, and the segment's
+  printed-line determinism across two runs. No network, no
+  randomness, and no wall clock. Demo and tests only; no
+  library behavior change.
 - Benchmark coverage for state diagram generation:
   `stateDiagram()` with no arguments now appears in
   `npm run bench`. Per-iteration self-checks pin the output

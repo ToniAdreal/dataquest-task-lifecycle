@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 526 tests, all local
+npm test   # 528 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -129,7 +129,17 @@ print one line each, a comparison line confirms the parsed
 seq/event/from/to chain equals the main task history's first
 five entries, and a detached copy whose third entry's `from`
 is rewritten is rejected with the chain-break error on one
-closing line (asserted outside the printed parse).
+closing line (asserted outside the printed parse) — and a
+closing transition-table JSON export segment that runs
+`transitionTableJson()` and prints an export summary for
+front-end / docs tooling: the 19-edge total plus the first
+edge (DRAFT --PUBLISH--> OPEN), the payout edge at index 14
+(PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID), and the last edge
+(DISPUTED --ARBITRATE_REJECT--> REJECTED) parsed back from
+the canonical JSON, with the per-edge `from, event, to` key
+order confirmed on every edge (the demo tests cross-check the
+full parsed edge list against the committed transition-table
+snapshot).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1154,7 +1164,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 526 tests covering the happy path, reject→resubmit
+`npm test` runs 528 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
