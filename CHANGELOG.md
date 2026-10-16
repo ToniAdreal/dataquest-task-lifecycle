@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for terminal-state judgement:
+  `isTerminal(state)` over all 13 states (in transition-table
+  declaration order) now appears in `npm run bench`.
+  Per-iteration self-checks pin every returned value to the
+  hand-written truth table in the bench comments (only the
+  terminal states PAID / ABANDONED / EXPIRED return `true`; the
+  other ten states return `false`), and an exhaustive check
+  runs once outside the timed loop. No network and no
+  wall-clock reads. The README Benchmarks table is refreshed
+  from one real run. Benchmark only; no library behavior change.
 - An allowed-events listing segment closing the CLI demo:
   `allowedEvents(state)` is run over all 13 states in
   transition-table order and printed as one line per state — the

@@ -1288,7 +1288,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the fifteen hot
+`npm run bench` measures locally-observed throughput for the sixteen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
@@ -1308,8 +1308,9 @@ batch), payout Retry-After parsing
 (`parsePayoutRetryAfter` over a fixed corpus of header values),
 payout mismatch judgement (`payoutMismatch` over a fixed set of
 5 tasks), allowed-events query (`allowedEvents` over all
-13 states), and standalone history parsing (`parseHistory` over
-the same fixed 8-entry chained history).
+13 states), standalone history parsing (`parseHistory` over
+the same fixed 8-entry chained history), and terminal-state
+judgement (`isTerminal` over all 13 states).
 Fixtures are
 deterministic — one task driven through the full
 `DRAFT → PAID` lifecycle (8 hash-chained audit entries), with a fixed
@@ -1403,34 +1404,43 @@ hand-written expectations in the bench comments (8 entries,
 last `seq` 8, final state PAID); a detached tampered copy
 (its `PAYOUT_COMPLETE` entry's `payoutAmount` altered from
 125 to 126) is rejected once, outside the timed loop, with
-the hash-chain error. One real run on
-2026-10-15:
+the hash-chain error. The
+`isTerminal` path judges every state on every iteration (no
+network, no wall clock): all 13 states in transition-table
+declaration order. Its per-iteration self-check pins every
+returned value to the hand-written truth table written out in
+the bench comments (only the terminal states PAID / ABANDONED /
+EXPIRED return `true`; the other ten states return `false`);
+one timed pass is one full state-set pass of 13 per-state
+calls. One real run on
+2026-10-16:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~9,474 ops/sec (~105.56 µs/op) |
-| replay (8-entry history) | ~12,298 ops/sec (~81.32 µs/op) |
-| fromHistory (8-entry history) | ~5,797 ops/sec (~172.49 µs/op) |
-| verifyHistoryChain (8 entries) | ~18,624 ops/sec (~53.69 µs/op) |
-| buildPayoutWebhook (sign) | ~25,934 ops/sec (~38.56 µs/op) |
-| verifyPayoutWebhook | ~34,014 ops/sec (~29.40 µs/op) |
-| historyToNdjson (8 entries) | ~9,009 ops/sec (~111.01 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~7,038 ops/sec (~142.08 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~45,994 ops/sec (~21.74 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~75,749 ops/sec (~13.20 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~21,445 ops/sec (~46.63 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~4,934 ops/sec (~202.68 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~2,957,524 ops/sec (~0.34 µs/op) |
-| PayoutEventDedupe.restore (1,000-entry snapshot) | ~2,308 ops/sec (~433.29 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,539 ops/sec (~152.93 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~258,822 ops/sec (~3.86 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~116,344 ops/sec (~8.60 µs/op) |
-| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~2,736 ops/sec (~365.44 µs/op) |
-| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~2,666 ops/sec (~375.15 µs/op) |
-| parsePayoutRetryAfter (11-value corpus) | ~270,407 ops/sec (~3.70 µs/op) |
-| payoutMismatch (5-task set) | ~80,885 ops/sec (~12.36 µs/op) |
-| allowedEvents (13 states) | ~469,349 ops/sec (~2.13 µs/op) |
-| parseHistory (8-entry history) | ~12,061 ops/sec (~82.91 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~11,600 ops/sec (~86.20 µs/op) |
+| replay (8-entry history) | ~9,681 ops/sec (~103.29 µs/op) |
+| fromHistory (8-entry history) | ~3,566 ops/sec (~280.43 µs/op) |
+| verifyHistoryChain (8 entries) | ~6,281 ops/sec (~159.22 µs/op) |
+| buildPayoutWebhook (sign) | ~43,214 ops/sec (~23.14 µs/op) |
+| verifyPayoutWebhook | ~71,899 ops/sec (~13.91 µs/op) |
+| historyToNdjson (8 entries) | ~4,830 ops/sec (~207.02 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~6,221 ops/sec (~160.74 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~23,386 ops/sec (~42.76 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~31,261 ops/sec (~31.99 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~31,559 ops/sec (~31.69 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~3,960 ops/sec (~252.54 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,231,947 ops/sec (~0.31 µs/op) |
+| PayoutEventDedupe.restore (1,000-entry snapshot) | ~2,801 ops/sec (~357.07 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~4,067 ops/sec (~245.89 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~121,527 ops/sec (~8.23 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~27,389 ops/sec (~36.51 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~1,514 ops/sec (~660.66 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~1,461 ops/sec (~684.42 µs/op) |
+| parsePayoutRetryAfter (11-value corpus) | ~238,786 ops/sec (~4.19 µs/op) |
+| payoutMismatch (5-task set) | ~98,616 ops/sec (~10.14 µs/op) |
+| allowedEvents (13 states) | ~97,440 ops/sec (~10.26 µs/op) |
+| parseHistory (8-entry history) | ~4,176 ops/sec (~239.47 µs/op) |
+| isTerminal (13 states) | ~386,700 ops/sec (~2.59 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host under load, so numbers vary run to run — several paths

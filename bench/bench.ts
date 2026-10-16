@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the fifteen hot-path
+ * Measures real, locally-observed throughput for the sixteen hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -132,6 +132,16 @@
  *      rejected once, outside the timed loop. No network and no
  *      wall clock.
  *
+ *  16. terminal-state judgement — `isTerminal(state)` over the
+ *      fixed set of all 13 states (see the isTerminal fixture below
+ *      for the hand-written truth table for every state). This is
+ *      the check a watchdog / batch scan pays for every task it
+ *      walks: is this task finished, or can it still move. Its
+ *      cost was previously invisible inside the watchdog totals.
+ *      One timed pass is one full state-set pass of 13 per-state
+ *      calls; exactly the terminal states (PAID / ABANDONED /
+ *      EXPIRED) must return true. No network and no wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -152,6 +162,7 @@ import {
   expireOverdueTasks,
   historyFromNdjson,
   historyToNdjson,
+  isTerminal,
   mismatchedPayouts,
   parseHistory,
   parsePayoutRetryAfter,
@@ -1193,6 +1204,57 @@ if (!parseHistoryTamperRejected) {
 }
 checkParseHistory("parseHistory fixture after tamper check");
 
+// IsTerminal fixture: all 13 states, in transition-table declaration
+// order, with the hand-written terminal truth value for each.
+// Hand-written expectations — written out here from the TERMINAL
+// set in src/taskLifecycle.ts, never derived by calling isTerminal
+// itself:
+//   DRAFT          -> false
+//   OPEN           -> false
+//   ACCEPTED       -> false
+//   CAPTURING      -> false
+//   SUBMITTED      -> false
+//   IN_REVIEW      -> false
+//   APPROVED       -> false
+//   PAYOUT_PENDING -> false
+//   PAID           -> true (terminal)
+//   REJECTED       -> false
+//   DISPUTED       -> false
+//   ABANDONED      -> true (terminal)
+//   EXPIRED        -> true (terminal)
+const isTerminalFixture: Array<{
+  state: TaskState;
+  expected: boolean;
+}> = [
+  { state: "DRAFT", expected: false },
+  { state: "OPEN", expected: false },
+  { state: "ACCEPTED", expected: false },
+  { state: "CAPTURING", expected: false },
+  { state: "SUBMITTED", expected: false },
+  { state: "IN_REVIEW", expected: false },
+  { state: "APPROVED", expected: false },
+  { state: "PAYOUT_PENDING", expected: false },
+  { state: "PAID", expected: true },
+  { state: "REJECTED", expected: false },
+  { state: "DISPUTED", expected: false },
+  { state: "ABANDONED", expected: true },
+  { state: "EXPIRED", expected: true },
+];
+if (isTerminalFixture.length !== 13) {
+  throw new Error("benchmark fixture failed: isTerminal state set shape");
+}
+function checkIsTerminal(where: string): void {
+  for (const { state, expected } of isTerminalFixture) {
+    if (isTerminal(state) !== expected) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time exhaustive validation (outside the timed loop): every
+// state returns exactly its hand-written truth value, terminal
+// states included.
+checkIsTerminal("isTerminal fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1437,6 +1499,14 @@ function benchParseHistory(): number {
   }, ITERATIONS);
 }
 
+function benchIsTerminal(): number {
+  return measure(() => {
+    // Per-iteration self-check: every state returns exactly its
+    // hand-written truth value (see the fixture above).
+    checkIsTerminal("isTerminal");
+  }, ITERATIONS);
+}
+
 function benchUnreconciledPayouts(): number {
   return measure(() => {
     const out = unreconciledPayouts(screeningBatch);
@@ -1453,7 +1523,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop)",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true)",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -1482,6 +1552,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "payoutMismatch (5-task set)", ops: benchPayoutMismatch() },
   { path: "allowedEvents (13 states)", ops: benchAllowedEvents() },
   { path: "parseHistory (8-entry history)", ops: benchParseHistory() },
+  { path: "isTerminal (13 states)", ops: benchIsTerminal() },
 ];
 
 console.log("path                                              throughput");
