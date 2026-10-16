@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A state diagram generation segment closing the CLI demo:
+  `stateDiagram()` renders the transition table as the Mermaid
+  stateDiagram-v2 block the README embeds verbatim, and the
+  demo prints a generation summary — the 24-line total and
+  19-edge count plus the first, second, initial, first-edge,
+  last-edge, and last lines. The segment itself asserts the
+  pinned shape outside the printed summary (first line is the
+  mermaid fence, the block carries the `stateDiagram-v2`
+  header, and the edge-line count equals the transition
+  table's edge count). `runDemo()` returns the full generated
+  text and the edge-line count; the demo tests pin the block
+  against hand-written expectations cross-checked against
+  the library generator and the README-embedded copy, the
+  exact printed lines in the golden output, and the segment's
+  printed-line determinism across two runs. No network, no
+  randomness, and no wall clock. Demo and tests only; no
+  library behavior change.
 - Benchmark coverage for the README diagram sync check:
   `readmeDiagramInSync()` with no arguments now appears in
   `npm run bench`, imported directly from `src/diagram.ts`

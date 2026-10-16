@@ -18,6 +18,7 @@ import {
   parseHistory,
   parsePayoutRetryAfter,
   staleTasks,
+  stateDiagram,
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
@@ -327,11 +328,20 @@ Transition table JSON export (transitionTableJson for front-end / docs tooling):
   first edge (index 0): DRAFT --PUBLISH--> OPEN
   payout edge (index 14): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
   last edge (index 18): DISPUTED --ARBITRATE_REJECT--> REJECTED
-  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)`;
+  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)
+
+State diagram generation (stateDiagram from the transition table):
+  stateDiagram(): 24 lines, 19 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)
+  first line: \`\`\`mermaid
+  second line: stateDiagram-v2
+  initial transition (line 4): [*] --> DRAFT
+  first edge (line 5): DRAFT --> OPEN : PUBLISH
+  last edge (line 23): DISPUTED --> REJECTED : ARBITRATE_REJECT
+  last line: \`\`\``;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 276);
+  assert.equal(lines.length, 285);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1558,9 +1568,9 @@ test("demo shows the transition-table JSON export segment in-process: the parsed
   for (const edge of transitionTableEdges) {
     assert.deepEqual(Object.keys(edge), ["from", "event", "to"]);
   }
-  // The segment closes the demo: it follows the standalone
-  // history parsing segment, prints its summary lines verbatim,
-  // and its key-order line is the demo's last line.
+  // The segment follows the standalone history parsing segment
+  // and prints its summary lines verbatim; the state diagram
+  // generation segment now closes the demo after it.
   const exportAt = text.indexOf(
     "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
   );
@@ -1579,9 +1589,16 @@ test("demo shows the transition-table JSON export segment in-process: the parsed
   ]) {
     assert.ok(text.includes(line), `missing export line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)",
+  assert.ok(
+    lines.includes(
+      "  key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)",
+    ),
+  );
+  assert.ok(
+    text.indexOf(
+      "State diagram generation (stateDiagram from the transition table):",
+    ) > exportAt,
+    "state diagram generation segment must follow the transition-table JSON export segment",
   );
 });
 
@@ -1589,6 +1606,7 @@ test("demo transition-table JSON export segment is deterministic: two runs print
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Transition table JSON export (transitionTableJson for front-end / docs tooling):"),
+      ls.indexOf("State diagram generation (stateDiagram from the transition table):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1602,6 +1620,97 @@ test("demo transition-table JSON export segment is deterministic: two runs print
   assert.deepEqual(a.transitionTableEdges, b.transitionTableEdges);
 });
 
+test("demo shows the state diagram generation segment in-process: the generated block matches the hand-written diagram line by line", async () => {
+  const { stateDiagramText, stateDiagramEdgeCount, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — the full 24-line Mermaid block
+  // written out here line by line, never derived by calling
+  // stateDiagram itself.
+  const EXPECTED_LINES = [
+    "```mermaid",
+    "stateDiagram-v2",
+    "    direction LR",
+    "    [*] --> DRAFT",
+    "    DRAFT --> OPEN : PUBLISH",
+    "    OPEN --> ACCEPTED : ACCEPT",
+    "    OPEN --> EXPIRED : EXPIRE",
+    "    ACCEPTED --> CAPTURING : START_CAPTURE",
+    "    ACCEPTED --> ABANDONED : ABANDON",
+    "    ACCEPTED --> EXPIRED : EXPIRE",
+    "    CAPTURING --> SUBMITTED : SUBMIT",
+    "    CAPTURING --> ABANDONED : ABANDON",
+    "    CAPTURING --> EXPIRED : EXPIRE",
+    "    SUBMITTED --> IN_REVIEW : BEGIN_REVIEW",
+    "    SUBMITTED --> EXPIRED : EXPIRE",
+    "    IN_REVIEW --> APPROVED : APPROVE",
+    "    IN_REVIEW --> REJECTED : REJECT",
+    "    APPROVED --> PAYOUT_PENDING : REQUEST_PAYOUT",
+    "    PAYOUT_PENDING --> PAID : PAYOUT_COMPLETE",
+    "    REJECTED --> DISPUTED : DISPUTE",
+    "    REJECTED --> CAPTURING : RESUBMIT",
+    "    DISPUTED --> APPROVED : ARBITRATE_APPROVE",
+    "    DISPUTED --> REJECTED : ARBITRATE_REJECT",
+    "```",
+  ];
+  assert.deepEqual(stateDiagramText.split("\n"), EXPECTED_LINES);
+  // The shape the backlog pins: first line is the mermaid fence,
+  // the block carries the stateDiagram-v2 header, and the edge
+  // count equals the transition-table snapshot's pinned 19.
+  assert.equal(stateDiagramText.split("\n")[0], "```mermaid");
+  assert.ok(stateDiagramText.includes("stateDiagram-v2"));
+  assert.equal(stateDiagramEdgeCount, 19);
+  assert.equal(stateDiagramEdgeCount, transitionTable().length);
+  // Cross-check against the library generator itself and the
+  // README-embedded copy — the demo segment is not
+  // self-certifying.
+  assert.equal(stateDiagramText, stateDiagram());
+  const readme = readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  assert.ok(readme.includes(stateDiagramText));
+  // The segment closes the demo: it follows the transition-table
+  // JSON export segment, prints its summary lines verbatim, and
+  // its closing-fence line is the demo's last line.
+  const diagramAt = text.indexOf(
+    "State diagram generation (stateDiagram from the transition table):",
+  );
+  assert.ok(
+    diagramAt >
+      text.indexOf(
+        "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
+      ),
+    "state diagram generation segment must follow the transition-table JSON export segment",
+  );
+  for (const line of [
+    "  stateDiagram(): 24 lines, 19 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)",
+    "  first line: ```mermaid",
+    "  second line: stateDiagram-v2",
+    "  initial transition (line 4): [*] --> DRAFT",
+    "  first edge (line 5): DRAFT --> OPEN : PUBLISH",
+    "  last edge (line 23): DISPUTED --> REJECTED : ARBITRATE_REJECT",
+  ]) {
+    assert.ok(text.includes(line), `missing diagram line: ${line}`);
+  }
+  assert.equal(lines[lines.length - 1], "  last line: ```");
+});
+
+test("demo state diagram generation segment is deterministic: two runs print byte-identical diagram lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("State diagram generation (stateDiagram from the transition table):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + total / first / second / initial / first-edge /
+  // last-edge / last lines; every value is derived from the
+  // transition table alone, so no normalization is needed.
+  assert.equal(segA.length, 8);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.stateDiagramText, b.stateDiagramText);
+  assert.equal(a.stateDiagramEdgeCount, b.stateDiagramEdgeCount);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
@@ -1609,7 +1718,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 276);
+  assert.equal(out.trimEnd().split("\n").length, 285);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

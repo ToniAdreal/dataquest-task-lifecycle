@@ -96,7 +96,15 @@
  * hand-pinned in the segment comment and cross-checked against
  * the committed transition-table snapshot by the demo tests) —
  * the machine-readable counterpart of the state diagram a reader
- * has only seen rendered as Mermaid so far.
+ * has only seen rendered as Mermaid so far — and finally a state
+ * diagram generation segment: `stateDiagram()` renders that same
+ * table as the Mermaid stateDiagram-v2 block the README embeds
+ * verbatim, and the demo prints a generation summary (the
+ * 24-line total and 19-edge count plus the first, second,
+ * initial, first-edge, last-edge, and last lines, hand-pinned in
+ * the segment comment and cross-checked against the full
+ * generated block by the demo tests) — the docs-drift guard's
+ * own output, shown instead of only asserted.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -114,7 +122,8 @@
  * main task's own (empty) allowed set, the standalone-parsed
  * external history entries with their main-prefix match verdict
  * and the invalid copy's rejection message, the transition-table
- * JSON export text with its parsed-back edges, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * JSON export text with its parsed-back edges, the generated
+ * state diagram text with its edge-line count, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -144,7 +153,9 @@ import {
   parsePayoutRetryAfter,
   payoutMismatch,
   staleTasks,
+  stateDiagram,
   totalPaidOut,
+  transitionTable,
   transitionTableJson,
   unreconciledPayouts,
   verifyHistoryChain,
@@ -274,6 +285,10 @@ export interface DemoResult {
   transitionTableJsonText: string;
   /** Edges parsed back from `transitionTableJsonText`. */
   transitionTableEdges: TransitionEdge[];
+  /** Full `stateDiagram()` Mermaid block text (no trailing newline). */
+  stateDiagramText: string;
+  /** Edge lines inside `stateDiagramText` (the 19 transition edges). */
+  stateDiagramEdgeCount: number;
   lines: string[];
 }
 
@@ -299,7 +314,8 @@ export interface DemoResult {
  * allowed set, the standalone-parsed external history entries
  * with their main-prefix match verdict and the invalid copy's
  * rejection message, the transition-table JSON export text with
- * its parsed-back edges, and the exact lines
+ * its parsed-back edges, the generated state diagram text with
+ * its edge-line count, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1439,7 +1455,57 @@ export async function runDemo(): Promise<DemoResult> {
     `  key order per edge: from, event, to on every edge: ${transitionTableKeyOrder} (the canonical field order a consumer can rely on)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, lines };
+  // State diagram generation segment (closing): the segment above
+  // exports the table as JSON for tooling; this one renders it the
+  // way a reader actually sees it — `stateDiagram()` generates the
+  // Mermaid stateDiagram-v2 block from transitionTable() (the
+  // single source of truth), the exact block the README embeds
+  // verbatim and test/stateDiagram.test.ts guards against drift.
+  // The demo prints a summary, not the 24-line block: the line
+  // total and edge count plus the first, second, initial,
+  // first-edge, last-edge, and last lines. Hand-written
+  // expectations — written out here from src/taskLifecycle.ts,
+  // never derived by calling stateDiagram itself (the demo tests
+  // cross-check the full generated block line by line as well):
+  //   24 lines in total, 19 of them edge lines
+  //   line 1:  ```mermaid (the opening fence)
+  //   line 2:  stateDiagram-v2
+  //   line 4:      [*] --> DRAFT (the initial transition)
+  //   line 5:      DRAFT --> OPEN : PUBLISH (the first edge)
+  //   line 23:     DISPUTED --> REJECTED : ARBITRATE_REJECT (last edge)
+  //   line 24: ``` (the closing fence)
+  // The edge-line count must equal the transition table's edge
+  // count — the same 19 the committed snapshot pins — and the
+  // segment asserts that here, outside the printed summary: a
+  // diagram whose shape broke would fail the demo itself, not
+  // just a test. The segment is pure: no task instance, no
+  // dispatch, no network, no randomness, no wall clock.
+  const stateDiagramText = stateDiagram();
+  const stateDiagramLines = stateDiagramText.split("\n");
+  const stateDiagramEdgeLines = stateDiagramLines.slice(4, -1);
+  const stateDiagramEdgeCount = stateDiagramEdgeLines.length;
+  if (
+    stateDiagramLines[0] !== "```mermaid" ||
+    !stateDiagramText.includes("stateDiagram-v2") ||
+    stateDiagramEdgeCount !== transitionTable().length
+  ) {
+    throw new Error(
+      "demo fixture broken: stateDiagram() output does not have the pinned shape (mermaid fence, stateDiagram-v2 header, one edge line per transition-table edge)",
+    );
+  }
+  lines.push(
+    "",
+    "State diagram generation (stateDiagram from the transition table):",
+    `  stateDiagram(): ${stateDiagramLines.length} lines, ${stateDiagramEdgeCount} edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)`,
+    `  first line: ${stateDiagramLines[0]}`,
+    `  second line: ${stateDiagramLines[1]}`,
+    `  initial transition (line 4): ${stateDiagramLines[3].trim()}`,
+    `  first edge (line 5): ${stateDiagramEdgeLines[0].trim()}`,
+    `  last edge (line ${stateDiagramLines.length - 1}): ${stateDiagramEdgeLines.at(-1)!.trim()}`,
+    `  last line: ${stateDiagramLines.at(-1)}`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, lines };
 }
 
 async function main(): Promise<void> {
