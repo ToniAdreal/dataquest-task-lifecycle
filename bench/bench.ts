@@ -15,7 +15,13 @@
  *      tampered history is rejected once, outside the timed loop
  *      (see the fromHistory fidelity fixture below);
  *   3. `verifyHistoryChain(history)` — full SHA-256 hash-chain
- *      re-verification of that same history;
+ *      re-verification of that same history. The path's
+ *      per-iteration self-check pins the fixture's genesis
+ *      linkage (the first entry's `prevHash` is
+ *      `GENESIS_PREV_HASH`) and every later entry's `prevHash`
+ *      linkage to its predecessor's `hash`, and a detached
+ *      tampered history returns false once, outside the timed
+ *      loop (see the verifyHistoryChain linkage fixture below);
  *   4. payout webhook build / verify — `buildPayoutWebhook` (HMAC-SHA256
  *      signing) and `verifyPayoutWebhook` over the signed body;
  *   5. NDJSON export / import — `historyToNdjson` (validated export of
@@ -256,6 +262,7 @@ import {
   deliverPayoutWebhookToMany,
   expiredTasks,
   expireOverdueTasks,
+  GENESIS_PREV_HASH,
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
@@ -1856,6 +1863,65 @@ checkSnapshotRoundTrip(
   "snapshot text round-trip",
 );
 
+// VerifyHistoryChain linkage fixture: reuse the module-scope
+// `historyFixture` above — the same detached 8-entry chained
+// history the replay / fromHistory paths use. The bench has
+// timed `verifyHistoryChain` since the first bench commit, but
+// its self-check pinned only the boolean verdict on the intact
+// fixture; this fixture pins the linkage that verdict rests
+// on. Hand-written expectations — written out here from the
+// chain convention in src/taskLifecycle.ts (the genesis entry
+// links to GENESIS_PREV_HASH, every later entry links to its
+// predecessor's hash) and cross-checked against
+// test/historyHashChain.test.ts, never derived by calling
+// verifyHistoryChain itself:
+//   - the intact fixture verifies (verifyHistoryChain returns
+//     true);
+//   - the first entry's prevHash is exactly GENESIS_PREV_HASH
+//     (the genesis link — the boolean alone would not catch a
+//     fixture whose genesis link drifted while its hashes were
+//     recomputed to match);
+//   - every later entry's prevHash equals its predecessor's
+//     hash, entry for entry;
+//   - a detached copy whose middle entry (index 3, SUBMIT)
+//     gains a payoutAmount it never carried no longer
+//     recomputes its stored hash, so verifyHistoryChain must
+//     return false for it — checked once, outside the timed
+//     loop, and the intact fixture must still verify
+//     afterwards, proving the tamper copy was detached.
+function checkVerifyHistoryChain(where: string): void {
+  if (!verifyHistoryChain(historyFixture)) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  if (historyFixture[0].prevHash !== GENESIS_PREV_HASH) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  for (let i = 1; i < historyFixture.length; i++) {
+    if (historyFixture[i].prevHash !== historyFixture[i - 1].hash) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time validation (outside the timed loop): the intact
+// fixture verifies with its genesis and successor links pinned.
+checkVerifyHistoryChain("verifyHistoryChain fixture");
+// Tamper rejection (outside the timed loop): the altered copy
+// must return false — and the original fixture must still
+// verify afterwards, proving the tamper copy was detached.
+const verifyChainTampered: TaskHistoryEntry[] = historyFixture.map(
+  (e) => ({ ...e }),
+);
+verifyChainTampered[3] = {
+  ...verifyChainTampered[3],
+  payoutAmount: 999,
+};
+if (verifyHistoryChain(verifyChainTampered)) {
+  throw new Error(
+    "benchmark fixture failed: verifyHistoryChain accepted a tampered history",
+  );
+}
+checkVerifyHistoryChain("verifyHistoryChain fixture after tamper check");
+
 // FromHistory fidelity fixture: reuse the module-scope
 // `historyFixture` above — the same detached 8-entry chained
 // history the replay path (group 2) and the NDJSON paths
@@ -1981,9 +2047,11 @@ function benchFromHistory(): number {
 
 function benchVerifyHistoryChain(): number {
   return measure(() => {
-    if (!verifyHistoryChain(historyFixture)) {
-      throw new Error("benchmark self-check failed: verifyHistoryChain");
-    }
+    // Per-iteration self-check: the intact fixture verifies and
+    // its genesis / successor links match the hand-written
+    // linkage expectations (see the verifyHistoryChain linkage
+    // fixture above).
+    checkVerifyHistoryChain("verifyHistoryChain");
   }, ITERATIONS);
 }
 
@@ -2276,7 +2344,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");

@@ -1580,7 +1580,18 @@ detached tampered copy (the `PAYOUT_COMPLETE` entry's
 `payoutAmount` altered from 125 to 126) is pinned to be
 rejected with the hash-chain error, and the intact
 fixture is pinned to rebuild afterwards; one timed pass
-is one rebuild of the 8-entry history. One real run on
+is one rebuild of the 8-entry history. The
+`verifyHistoryChain` path re-verifies the same fixed
+8-entry history on every iteration; its per-iteration
+self-check pins the genesis link (the first entry's
+`prevHash` is `GENESIS_PREV_HASH`) and every successor
+link (each entry's `prevHash` equals its predecessor's
+`hash`); outside the timed loop, a detached tampered
+copy (the middle `SUBMIT` entry gaining a
+`payoutAmount` of 999 it never carried) is pinned to
+return false, and the intact fixture is pinned to
+verify afterwards; one timed pass is one verification
+of the 8-entry history. One real run on
 2026-10-17:
 
 | path | throughput |

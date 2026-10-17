@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Full-fidelity benchmark self-checks for hash-chain
+  verification: the `verifyHistoryChain (8 entries)` path in
+  `npm run bench` (timed since the first bench commit, but
+  previously self-checked only on the boolean verdict for
+  the intact history) now pins, on every iteration, the
+  fixture's genesis link (the first entry's `prevHash`
+  equal to `GENESIS_PREV_HASH`) and every successor link
+  (each entry's `prevHash` equal to its predecessor's
+  `hash`). Outside the timed loop, a detached tampered copy
+  (the middle `SUBMIT` entry gaining a `payoutAmount` of
+  999 it never carried) is pinned to return false, and the
+  intact fixture is pinned to verify afterwards. No
+  network, no randomness, and no wall-clock reads. The
+  README Benchmarks table is not refreshed in this change:
+  the timed path set is unchanged, and repeated real runs
+  on this shared host swung too widely this round to
+  publish a stable whole-table refresh. Benchmark only;
+  no library behavior change.
 - A snapshot version envelope segment closing the CLI demo:
   the main task snapshot's `v` field is printed and asserted
   equal to the imported `SNAPSHOT_VERSION` (1), a detached
