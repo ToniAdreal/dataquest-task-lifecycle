@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A note length limit segment closing the CLI demo: a
+  dedicated task (DEMO-017) is dispatched under a fixed
+  timestamp with a note of exactly `MAX_NOTE_LENGTH`
+  (32768) characters — the dispatch succeeds, the task
+  lands in OPEN with one history entry storing a note of
+  that length, and only the length is printed, never the
+  note itself — and a following dispatch with a
+  32769-character note is rejected with `invalid dispatch
+  options: note must be at most 32768 characters, got
+  32769`, leaving state and history untouched. The segment
+  itself asserts all of this outside the printed lines
+  against the hand-pinned limit and error text
+  (cross-checked against the dispatch source and the
+  actor/note hardening tests). `runDemo()` returns the
+  dedicated task, the limit, the boundary and over-limit
+  lengths, the rejection error, and the post-rejection
+  state and history length; the demo tests pin them
+  against hand-written expectations cross-checked against
+  an independent in-test dispatch, the exact printed lines
+  in the golden output, and the segment's printed-line
+  determinism across two runs. No network, no randomness,
+  and no wall clock (fixed timestamps throughout). Demo
+  and tests only; no library behavior change.
 - Full-fidelity benchmark self-checks for hash-chain
   verification: the `verifyHistoryChain (8 entries)` path in
   `npm run bench` (timed since the first bench commit, but

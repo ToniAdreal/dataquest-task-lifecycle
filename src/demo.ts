@@ -134,7 +134,7 @@
  * no-mismatch form, `undefined` — the per-task follow-up finance
  * runs after the batch `mismatchedPayouts()` screen flags a task,
  * shown instead of only asserted by the reconciliation tests —
- * and finally a snapshot version envelope segment: the main
+ * and a snapshot version envelope segment: the main
  * task's snapshot `v` field is printed and asserted equal to
  * the imported `SNAPSHOT_VERSION`, a detached copy retagged
  * `v: 2` is passed to `TaskLifecycle.fromJSON()` and its
@@ -143,7 +143,16 @@
  * back afterwards to show it still restores — the version
  * gate a document store relies on when a snapshot format
  * evolves, shown instead of only asserted by the snapshot
- * version tests.
+ * version tests — and finally a note length limit segment:
+ * a dedicated task is dispatched under a fixed timestamp
+ * with a note of exactly `MAX_NOTE_LENGTH` (32768)
+ * characters and succeeds (only the note's length is
+ * printed, never the note itself), and a following dispatch
+ * with a note one character over the limit (32769) is
+ * rejected with the length error, leaving the task's state
+ * and history untouched — the audit-history anti-bloat
+ * guard, shown instead of only asserted by the actor/note
+ * hardening tests.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -170,7 +179,10 @@
  * task and the exactly-settled task's undefined detail, the
  * snapshot version carried on the main snapshot with the
  * future-version rejection error and the state the original
- * snapshot restores to afterwards, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * snapshot restores to afterwards, the note-length-limit
+ * task with its limit, boundary and over-limit note
+ * lengths, rejection error, and post-rejection state and
+ * history length, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -195,6 +207,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
+  MAX_NOTE_LENGTH,
   mismatchedPayouts,
   parseHistory,
   parsePayoutRetryAfter,
@@ -359,6 +372,20 @@ export interface DemoResult {
   snapshotVersionFutureError: string;
   /** State the original snapshot restores to after the rejection. */
   snapshotVersionRestoredState: TaskState;
+  /** Dedicated task for the note-length-limit segment (DEMO-017). */
+  noteLimitTask: TaskLifecycle;
+  /** `MAX_NOTE_LENGTH` — the hand-pinned dispatch note ceiling. */
+  noteLengthLimit: number;
+  /** Length of the boundary note that was accepted (32768). */
+  noteLimitBoundaryLength: number;
+  /** Length of the over-limit note that was rejected (32769). */
+  noteLimitOverLength: number;
+  /** Error from the over-limit dispatch ("" if it was accepted). */
+  noteLimitError: string;
+  /** State of the note-limit task after the rejection (OPEN). */
+  noteLimitStateAfter: TaskState;
+  /** History length of the note-limit task after the rejection (1). */
+  noteLimitHistoryLengthAfter: number;
   lines: string[];
 }
 
@@ -1810,7 +1837,89 @@ export async function runDemo(): Promise<DemoResult> {
     `  original snapshot: TaskLifecycle.fromJSON(snapshot with v: ${snapshotVersion}) still restores ${snapshotVersionRestored.id} in state ${snapshotVersionRestoredState} (the rejection touched only the detached copy)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, lines };
+  // Note length limit segment (closing): dispatch notes are
+  // written verbatim into the append-only audit history and
+  // serialized by every export, so `dispatch()` caps them at
+  // MAX_NOTE_LENGTH (32768) — an oversized note would
+  // permanently inflate the persisted log. That guard has
+  // dedicated tests (see test/actorNoteHardening.test.ts,
+  // which pins the contract this segment presents) but has
+  // never been shown. A dedicated task (DEMO-017) is driven
+  // under fixed timestamps (no network, no randomness, no
+  // wall clock): a PUBLISH dispatch whose note is a fixed
+  // filler string of exactly the limit length succeeds, and
+  // only the note's length is printed — never the note
+  // itself. A following ACCEPT dispatch whose note is one
+  // character over is rejected before anything mutates.
+  // Hand-written expectations — written out here from the
+  // taskLifecycle source and the hardening tests, never
+  // derived by calling dispatch itself:
+  //   - MAX_NOTE_LENGTH is 32768;
+  //   - the boundary dispatch succeeds: DEMO-017 lands in
+  //     OPEN with exactly 1 history entry whose stored note
+  //     length is 32768;
+  //   - the over-limit dispatch is rejected with exactly
+  //     "invalid dispatch options: note must be at most
+  //     32768 characters, got 32769";
+  //   - after the rejection the task is still in OPEN with
+  //     1 history entry (no state change, no history entry,
+  //     no seq gap).
+  // The segment asserts all of this here, outside the
+  // printed lines: a length guard that drifted would fail
+  // the demo itself, not just a test.
+  const noteLimitTask = new TaskLifecycle("DEMO-017");
+  const noteLengthLimit = MAX_NOTE_LENGTH;
+  const noteLimitBoundaryNote = "x".repeat(noteLengthLimit);
+  const noteLimitBoundaryLength = noteLimitBoundaryNote.length;
+  noteLimitTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    note: noteLimitBoundaryNote,
+    at: "2026-03-23T09:00:00.000Z",
+  });
+  const noteLimitBoundaryState = noteLimitTask.state;
+  const noteLimitBoundaryHistoryLength = noteLimitTask.history.length;
+  const noteLimitBoundaryStoredLength =
+    noteLimitTask.history[0]?.note?.length ?? -1;
+  const noteLimitOverLength = noteLengthLimit + 1;
+  let noteLimitError = "";
+  try {
+    noteLimitTask.dispatch("ACCEPT", {
+      actor: "contributor",
+      note: "x".repeat(noteLimitOverLength),
+      at: "2026-03-23T09:05:00.000Z",
+    });
+  } catch (err) {
+    noteLimitError = err instanceof Error ? err.message : String(err);
+  }
+  const noteLimitStateAfter = noteLimitTask.state;
+  const noteLimitHistoryLengthAfter = noteLimitTask.history.length;
+  if (
+    noteLengthLimit !== 32768 ||
+    noteLimitBoundaryLength !== 32768 ||
+    noteLimitBoundaryState !== "OPEN" ||
+    noteLimitBoundaryHistoryLength !== 1 ||
+    noteLimitBoundaryStoredLength !== 32768 ||
+    noteLimitOverLength !== 32769 ||
+    noteLimitError !==
+      "invalid dispatch options: note must be at most 32768 characters, got 32769" ||
+    noteLimitStateAfter !== "OPEN" ||
+    noteLimitHistoryLengthAfter !== 1 ||
+    noteLimitTask.history[0]?.seq !== 1
+  ) {
+    throw new Error(
+      "demo fixture broken: MAX_NOTE_LENGTH guard does not match the hand-pinned contract (a 32768-character note must be accepted with one history entry, and a 32769-character note must be rejected with the length error and leave state and history untouched)",
+    );
+  }
+  lines.push(
+    "",
+    "Note length limit (MAX_NOTE_LENGTH on dispatch notes):",
+    `  limit: MAX_NOTE_LENGTH is ${noteLengthLimit} characters (a note is written verbatim into the append-only audit history, so an oversized note would permanently inflate every export)`,
+    `  at the limit: dispatch PUBLISH with a ${noteLimitBoundaryLength}-character note succeeded — ${noteLimitTask.id} in state ${noteLimitBoundaryState}, history ${noteLimitBoundaryHistoryLength} entry, stored note length ${noteLimitBoundaryStoredLength} (the note itself is not printed, only its length)`,
+    `  over the limit: dispatch ACCEPT with a ${noteLimitOverLength}-character note rejected — ${noteLimitError} (rejected before anything mutates)`,
+    `  after the rejection: ${noteLimitTask.id} still in state ${noteLimitStateAfter} with ${noteLimitHistoryLengthAfter} history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, lines };
 }
 
 async function main(): Promise<void> {

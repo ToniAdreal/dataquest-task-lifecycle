@@ -7,6 +7,7 @@ import path from "node:path";
 import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
 import {
+  MAX_NOTE_LENGTH,
   PayoutEventDedupe,
   SNAPSHOT_VERSION,
   TaskLifecycle,
@@ -362,11 +363,17 @@ Single-task payout reconciliation detail (payoutMismatch on the screened tasks):
 Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):
   toJSON(): snapshot v is 1 — equals SNAPSHOT_VERSION 1 (the current snapshot schema version written on every export)
   future version: TaskLifecycle.fromJSON(snapshot with v: 2) rejected — invalid snapshot: unsupported snapshot version 2 (a future format is refused, not silently misread)
-  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)`;
+  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)
+
+Note length limit (MAX_NOTE_LENGTH on dispatch notes):
+  limit: MAX_NOTE_LENGTH is 32768 characters (a note is written verbatim into the append-only audit history, so an oversized note would permanently inflate every export)
+  at the limit: dispatch PUBLISH with a 32768-character note succeeded — DEMO-017 in state OPEN, history 1 entry, stored note length 32768 (the note itself is not printed, only its length)
+  over the limit: dispatch ACCEPT with a 32769-character note rejected — invalid dispatch options: note must be at most 32768 characters, got 32769 (rejected before anything mutates)
+  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 307);
+  assert.equal(lines.length, 313);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1811,7 +1818,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 307);
+  assert.equal(out.trimEnd().split("\n").length, 313);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2377,10 +2384,9 @@ test("demo shows the snapshot version envelope segment in-process: current versi
   assert.equal(independent.id, "DEMO-001");
   assert.equal(independent.state, "PAID");
   assert.deepEqual(independent.history, task.history);
-  // The segment closes the demo: it follows the single-task
-  // payout reconciliation detail segment, prints its lines
-  // verbatim, and its original-snapshot line is the demo's
-  // last line.
+  // The segment follows the single-task payout
+  // reconciliation detail segment and prints its lines
+  // verbatim; the note length limit segment follows it.
   const versionAt = text.indexOf(
     "Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):",
   );
@@ -2391,6 +2397,11 @@ test("demo shows the snapshot version envelope segment in-process: current versi
       ),
     "snapshot version envelope segment must follow the single-task payout reconciliation detail segment",
   );
+  assert.ok(
+    text.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):") >
+      versionAt,
+    "note length limit segment must follow the snapshot version envelope segment",
+  );
   for (const line of [
     "  toJSON(): snapshot v is 1 — equals SNAPSHOT_VERSION 1 (the current snapshot schema version written on every export)",
     "  future version: TaskLifecycle.fromJSON(snapshot with v: 2) rejected — invalid snapshot: unsupported snapshot version 2 (a future format is refused, not silently misread)",
@@ -2398,16 +2409,13 @@ test("demo shows the snapshot version envelope segment in-process: current versi
   ]) {
     assert.ok(text.includes(line), `missing snapshot version line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)",
-  );
 });
 
 test("demo snapshot version envelope segment is deterministic: two runs print byte-identical version lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):"),
+      ls.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2420,4 +2428,113 @@ test("demo snapshot version envelope segment is deterministic: two runs print by
   assert.equal(a.snapshotVersion, b.snapshotVersion);
   assert.equal(a.snapshotVersionFutureError, b.snapshotVersionFutureError);
   assert.equal(a.snapshotVersionRestoredState, b.snapshotVersionRestoredState);
+});
+
+test("demo shows the note length limit segment in-process: boundary note accepted, over-limit note rejected with no trace", async () => {
+  const {
+    noteLimitTask,
+    noteLengthLimit,
+    noteLimitBoundaryLength,
+    noteLimitOverLength,
+    noteLimitError,
+    noteLimitStateAfter,
+    noteLimitHistoryLengthAfter,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // taskLifecycle source and the actor/note hardening tests,
+  // never derived by calling dispatch itself: MAX_NOTE_LENGTH
+  // is 32768, the boundary note is accepted, and the
+  // 32769-character note is rejected with exactly the length
+  // error, leaving state and history untouched.
+  assert.equal(MAX_NOTE_LENGTH, 32768);
+  assert.equal(noteLengthLimit, 32768);
+  assert.equal(noteLimitBoundaryLength, 32768);
+  assert.equal(noteLimitOverLength, 32769);
+  assert.equal(
+    noteLimitError,
+    "invalid dispatch options: note must be at most 32768 characters, got 32769",
+  );
+  assert.equal(noteLimitStateAfter, "OPEN");
+  assert.equal(noteLimitHistoryLengthAfter, 1);
+  assert.equal(noteLimitTask.id, "DEMO-017");
+  assert.equal(noteLimitTask.state, "OPEN");
+  assert.equal(noteLimitTask.history.length, 1);
+  assert.equal(noteLimitTask.history[0].event, "PUBLISH");
+  assert.equal(noteLimitTask.history[0].seq, 1);
+  assert.equal(noteLimitTask.history[0].at, "2026-03-23T09:00:00.000Z");
+  assert.equal(noteLimitTask.history[0].note?.length, 32768);
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: a fresh task accepts the boundary
+  // note and rejects the over-limit note the same way.
+  const independent = new TaskLifecycle("note-limit-check");
+  independent.dispatch("PUBLISH", {
+    actor: "researcher",
+    note: "x".repeat(32768),
+    at: "2026-03-23T09:00:00.000Z",
+  });
+  assert.equal(independent.history[0].note?.length, 32768);
+  assert.throws(
+    () =>
+      independent.dispatch("ACCEPT", {
+        actor: "contributor",
+        note: "x".repeat(32769),
+        at: "2026-03-23T09:05:00.000Z",
+      }),
+    /invalid dispatch options: note must be at most 32768 characters, got 32769/,
+  );
+  assert.equal(independent.state, "OPEN");
+  assert.equal(independent.history.length, 1);
+  // The segment closes the demo: it follows the snapshot
+  // version envelope segment, prints its lines verbatim, its
+  // after-rejection line is the demo's last line, and the
+  // long notes themselves are never printed — only lengths.
+  const limitAt = text.indexOf(
+    "Note length limit (MAX_NOTE_LENGTH on dispatch notes):",
+  );
+  assert.ok(
+    limitAt >
+      text.indexOf(
+        "Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):",
+      ),
+    "note length limit segment must follow the snapshot version envelope segment",
+  );
+  for (const line of [
+    "  limit: MAX_NOTE_LENGTH is 32768 characters (a note is written verbatim into the append-only audit history, so an oversized note would permanently inflate every export)",
+    "  at the limit: dispatch PUBLISH with a 32768-character note succeeded — DEMO-017 in state OPEN, history 1 entry, stored note length 32768 (the note itself is not printed, only its length)",
+    "  over the limit: dispatch ACCEPT with a 32769-character note rejected — invalid dispatch options: note must be at most 32768 characters, got 32769 (rejected before anything mutates)",
+    "  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)",
+  ]) {
+    assert.ok(text.includes(line), `missing note length limit line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)",
+  );
+  assert.ok(
+    !text.includes("x".repeat(100)),
+    "the demo must print only the note lengths, never the long notes themselves",
+  );
+});
+
+test("demo note length limit segment is deterministic: two runs print byte-identical limit lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(ls.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):"));
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + limit / at-the-limit / over-the-limit /
+  // after-the-rejection lines; every value is a hand-pinned
+  // constant under fixed timestamps, so no normalization is
+  // needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.noteLengthLimit, b.noteLengthLimit);
+  assert.equal(a.noteLimitBoundaryLength, b.noteLimitBoundaryLength);
+  assert.equal(a.noteLimitOverLength, b.noteLimitOverLength);
+  assert.equal(a.noteLimitError, b.noteLimitError);
+  assert.equal(a.noteLimitStateAfter, b.noteLimitStateAfter);
+  assert.equal(a.noteLimitHistoryLengthAfter, b.noteLimitHistoryLengthAfter);
 });
