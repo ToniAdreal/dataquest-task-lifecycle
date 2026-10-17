@@ -369,11 +369,18 @@ Note length limit (MAX_NOTE_LENGTH on dispatch notes):
   limit: MAX_NOTE_LENGTH is 32768 characters (a note is written verbatim into the append-only audit history, so an oversized note would permanently inflate every export)
   at the limit: dispatch PUBLISH with a 32768-character note succeeded — DEMO-017 in state OPEN, history 1 entry, stored note length 32768 (the note itself is not printed, only its length)
   over the limit: dispatch ACCEPT with a 32769-character note rejected — invalid dispatch options: note must be at most 32768 characters, got 32769 (rejected before anything mutates)
-  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)`;
+  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)
+
+Standalone overdue judgement (isOverdue on fixed tasks):
+  before the deadline: DEMO-018 (ACCEPTED, deadline <timestamp>) at <timestamp> -> isOverdue: false (the deadline has not yet been reached)
+  exactly at the deadline: DEMO-018 at <timestamp> -> isOverdue: true (the boundary is inclusive — now >= deadline)
+  after the deadline: DEMO-018 at <timestamp> -> isOverdue: true (past the deadline and still non-terminal)
+  no deadline set: DEMO-019 (ACCEPTED, no SLA deadline) at <timestamp> -> isOverdue: false (a task with no deadline is never overdue)
+  terminal state: DEMO-020 (ABANDONED, deadline <timestamp>) at <timestamp> -> isOverdue: false (a finished task is no longer overdue, even past its deadline)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 313);
+  assert.equal(lines.length, 320);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1818,7 +1825,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 313);
+  assert.equal(out.trimEnd().split("\n").length, 320);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2487,10 +2494,10 @@ test("demo shows the note length limit segment in-process: boundary note accepte
   );
   assert.equal(independent.state, "OPEN");
   assert.equal(independent.history.length, 1);
-  // The segment closes the demo: it follows the snapshot
-  // version envelope segment, prints its lines verbatim, its
-  // after-rejection line is the demo's last line, and the
-  // long notes themselves are never printed — only lengths.
+  // The segment follows the snapshot version envelope
+  // segment and prints its lines verbatim; the standalone
+  // overdue judgement segment follows it. The long notes
+  // themselves are never printed — only lengths.
   const limitAt = text.indexOf(
     "Note length limit (MAX_NOTE_LENGTH on dispatch notes):",
   );
@@ -2501,6 +2508,11 @@ test("demo shows the note length limit segment in-process: boundary note accepte
       ),
     "note length limit segment must follow the snapshot version envelope segment",
   );
+  assert.ok(
+    text.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):") >
+      limitAt,
+    "standalone overdue judgement segment must follow the note length limit segment",
+  );
   for (const line of [
     "  limit: MAX_NOTE_LENGTH is 32768 characters (a note is written verbatim into the append-only audit history, so an oversized note would permanently inflate every export)",
     "  at the limit: dispatch PUBLISH with a 32768-character note succeeded — DEMO-017 in state OPEN, history 1 entry, stored note length 32768 (the note itself is not printed, only its length)",
@@ -2509,10 +2521,6 @@ test("demo shows the note length limit segment in-process: boundary note accepte
   ]) {
     assert.ok(text.includes(line), `missing note length limit line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  after the rejection: DEMO-017 still in state OPEN with 1 history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)",
-  );
   assert.ok(
     !text.includes("x".repeat(100)),
     "the demo must print only the note lengths, never the long notes themselves",
@@ -2521,7 +2529,10 @@ test("demo shows the note length limit segment in-process: boundary note accepte
 
 test("demo note length limit segment is deterministic: two runs print byte-identical limit lines", async () => {
   const segment = (ls: string[]) =>
-    ls.slice(ls.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):"));
+    ls.slice(
+      ls.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):"),
+      ls.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):") - 1,
+    );
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -2537,4 +2548,98 @@ test("demo note length limit segment is deterministic: two runs print byte-ident
   assert.equal(a.noteLimitError, b.noteLimitError);
   assert.equal(a.noteLimitStateAfter, b.noteLimitStateAfter);
   assert.equal(a.noteLimitHistoryLengthAfter, b.noteLimitHistoryLengthAfter);
+});
+
+test("demo shows the standalone overdue judgement segment in-process: five boundary verdicts on fixed tasks", async () => {
+  const {
+    overdueStandaloneTask,
+    overdueStandaloneNoDeadlineTask,
+    overdueStandaloneTerminalTask,
+    overdueStandaloneDeadline,
+    overdueStandaloneVerdicts,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // isOverdue source and the SLA tests, never derived by
+  // calling isOverdue itself: before the deadline false,
+  // exactly at it true (inclusive), after it true, and
+  // no-deadline and terminal tasks false.
+  assert.equal(overdueStandaloneDeadline, "2026-03-24T09:00:00.000Z");
+  assert.deepEqual(overdueStandaloneVerdicts, [false, true, true, false, false]);
+  assert.equal(overdueStandaloneTask.id, "DEMO-018");
+  assert.equal(overdueStandaloneTask.state, "ACCEPTED");
+  assert.equal(overdueStandaloneTask.history.length, 2);
+  assert.equal(
+    overdueStandaloneTask.getSlaDeadline("ACCEPTED"),
+    "2026-03-24T09:00:00.000Z",
+  );
+  assert.equal(overdueStandaloneNoDeadlineTask.id, "DEMO-019");
+  assert.equal(overdueStandaloneNoDeadlineTask.state, "ACCEPTED");
+  assert.equal(overdueStandaloneNoDeadlineTask.getSlaDeadline(), undefined);
+  assert.equal(overdueStandaloneTerminalTask.id, "DEMO-020");
+  assert.equal(overdueStandaloneTerminalTask.state, "ABANDONED");
+  assert.equal(overdueStandaloneTerminalTask.isTerminal, true);
+  assert.equal(
+    overdueStandaloneTerminalTask.getSlaDeadline("ABANDONED"),
+    "2026-03-24T09:00:00.000Z",
+  );
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh task reproduces the same
+  // five verdicts at the same fixed instants.
+  const independent = new TaskLifecycle("overdue-check");
+  independent.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T07:00:00.000Z",
+  });
+  independent.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T07:05:00.000Z",
+  });
+  independent.setSlaDeadline("2026-03-24T09:00:00.000Z");
+  assert.equal(isOverdue(independent, new Date("2026-03-24T08:00:00.000Z")), false);
+  assert.equal(isOverdue(independent, new Date("2026-03-24T09:00:00.000Z")), true);
+  assert.equal(isOverdue(independent, new Date("2026-03-24T10:00:00.000Z")), true);
+  independent.clearSlaDeadline();
+  assert.equal(isOverdue(independent, new Date("2026-03-24T10:00:00.000Z")), false);
+  // The segment closes the demo: it follows the note length
+  // limit segment, prints its lines verbatim, and its
+  // terminal-state line is the demo's last line.
+  const overdueAt = text.indexOf(
+    "Standalone overdue judgement (isOverdue on fixed tasks):",
+  );
+  assert.ok(
+    overdueAt >
+      text.indexOf("Note length limit (MAX_NOTE_LENGTH on dispatch notes):"),
+    "standalone overdue judgement segment must follow the note length limit segment",
+  );
+  for (const line of [
+    "  before the deadline: DEMO-018 (ACCEPTED, deadline 2026-03-24T09:00:00.000Z) at 2026-03-24T08:00:00.000Z -> isOverdue: false (the deadline has not yet been reached)",
+    "  exactly at the deadline: DEMO-018 at 2026-03-24T09:00:00.000Z -> isOverdue: true (the boundary is inclusive — now >= deadline)",
+    "  after the deadline: DEMO-018 at 2026-03-24T10:00:00.000Z -> isOverdue: true (past the deadline and still non-terminal)",
+    "  no deadline set: DEMO-019 (ACCEPTED, no SLA deadline) at 2026-03-24T10:00:00.000Z -> isOverdue: false (a task with no deadline is never overdue)",
+    "  terminal state: DEMO-020 (ABANDONED, deadline 2026-03-24T09:00:00.000Z) at 2026-03-24T10:00:00.000Z -> isOverdue: false (a finished task is no longer overdue, even past its deadline)",
+  ]) {
+    assert.ok(text.includes(line), `missing overdue judgement line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  terminal state: DEMO-020 (ABANDONED, deadline 2026-03-24T09:00:00.000Z) at 2026-03-24T10:00:00.000Z -> isOverdue: false (a finished task is no longer overdue, even past its deadline)",
+  );
+});
+
+test("demo standalone overdue judgement segment is deterministic: two runs print byte-identical judgement lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(ls.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):"));
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + before / at / after / no-deadline / terminal
+  // lines; every value is a hand-pinned constant under
+  // fixed timestamps, so no normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.overdueStandaloneDeadline, b.overdueStandaloneDeadline);
+  assert.deepEqual(a.overdueStandaloneVerdicts, b.overdueStandaloneVerdicts);
 });

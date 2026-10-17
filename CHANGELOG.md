@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A standalone overdue judgement segment closing the CLI
+  demo: `isOverdue(task, now)` is called on three dedicated
+  tasks (DEMO-018 in ACCEPTED with an ACCEPTED-state SLA
+  deadline of 2026-03-24T09:00:00.000Z, DEMO-019 in ACCEPTED
+  with no deadline, and DEMO-020 in ABANDONED with an
+  ABANDONED-state deadline) at fixed instants, and its five
+  boundary verdicts are printed — before the deadline
+  `false`, exactly at the deadline `true` (the boundary is
+  inclusive: `now >= deadline`), after the deadline `true`,
+  the no-deadline task `false`, and the terminal task past
+  its deadline `false`. The segment itself asserts all of
+  this outside the printed lines against the hand-pinned
+  verdicts (cross-checked against the `isOverdue` source
+  and the SLA tests), and the predicate mutates nothing —
+  DEMO-018 is still ACCEPTED when the segment ends.
+  `runDemo()` returns the three dedicated tasks, the
+  deadline, and the five verdicts in case order; the demo
+  tests pin them against hand-written expectations
+  cross-checked against an independent in-test task, the
+  exact printed lines in the golden output, and the
+  segment's printed-line determinism across two runs. No
+  network, no randomness, and no wall clock (fixed
+  timestamps throughout). Demo and tests only; no library
+  behavior change.
 - A note length limit segment closing the CLI demo: a
   dedicated task (DEMO-017) is dispatched under a fixed
   timestamp with a note of exactly `MAX_NOTE_LENGTH`

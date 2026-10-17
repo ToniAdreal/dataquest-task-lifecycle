@@ -143,7 +143,7 @@
  * back afterwards to show it still restores — the version
  * gate a document store relies on when a snapshot format
  * evolves, shown instead of only asserted by the snapshot
- * version tests — and finally a note length limit segment:
+ * version tests — and a note length limit segment:
  * a dedicated task is dispatched under a fixed timestamp
  * with a note of exactly `MAX_NOTE_LENGTH` (32768)
  * characters and succeeds (only the note's length is
@@ -152,7 +152,16 @@
  * rejected with the length error, leaving the task's state
  * and history untouched — the audit-history anti-bloat
  * guard, shown instead of only asserted by the actor/note
- * hardening tests.
+ * hardening tests — and finally a standalone overdue
+ * judgement segment: `isOverdue(task, now)` is called on
+ * fixed tasks at fixed instants and its five boundary
+ * verdicts are printed — before the deadline `false`,
+ * exactly at the deadline `true` (the boundary is
+ * inclusive), after the deadline `true`, a task with no
+ * deadline `false`, and a terminal task past its deadline
+ * `false` — the advisory SLA judgement itself, shown
+ * instead of only asserted by the SLA tests (the watchdog
+ * branches above show the batch screens built on it).
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -182,7 +191,10 @@
  * snapshot restores to afterwards, the note-length-limit
  * task with its limit, boundary and over-limit note
  * lengths, rejection error, and post-rejection state and
- * history length, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * history length, the standalone overdue judgement
+ * segment's three tasks with its hand-pinned deadline and
+ * its five verdicts (before / at / after the deadline, no
+ * deadline, and terminal), plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -386,6 +398,16 @@ export interface DemoResult {
   noteLimitStateAfter: TaskState;
   /** History length of the note-limit task after the rejection (1). */
   noteLimitHistoryLengthAfter: number;
+  /** Dedicated deadline task for the isOverdue segment (DEMO-018). */
+  overdueStandaloneTask: TaskLifecycle;
+  /** Dedicated no-deadline task for the isOverdue segment (DEMO-019). */
+  overdueStandaloneNoDeadlineTask: TaskLifecycle;
+  /** Dedicated terminal task for the isOverdue segment (DEMO-020). */
+  overdueStandaloneTerminalTask: TaskLifecycle;
+  /** SLA deadline carried by DEMO-018 (and DEMO-020's ABANDONED state). */
+  overdueStandaloneDeadline: string;
+  /** `isOverdue` verdicts in case order: before, at, after, no-deadline, terminal. */
+  overdueStandaloneVerdicts: boolean[];
   lines: string[];
 }
 
@@ -1919,7 +1941,113 @@ export async function runDemo(): Promise<DemoResult> {
     `  after the rejection: ${noteLimitTask.id} still in state ${noteLimitStateAfter} with ${noteLimitHistoryLengthAfter} history entry (the oversized dispatch left no trace — no state change, no history entry, no seq gap)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, lines };
+  // Standalone overdue judgement segment (closing): the SLA
+  // watchdog branches above show the batch screens built on
+  // `isOverdue` (`expiredTasks` / `expireOverdueTasks`), and
+  // the stale branch prints it only as an inline column, but
+  // the predicate's own boundary semantics have never been
+  // shown on their own (see test/sla.test.ts and the bench's
+  // `checkIsOverdue`, which pin the contract this segment
+  // presents). Three dedicated tasks are driven under fixed
+  // timestamps (no network, no randomness, no wall clock):
+  // DEMO-018 sits in ACCEPTED with an ACCEPTED-state deadline,
+  // DEMO-019 sits in ACCEPTED with no deadline at all, and
+  // DEMO-020 is ABANDONED (terminal) with an ABANDONED-state
+  // deadline. Hand-written expectations — written out here
+  // from the `isOverdue` source and the SLA tests, never
+  // derived by calling isOverdue itself:
+  //   - DEMO-018 one hour before its deadline -> false;
+  //   - DEMO-018 exactly at its deadline -> true (the
+  //     boundary is inclusive: `now >= deadline`);
+  //   - DEMO-018 one hour after its deadline -> true;
+  //   - DEMO-019 (no deadline) after that instant -> false;
+  //   - DEMO-020 (terminal) after its deadline -> false.
+  // The segment asserts all of this here, outside the
+  // printed lines: a judgement that drifted would fail the
+  // demo itself, not just a test. The predicate is advisory
+  // and pure — no task is dispatched or mutated by it, so
+  // DEMO-018 is still ACCEPTED when the segment ends.
+  const overdueStandaloneDeadline = "2026-03-24T09:00:00.000Z";
+  const overdueStandaloneTask = new TaskLifecycle("DEMO-018");
+  overdueStandaloneTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T07:00:00.000Z",
+  });
+  overdueStandaloneTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T07:05:00.000Z",
+  });
+  overdueStandaloneTask.setSlaDeadline(overdueStandaloneDeadline);
+  const overdueStandaloneNoDeadlineTask = new TaskLifecycle("DEMO-019");
+  overdueStandaloneNoDeadlineTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T07:00:00.000Z",
+  });
+  overdueStandaloneNoDeadlineTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T07:05:00.000Z",
+  });
+  const overdueStandaloneTerminalTask = new TaskLifecycle("DEMO-020");
+  overdueStandaloneTerminalTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T07:00:00.000Z",
+  });
+  overdueStandaloneTerminalTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T07:05:00.000Z",
+  });
+  overdueStandaloneTerminalTask.dispatch("ABANDON", {
+    actor: "contributor",
+    at: "2026-03-24T07:10:00.000Z",
+  });
+  overdueStandaloneTerminalTask.setSlaDeadline(
+    overdueStandaloneDeadline,
+    "ABANDONED",
+  );
+  const overdueBeforeAt = new Date("2026-03-24T08:00:00.000Z");
+  const overdueAtAt = new Date(overdueStandaloneDeadline);
+  const overdueAfterAt = new Date("2026-03-24T10:00:00.000Z");
+  const overdueStandaloneVerdicts: boolean[] = [
+    isOverdue(overdueStandaloneTask, overdueBeforeAt),
+    isOverdue(overdueStandaloneTask, overdueAtAt),
+    isOverdue(overdueStandaloneTask, overdueAfterAt),
+    isOverdue(overdueStandaloneNoDeadlineTask, overdueAfterAt),
+    isOverdue(overdueStandaloneTerminalTask, overdueAfterAt),
+  ];
+  if (
+    overdueStandaloneTask.getSlaDeadline("ACCEPTED") !==
+      overdueStandaloneDeadline ||
+    overdueStandaloneNoDeadlineTask.getSlaDeadline("ACCEPTED") !==
+      undefined ||
+    overdueStandaloneTerminalTask.getSlaDeadline("ABANDONED") !==
+      overdueStandaloneDeadline ||
+    overdueStandaloneVerdicts.length !== 5 ||
+    overdueStandaloneVerdicts[0] !== false ||
+    overdueStandaloneVerdicts[1] !== true ||
+    overdueStandaloneVerdicts[2] !== true ||
+    overdueStandaloneVerdicts[3] !== false ||
+    overdueStandaloneVerdicts[4] !== false ||
+    overdueStandaloneTask.state !== "ACCEPTED" ||
+    overdueStandaloneTask.history.length !== 2 ||
+    overdueStandaloneNoDeadlineTask.state !== "ACCEPTED" ||
+    overdueStandaloneTerminalTask.state !== "ABANDONED" ||
+    overdueStandaloneTerminalTask.history.length !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: isOverdue judgement does not match the hand-pinned contract (before the deadline must be false, exactly at and after it true, and no-deadline and terminal tasks false, with no task mutated by the judgement)",
+    );
+  }
+  lines.push(
+    "",
+    "Standalone overdue judgement (isOverdue on fixed tasks):",
+    `  before the deadline: ${overdueStandaloneTask.id} (ACCEPTED, deadline ${overdueStandaloneDeadline}) at ${overdueBeforeAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[0]} (the deadline has not yet been reached)`,
+    `  exactly at the deadline: ${overdueStandaloneTask.id} at ${overdueAtAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[1]} (the boundary is inclusive — now >= deadline)`,
+    `  after the deadline: ${overdueStandaloneTask.id} at ${overdueAfterAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[2]} (past the deadline and still non-terminal)`,
+    `  no deadline set: ${overdueStandaloneNoDeadlineTask.id} (ACCEPTED, no SLA deadline) at ${overdueAfterAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[3]} (a task with no deadline is never overdue)`,
+    `  terminal state: ${overdueStandaloneTerminalTask.id} (ABANDONED, deadline ${overdueStandaloneDeadline}) at ${overdueAfterAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[4]} (a finished task is no longer overdue, even past its deadline)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, lines };
 }
 
 async function main(): Promise<void> {
