@@ -133,7 +133,17 @@
  * settled exactly as quoted (2500 against 2500) prints the
  * no-mismatch form, `undefined` — the per-task follow-up finance
  * runs after the batch `mismatchedPayouts()` screen flags a task,
- * shown instead of only asserted by the reconciliation tests.
+ * shown instead of only asserted by the reconciliation tests —
+ * and finally a snapshot version envelope segment: the main
+ * task's snapshot `v` field is printed and asserted equal to
+ * the imported `SNAPSHOT_VERSION`, a detached copy retagged
+ * `v: 2` is passed to `TaskLifecycle.fromJSON()` and its
+ * rejection error is printed (the future format is refused,
+ * not silently misread), and the original snapshot is read
+ * back afterwards to show it still restores — the version
+ * gate a document store relies on when a snapshot format
+ * evolves, shown instead of only asserted by the snapshot
+ * version tests.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -157,7 +167,10 @@
  * with its serialized byte length, the task restored from that
  * snapshot, and its history-derived used RESUBMIT count, the
  * single-task payout reconciliation detail for the mismatched
- * task and the exactly-settled task's undefined detail, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * task and the exactly-settled task's undefined detail, the
+ * snapshot version carried on the main snapshot with the
+ * future-version rejection error and the state the original
+ * snapshot restores to afterwards, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -186,6 +199,7 @@ import {
   parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
+  SNAPSHOT_VERSION,
   staleTasks,
   stateDiagram,
   totalPaidOut,
@@ -339,6 +353,12 @@ export interface DemoResult {
   payoutMismatchDetail: PayoutMismatch;
   /** `payoutMismatch()` for the exactly-settled task DEMO-004 — undefined. */
   payoutMismatchSettled: PayoutMismatch | undefined;
+  /** `v` carried on the main snapshot — equals `SNAPSHOT_VERSION`. */
+  snapshotVersion: number;
+  /** Error from `fromJSON()` on the detached `v: 2` copy ("" if accepted). */
+  snapshotVersionFutureError: string;
+  /** State the original snapshot restores to after the rejection. */
+  snapshotVersionRestoredState: TaskState;
   lines: string[];
 }
 
@@ -370,7 +390,10 @@ export interface DemoResult {
  * length, the task restored from that snapshot, and its
  * history-derived used RESUBMIT count, the single-task payout
  * reconciliation detail for the mismatched task and the
- * exactly-settled task's undefined detail, and the exact lines
+ * exactly-settled task's undefined detail, the snapshot version
+ * carried on the main snapshot with the future-version
+ * rejection error and the state the original snapshot restores
+ * to afterwards, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1732,7 +1755,62 @@ export async function runDemo(): Promise<DemoResult> {
     "  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)",
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, lines };
+  // Snapshot version envelope segment (closing): the JSON
+  // snapshot round-trip segment above shows the envelope
+  // travelling, but never the version field that guards it.
+  // `toJSON()` always writes `v: SNAPSHOT_VERSION` (1), and
+  // `fromJSON()` is fail-closed about any other present version
+  // — that gate is what keeps a future format evolution
+  // distinguishable from corruption (see
+  // test/snapshotVersion.test.ts, which pins the contract this
+  // segment presents). Hand-written expectations — written out
+  // here from the snapshotVersion tests and the parser source,
+  // never derived by calling fromJSON itself:
+  //   - the main snapshot (the same `snapshot` the round-trip
+  //     segment exported) carries v 1, exactly the imported
+  //     SNAPSHOT_VERSION;
+  //   - a detached copy retagged v: 2 is rejected with exactly
+  //     "invalid snapshot: unsupported snapshot version 2";
+  //   - the original snapshot is untouched by that rejection
+  //     and still restores DEMO-001 in state PAID.
+  // The segment asserts all of this here, outside the printed
+  // lines: a version gate that drifted would fail the demo
+  // itself, not just a test. No network, no randomness, and no
+  // wall clock — the segment only re-reads the main task's
+  // existing snapshot and a detached copy of it.
+  const snapshotVersion = snapshot.v;
+  let snapshotVersionFutureError = "";
+  try {
+    TaskLifecycle.fromJSON({ ...snapshot, v: 2 });
+  } catch (err) {
+    snapshotVersionFutureError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const snapshotVersionRestored = TaskLifecycle.fromJSON(snapshot);
+  const snapshotVersionRestoredState = snapshotVersionRestored.state;
+  if (
+    snapshotVersion !== SNAPSHOT_VERSION ||
+    snapshotVersion !== 1 ||
+    SNAPSHOT_VERSION !== 1 ||
+    snapshotVersionFutureError !==
+      "invalid snapshot: unsupported snapshot version 2" ||
+    snapshotVersionRestored.id !== "DEMO-001" ||
+    snapshotVersionRestoredState !== "PAID" ||
+    snapshotVersionRestored.history.length !== 12
+  ) {
+    throw new Error(
+      "demo fixture broken: SNAPSHOT_VERSION envelope does not match the hand-pinned contract (snapshot v must equal SNAPSHOT_VERSION 1, the v: 2 copy must be rejected with the version error, and the original snapshot must still restore DEMO-001 in PAID)",
+    );
+  }
+  lines.push(
+    "",
+    "Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):",
+    `  toJSON(): snapshot v is ${snapshotVersion} — equals SNAPSHOT_VERSION ${SNAPSHOT_VERSION} (the current snapshot schema version written on every export)`,
+    `  future version: TaskLifecycle.fromJSON(snapshot with v: 2) rejected — ${snapshotVersionFutureError} (a future format is refused, not silently misread)`,
+    `  original snapshot: TaskLifecycle.fromJSON(snapshot with v: ${snapshotVersion}) still restores ${snapshotVersionRestored.id} in state ${snapshotVersionRestoredState} (the rejection touched only the detached copy)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, lines };
 }
 
 async function main(): Promise<void> {

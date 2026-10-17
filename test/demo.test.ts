@@ -8,6 +8,7 @@ import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
 import {
   PayoutEventDedupe,
+  SNAPSHOT_VERSION,
   TaskLifecycle,
   actOnStaleTasks,
   allowedEvents,
@@ -356,11 +357,16 @@ JSON snapshot round-trip (toJSON/fromJSON on the main task):
 Single-task payout reconciliation detail (payoutMismatch on the screened tasks):
   DEMO-005: payoutMismatch -> quoted 4000, paid 3750.5, delta -249.5 (underpaid by 249.5 — the batch screen's one mismatched hit, opened up per task)
   DEMO-004: payoutMismatch -> undefined (quoted 2500, paid 2500 — settled exactly as quoted, so there is no mismatch to report)
-  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)`;
+  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)
+
+Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):
+  toJSON(): snapshot v is 1 — equals SNAPSHOT_VERSION 1 (the current snapshot schema version written on every export)
+  future version: TaskLifecycle.fromJSON(snapshot with v: 2) rejected — invalid snapshot: unsupported snapshot version 2 (a future format is refused, not silently misread)
+  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 302);
+  assert.equal(lines.length, 307);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1805,7 +1811,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 302);
+  assert.equal(out.trimEnd().split("\n").length, 307);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2294,9 +2300,9 @@ test("demo shows the single-task payout reconciliation detail segment in-process
   assert.equal(mismatchedTask.history.length, 8);
   assert.equal(unreconciledTask.state, "PAID");
   assert.equal(unreconciledTask.history.length, 8);
-  // The segment closes the demo: it follows the JSON snapshot
-  // round-trip segment, prints its lines verbatim, and its
-  // reading line is the demo's last line.
+  // The segment follows the JSON snapshot round-trip segment
+  // and prints its lines verbatim; the snapshot version
+  // envelope segment follows it.
   const detailAt = text.indexOf(
     "Single-task payout reconciliation detail (payoutMismatch on the screened tasks):",
   );
@@ -2305,22 +2311,25 @@ test("demo shows the single-task payout reconciliation detail segment in-process
       text.indexOf("JSON snapshot round-trip (toJSON/fromJSON on the main task):"),
     "single-task payout reconciliation detail segment must follow the JSON snapshot round-trip segment",
   );
+  assert.ok(
+    text.indexOf(
+      "Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):",
+    ) > detailAt,
+    "snapshot version envelope segment must follow the single-task payout reconciliation detail segment",
+  );
   for (const line of [
     "  DEMO-005: payoutMismatch -> quoted 4000, paid 3750.5, delta -249.5 (underpaid by 249.5 — the batch screen's one mismatched hit, opened up per task)",
     "  DEMO-004: payoutMismatch -> undefined (quoted 2500, paid 2500 — settled exactly as quoted, so there is no mismatch to report)",
   ]) {
     assert.ok(text.includes(line), `missing payout detail line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)",
-  );
 });
 
 test("demo single-task payout reconciliation detail segment is deterministic: two runs print byte-identical detail lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Single-task payout reconciliation detail (payoutMismatch on the screened tasks):"),
+      ls.indexOf("Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2332,4 +2341,83 @@ test("demo single-task payout reconciliation detail segment is deterministic: tw
   assert.deepEqual(segA, segment(b.lines));
   assert.deepEqual(a.payoutMismatchDetail, b.payoutMismatchDetail);
   assert.equal(a.payoutMismatchSettled, b.payoutMismatchSettled);
+});
+
+test("demo shows the snapshot version envelope segment in-process: current version, future-version rejection, original still restores", async () => {
+  const {
+    task,
+    snapshotVersion,
+    snapshotVersionFutureError,
+    snapshotVersionRestoredState,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // snapshotVersion tests and the parser source, never derived
+  // by calling fromJSON itself: SNAPSHOT_VERSION is 1, the main
+  // snapshot carries v 1, and a v: 2 copy is rejected with
+  // exactly the version error.
+  assert.equal(SNAPSHOT_VERSION, 1);
+  assert.equal(snapshotVersion, 1);
+  assert.equal(task.toJSON().v, 1);
+  assert.equal(
+    snapshotVersionFutureError,
+    "invalid snapshot: unsupported snapshot version 2",
+  );
+  assert.equal(snapshotVersionRestoredState, "PAID");
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: the v: 2 copy throws the same error,
+  // and the original snapshot restores the task in full.
+  assert.throws(
+    () => TaskLifecycle.fromJSON({ ...task.toJSON(), v: 2 }),
+    /invalid snapshot: unsupported snapshot version 2/,
+  );
+  const independent = TaskLifecycle.fromJSON(task.toJSON());
+  assert.equal(independent.id, "DEMO-001");
+  assert.equal(independent.state, "PAID");
+  assert.deepEqual(independent.history, task.history);
+  // The segment closes the demo: it follows the single-task
+  // payout reconciliation detail segment, prints its lines
+  // verbatim, and its original-snapshot line is the demo's
+  // last line.
+  const versionAt = text.indexOf(
+    "Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):",
+  );
+  assert.ok(
+    versionAt >
+      text.indexOf(
+        "Single-task payout reconciliation detail (payoutMismatch on the screened tasks):",
+      ),
+    "snapshot version envelope segment must follow the single-task payout reconciliation detail segment",
+  );
+  for (const line of [
+    "  toJSON(): snapshot v is 1 — equals SNAPSHOT_VERSION 1 (the current snapshot schema version written on every export)",
+    "  future version: TaskLifecycle.fromJSON(snapshot with v: 2) rejected — invalid snapshot: unsupported snapshot version 2 (a future format is refused, not silently misread)",
+    "  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)",
+  ]) {
+    assert.ok(text.includes(line), `missing snapshot version line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  original snapshot: TaskLifecycle.fromJSON(snapshot with v: 1) still restores DEMO-001 in state PAID (the rejection touched only the detached copy)",
+  );
+});
+
+test("demo snapshot version envelope segment is deterministic: two runs print byte-identical version lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Snapshot version envelope (SNAPSHOT_VERSION on the main task snapshot):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + current-version / future-rejection /
+  // original-restores lines; every value is a hand-pinned
+  // constant, so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.snapshotVersion, b.snapshotVersion);
+  assert.equal(a.snapshotVersionFutureError, b.snapshotVersionFutureError);
+  assert.equal(a.snapshotVersionRestoredState, b.snapshotVersionRestoredState);
 });

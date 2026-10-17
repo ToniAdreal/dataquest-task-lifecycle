@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 536 tests, all local
+npm test   # 538 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -174,7 +174,17 @@ full detail `{ quoted: 4000, paid: 3750.5, delta: -249.5 }`
 quoted (2500 against 2500) prints the no-mismatch form,
 `undefined` — the per-task follow-up finance runs after the
 batch `mismatchedPayouts()` screen flags a task, asserted
-outside the printed lines against the hand-pinned amounts.
+outside the printed lines against the hand-pinned amounts —
+and a closing snapshot version envelope segment that prints
+the main task snapshot's `v` field and asserts it equals the
+imported `SNAPSHOT_VERSION` (1), retags a detached copy to
+`v: 2` and prints the `TaskLifecycle.fromJSON()` rejection
+(`invalid snapshot: unsupported snapshot version 2` — a
+future format is refused, not silently misread), and reads
+the original snapshot back to show it still restores
+DEMO-001 in PAID — the version gate a document store relies
+on when a snapshot format evolves, asserted outside the
+printed lines against the hand-pinned version and error.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1199,7 +1209,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 536 tests covering the happy path, reject→resubmit
+`npm test` runs 538 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

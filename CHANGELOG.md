@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A snapshot version envelope segment closing the CLI demo:
+  the main task snapshot's `v` field is printed and asserted
+  equal to the imported `SNAPSHOT_VERSION` (1), a detached
+  copy retagged `v: 2` is passed to
+  `TaskLifecycle.fromJSON()` and its rejection is printed
+  (`invalid snapshot: unsupported snapshot version 2` — a
+  future format is refused, not silently misread), and the
+  original snapshot is read back afterwards to show it
+  still restores DEMO-001 in PAID. The segment itself
+  asserts all three shapes outside the printed lines
+  against the hand-pinned version and error text
+  (cross-checked against the snapshot-version tests).
+  `runDemo()` returns the snapshot version, the
+  future-version rejection error, and the restored state;
+  the demo tests pin them against hand-written
+  expectations cross-checked against an independent
+  in-test `fromJSON()` call, the exact printed lines in
+  the golden output, and the segment's printed-line
+  determinism across two runs. No network, no
+  randomness, and no wall clock. Demo and tests only; no
+  library behavior change.
 - A single-task payout reconciliation detail segment closing
   the CLI demo: `payoutMismatch()` is called on the
   reconciliation branch's two settled tasks one at a time —
