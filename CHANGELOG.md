@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for dispatch subscription notification:
+  `subscribe()` with one fixed collecting listener over the
+  full `DRAFT → PAID` lifecycle (8 dispatches) now appears in
+  `npm run bench`. The task is rebuilt fresh on every
+  iteration because dispatch mutates it, so the number
+  includes the fixture-rebuild cost. Per-iteration
+  self-checks pin the notification sequence to the
+  hand-written expectations in the bench comments (exactly 8
+  notifications in dispatch order, each `(event, from, to)`
+  triple in place, each carried entry equal to the history
+  entry with the same `seq`, field for field, cross-checked
+  against the subscribe tests); outside the timed loop, an
+  unsubscribe check pins that a further dispatch notifies
+  nobody and an isolation check pins that a throwing listener
+  neither breaks a dispatch nor starves its peer. No network,
+  no randomness, and no wall-clock reads. The README
+  Benchmarks table is refreshed from one real run. Benchmark
+  only; no library behavior change.
 - A README diagram sync check segment closing the CLI demo:
   `readmeDiagramInSync()` — imported directly from
   `src/diagram.ts` (it is not re-exported from the package
