@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A single-task payout reconciliation detail segment closing
+  the CLI demo: `payoutMismatch()` is called on the
+  reconciliation branch's two settled tasks one at a time —
+  the mismatched task (ACCEPT quote 4000, settled 3750.5)
+  prints its full detail `{ quoted: 4000, paid: 3750.5,
+  delta: -249.5 }`, and the task that settled exactly as
+  quoted (2500 against 2500) prints the no-mismatch form,
+  `undefined`. The segment itself asserts both shapes
+  outside the printed lines against the hand-pinned amounts
+  (delta = paid − quoted, rounded to cents; negative is an
+  underpayment). `runDemo()` returns the detail object and
+  the settled task's undefined result; the demo tests pin
+  them against hand-written expectations cross-checked
+  against an independent in-test `payoutMismatch()` call,
+  the exact printed lines in the golden output, and the
+  segment's printed-line determinism across two runs. No
+  network, no randomness, and no wall clock. Demo and
+  tests only; no library behavior change.
 - Full-fidelity benchmark self-checks for the event-sourced
   rebuild: the `fromHistory (8-entry history)` path in
   `npm run bench` (timed since the first bench commit, but

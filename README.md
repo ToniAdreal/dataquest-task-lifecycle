@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 534 tests, all local
+npm test   # 536 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -165,7 +165,16 @@ re-exporting the restored task yields the identical
 snapshot content at the same serialized length (the
 round-trip is a fixed point; `fromJSON` normalizes
 history-entry key order, values and hashes unchanged), all
-asserted outside the printed lines.
+asserted outside the printed lines — and a closing
+single-task payout reconciliation detail segment that calls
+`payoutMismatch()` on the reconciliation branch's two
+settled tasks one at a time: the mismatched task prints its
+full detail `{ quoted: 4000, paid: 3750.5, delta: -249.5 }`
+(underpaid by 249.5), and the task that settled exactly as
+quoted (2500 against 2500) prints the no-mismatch form,
+`undefined` — the per-task follow-up finance runs after the
+batch `mismatchedPayouts()` screen flags a task, asserted
+outside the printed lines against the hand-pinned amounts.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1190,7 +1199,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 534 tests covering the happy path, reject→resubmit
+`npm test` runs 536 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -124,7 +124,16 @@
  * (fromJSON normalizes history-entry key order; values and
  * hashes are unchanged) — the persistence round-trip a
  * document store would rely on, shown instead of only asserted
- * by the serialization tests.
+ * by the serialization tests — and finally a single-task payout
+ * reconciliation detail segment: `payoutMismatch()` is called on
+ * the reconciliation branch's two settled tasks one at a time —
+ * the mismatched task (its `ACCEPT` quote hand-pinned at 4000 in
+ * the branch comment, settled 3750.5) prints its full detail
+ * `{ quoted, paid, delta }` with delta -249.5, and the task that
+ * settled exactly as quoted (2500 against 2500) prints the
+ * no-mismatch form, `undefined` — the per-task follow-up finance
+ * runs after the batch `mismatchedPayouts()` screen flags a task,
+ * shown instead of only asserted by the reconciliation tests.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -146,7 +155,9 @@
  * state diagram text with its edge-line count, the README
  * diagram sync check verdict, the main task's JSON snapshot text
  * with its serialized byte length, the task restored from that
- * snapshot, and its history-derived used RESUBMIT count, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * snapshot, and its history-derived used RESUBMIT count, the
+ * single-task payout reconciliation detail for the mismatched
+ * task and the exactly-settled task's undefined detail, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -186,6 +197,7 @@ import {
   type BuildPayoutWebhooksResult,
   type DeliverPayoutWebhookToManyResult,
   type ExpireOverdueResult,
+  type PayoutMismatch,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
   type StaleActionResult,
@@ -323,6 +335,10 @@ export interface DemoResult {
   restoredTask: TaskLifecycle;
   /** RESUBMIT entries in the main task's history (its used budget count). */
   snapshotResubmitUsed: number;
+  /** `payoutMismatch()` detail for the mismatched task DEMO-005. */
+  payoutMismatchDetail: PayoutMismatch;
+  /** `payoutMismatch()` for the exactly-settled task DEMO-004 — undefined. */
+  payoutMismatchSettled: PayoutMismatch | undefined;
   lines: string[];
 }
 
@@ -352,7 +368,9 @@ export interface DemoResult {
  * its edge-line count, the README diagram sync check verdict,
  * the main task's JSON snapshot text with its serialized byte
  * length, the task restored from that snapshot, and its
- * history-derived used RESUBMIT count, and the exact lines
+ * history-derived used RESUBMIT count, the single-task payout
+ * reconciliation detail for the mismatched task and the
+ * exactly-settled task's undefined detail, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1669,7 +1687,52 @@ export async function runDemo(): Promise<DemoResult> {
     `  fixed point: re-exporting the restored task yields the identical snapshot content (${restoredBytes} bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, lines };
+  // Single-task payout reconciliation detail segment (closing):
+  // the reconciliation screening branch above screens a batch —
+  // `mismatchedPayouts()` names the tasks whose settled amount
+  // disagrees with the quote, but the screen's own line only
+  // borrows the detail inline. This segment is the per-task
+  // follow-up finance runs next: `payoutMismatch()` on one task
+  // at a time. Both tasks come from that branch, every amount a
+  // fixed literal hand-pinned in the branch comment above, never
+  // derived by calling payoutMismatch itself:
+  //   - DEMO-005 (the screen's one mismatched hit): ACCEPT
+  //     quotedAmount 4000, PAYOUT_COMPLETE payoutAmount 3750.5,
+  //     so the detail is exactly { quoted: 4000, paid: 3750.5,
+  //     delta: -249.5 } — delta = paid - quoted rounded to
+  //     cents, negative because the task was underpaid;
+  //   - DEMO-004 (settled exactly as quoted): ACCEPT
+  //     quotedAmount 2500, PAYOUT_COMPLETE payoutAmount 2500,
+  //     so payoutMismatch returns undefined — settled as
+  //     agreed, no mismatch to report.
+  // The segment asserts both shapes here, outside the printed
+  // lines: a detail that drifted from the hand-pinned amounts
+  // would fail the demo itself, not just a test. The helper is
+  // pure — it reads the tasks, never mutates or dispatches —
+  // and the segment adds no network, no randomness, and no
+  // wall clock (both tasks carry only fixed-literal timestamps).
+  const payoutMismatchDetail = payoutMismatch(mismatchedTask);
+  const payoutMismatchSettled = payoutMismatch(unreconciledTask);
+  if (
+    payoutMismatchDetail === undefined ||
+    payoutMismatchDetail.quoted !== 4000 ||
+    payoutMismatchDetail.paid !== 3750.5 ||
+    payoutMismatchDetail.delta !== -249.5 ||
+    payoutMismatchSettled !== undefined
+  ) {
+    throw new Error(
+      "demo fixture broken: payoutMismatch() detail does not match the hand-pinned amounts (DEMO-005 quoted 4000 / paid 3750.5 / delta -249.5, DEMO-004 settled exactly as quoted)",
+    );
+  }
+  lines.push(
+    "",
+    "Single-task payout reconciliation detail (payoutMismatch on the screened tasks):",
+    `  DEMO-005: payoutMismatch -> quoted ${payoutMismatchDetail.quoted}, paid ${payoutMismatchDetail.paid}, delta ${payoutMismatchDetail.delta} (underpaid by ${-payoutMismatchDetail.delta} — the batch screen's one mismatched hit, opened up per task)`,
+    "  DEMO-004: payoutMismatch -> undefined (quoted 2500, paid 2500 — settled exactly as quoted, so there is no mismatch to report)",
+    "  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)",
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, lines };
 }
 
 async function main(): Promise<void> {

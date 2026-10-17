@@ -18,6 +18,7 @@ import {
   isOverdue,
   parseHistory,
   parsePayoutRetryAfter,
+  payoutMismatch,
   staleTasks,
   stateDiagram,
   transitionTable,
@@ -350,11 +351,16 @@ JSON snapshot round-trip (toJSON/fromJSON on the main task):
   serialized: 3838 bytes (JSON.stringify of the snapshot — the detached plain-JSON form a document store persists)
   TaskLifecycle.fromJSON(parsed snapshot): state PAID, 12 history entries — state and full history match the original: true (entry for entry, hashes included)
   RESUBMIT budget: 1 of 2 used before and after the round-trip (derived from the history on both sides)
-  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing`;
+  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing
+
+Single-task payout reconciliation detail (payoutMismatch on the screened tasks):
+  DEMO-005: payoutMismatch -> quoted 4000, paid 3750.5, delta -249.5 (underpaid by 249.5 — the batch screen's one mismatched hit, opened up per task)
+  DEMO-004: payoutMismatch -> undefined (quoted 2500, paid 2500 — settled exactly as quoted, so there is no mismatch to report)
+  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 297);
+  assert.equal(lines.length, 302);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1799,7 +1805,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 297);
+  assert.equal(out.trimEnd().split("\n").length, 302);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2202,9 +2208,9 @@ test("demo shows the JSON snapshot round-trip segment in-process: state, history
   );
   assert.deepEqual(independent.toJSON(), task.toJSON());
   assert.deepEqual(independent.history, task.history);
-  // The segment closes the demo: it follows the README diagram
-  // sync check segment, prints its lines verbatim, and its
-  // fixed-point line is the demo's last line.
+  // The segment follows the README diagram sync check segment
+  // and prints its lines verbatim; the single-task payout
+  // reconciliation detail segment follows it.
   const snapAt = text.indexOf(
     "JSON snapshot round-trip (toJSON/fromJSON on the main task):",
   );
@@ -2215,24 +2221,28 @@ test("demo shows the JSON snapshot round-trip segment in-process: state, history
       ),
     "JSON snapshot round-trip segment must follow the README diagram sync check segment",
   );
+  assert.ok(
+    text.indexOf(
+      "Single-task payout reconciliation detail (payoutMismatch on the screened tasks):",
+    ) > snapAt,
+    "single-task payout reconciliation detail segment must follow the JSON snapshot round-trip segment",
+  );
   for (const line of [
     "  toJSON(): snapshot v1 for DEMO-001 — state PAID, 12 history entries, maxResubmits 2 stored (the finite budget travels in the envelope; the used count is derived from the history, never stored)",
     "  serialized: 3838 bytes (JSON.stringify of the snapshot — the detached plain-JSON form a document store persists)",
     "  TaskLifecycle.fromJSON(parsed snapshot): state PAID, 12 history entries — state and full history match the original: true (entry for entry, hashes included)",
     "  RESUBMIT budget: 1 of 2 used before and after the round-trip (derived from the history on both sides)",
+    "  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing",
   ]) {
     assert.ok(text.includes(line), `missing snapshot line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing",
-  );
 });
 
 test("demo JSON snapshot round-trip segment is deterministic: two runs print byte-identical snapshot lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("JSON snapshot round-trip (toJSON/fromJSON on the main task):"),
+      ls.indexOf("Single-task payout reconciliation detail (payoutMismatch on the screened tasks):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2247,4 +2257,79 @@ test("demo JSON snapshot round-trip segment is deterministic: two runs print byt
   assert.equal(a.snapshotBytes, b.snapshotBytes);
   assert.equal(a.snapshotResubmitUsed, b.snapshotResubmitUsed);
   assert.equal(a.restoredTask.state, b.restoredTask.state);
+});
+
+test("demo shows the single-task payout reconciliation detail segment in-process: the mismatched task's detail and the settled task's undefined", async () => {
+  const {
+    mismatchedTask,
+    unreconciledTask,
+    payoutMismatchDetail,
+    payoutMismatchSettled,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // reconciliation branch's fixed literals (DEMO-005 ACCEPT
+  // quotedAmount 4000, PAYOUT_COMPLETE payoutAmount 3750.5;
+  // DEMO-004 quoted 2500, paid 2500), never derived by calling
+  // payoutMismatch itself: delta = 3750.5 - 4000 = -249.5.
+  assert.deepEqual(payoutMismatchDetail, {
+    quoted: 4000,
+    paid: 3750.5,
+    delta: -249.5,
+  });
+  assert.equal(payoutMismatchSettled, undefined);
+  // An independent call on the returned tasks reproduces both
+  // shapes — the demo segment is not self-certifying — and the
+  // helper is pure: both tasks stay PAID with their histories
+  // untouched.
+  assert.deepEqual(payoutMismatch(mismatchedTask), {
+    quoted: 4000,
+    paid: 3750.5,
+    delta: -249.5,
+  });
+  assert.equal(payoutMismatch(unreconciledTask), undefined);
+  assert.equal(mismatchedTask.state, "PAID");
+  assert.equal(mismatchedTask.history.length, 8);
+  assert.equal(unreconciledTask.state, "PAID");
+  assert.equal(unreconciledTask.history.length, 8);
+  // The segment closes the demo: it follows the JSON snapshot
+  // round-trip segment, prints its lines verbatim, and its
+  // reading line is the demo's last line.
+  const detailAt = text.indexOf(
+    "Single-task payout reconciliation detail (payoutMismatch on the screened tasks):",
+  );
+  assert.ok(
+    detailAt >
+      text.indexOf("JSON snapshot round-trip (toJSON/fromJSON on the main task):"),
+    "single-task payout reconciliation detail segment must follow the JSON snapshot round-trip segment",
+  );
+  for (const line of [
+    "  DEMO-005: payoutMismatch -> quoted 4000, paid 3750.5, delta -249.5 (underpaid by 249.5 — the batch screen's one mismatched hit, opened up per task)",
+    "  DEMO-004: payoutMismatch -> undefined (quoted 2500, paid 2500 — settled exactly as quoted, so there is no mismatch to report)",
+  ]) {
+    assert.ok(text.includes(line), `missing payout detail line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  reading the detail: delta = paid - quoted, rounded to cents — negative is an underpayment, positive an overpayment (the per-task follow-up finance runs after mismatchedPayouts flags a task)",
+  );
+});
+
+test("demo single-task payout reconciliation detail segment is deterministic: two runs print byte-identical detail lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Single-task payout reconciliation detail (payoutMismatch on the screened tasks):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + DEMO-005 detail / DEMO-004 undefined / reading
+  // lines; every value is a fixed literal from the
+  // reconciliation branch, so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.payoutMismatchDetail, b.payoutMismatchDetail);
+  assert.equal(a.payoutMismatchSettled, b.payoutMismatchSettled);
 });
