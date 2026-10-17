@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 532 tests, all local
+npm test   # 534 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -152,7 +152,20 @@ verdict: `true`, the README embeds the exact generated block
 with no diagram drift, asserted outside the printed verdict
 against the hand-pinned expectation and cross-checked
 against the diagram tests (the only file read is this
-README; no network, no randomness, and no wall clock).
+README; no network, no randomness, and no wall clock) — and
+a closing JSON snapshot round-trip segment that exports the
+main task with `toJSON()`, prints the serialized byte count
+of the `JSON.stringify` snapshot text, restores the task
+with `TaskLifecycle.fromJSON()`, and confirms the
+persistence round-trip: state and the full 12-entry history
+match the original entry for entry, the used RESUBMIT count
+reads 1 of the stored budget of 2 on both sides (the count
+is derived from the history, never stored), and
+re-exporting the restored task yields the identical
+snapshot content at the same serialized length (the
+round-trip is a fixed point; `fromJSON` normalizes
+history-entry key order, values and hashes unchanged), all
+asserted outside the printed lines.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1177,7 +1190,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 532 tests covering the happy path, reject→resubmit
+`npm test` runs 534 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

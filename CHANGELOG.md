@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A JSON snapshot round-trip segment closing the CLI demo:
+  the main task is exported with `toJSON()`, serialized with
+  `JSON.stringify` (the demo prints the serialized byte
+  count — exact on every run, because the only varying
+  fields, the main task's wall-clock timestamps and the
+  hashes over them, are fixed-length), parsed back, and
+  restored with `TaskLifecycle.fromJSON()`. The segment
+  itself asserts the hand-pinned expectations outside the
+  printed lines: snapshot `v` 1, state `PAID`, 12 history
+  entries, the finite `maxResubmits` budget of 2 stored in
+  the envelope, the restored state and full history equal
+  to the original entry for entry (hashes included), the
+  history-derived used RESUBMIT count at 1 of 2 on both
+  sides, and an identical re-export at the same serialized
+  length (the round-trip is a fixed point; `fromJSON`
+  normalizes history-entry key order, values and hashes
+  unchanged). `runDemo()` returns the snapshot text,
+  its byte length, the restored task, and the used count;
+  the demo tests pin them against hand-written expectations
+  cross-checked against an independent in-test round-trip,
+  the exact printed lines in the golden output, and the
+  segment's printed-line determinism across two runs. No
+  network, no randomness, and no new wall clock. Demo and
+  tests only; no library behavior change.
 - Benchmark coverage for dispatch subscription notification:
   `subscribe()` with one fixed collecting listener over the
   full `DRAFT → PAID` lifecycle (8 dispatches) now appears in

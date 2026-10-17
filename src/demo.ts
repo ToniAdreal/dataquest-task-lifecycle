@@ -112,7 +112,19 @@
  * generated block, and the demo prints that verdict (hand-pinned
  * to `true` in the segment comment and cross-checked against
  * the diagram tests) — the sync conclusion itself, shown
- * instead of only asserted by the test suite.
+ * instead of only asserted by the test suite — and finally a
+ * JSON snapshot round-trip segment: the main task is exported
+ * with `toJSON()`, serialized with `JSON.stringify` (the demo
+ * prints the serialized byte count), parsed back and restored
+ * with `TaskLifecycle.fromJSON()`, and the demo asserts outside
+ * the printed lines that the restored task's state, full
+ * history, and history-derived used RESUBMIT count match the
+ * original, and that re-exporting the restored task yields the
+ * identical snapshot content at the same serialized length
+ * (fromJSON normalizes history-entry key order; values and
+ * hashes are unchanged) — the persistence round-trip a
+ * document store would rely on, shown instead of only asserted
+ * by the serialization tests.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -132,7 +144,9 @@
  * and the invalid copy's rejection message, the transition-table
  * JSON export text with its parsed-back edges, the generated
  * state diagram text with its edge-line count, the README
- * diagram sync check verdict, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * diagram sync check verdict, the main task's JSON snapshot text
+ * with its serialized byte length, the task restored from that
+ * snapshot, and its history-derived used RESUBMIT count, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -301,6 +315,14 @@ export interface DemoResult {
   stateDiagramEdgeCount: number;
   /** `readmeDiagramInSync()` verdict on this repo's README. */
   readmeDiagramInSync: boolean;
+  /** `JSON.stringify(task.toJSON())` text for the main task. */
+  snapshotJsonText: string;
+  /** UTF-8 byte length of `snapshotJsonText`. */
+  snapshotBytes: number;
+  /** Main task restored from the snapshot via `TaskLifecycle.fromJSON()`. */
+  restoredTask: TaskLifecycle;
+  /** RESUBMIT entries in the main task's history (its used budget count). */
+  snapshotResubmitUsed: number;
   lines: string[];
 }
 
@@ -328,7 +350,9 @@ export interface DemoResult {
  * rejection message, the transition-table JSON export text with
  * its parsed-back edges, the generated state diagram text with
  * its edge-line count, the README diagram sync check verdict,
- * and the exact lines
+ * the main task's JSON snapshot text with its serialized byte
+ * length, the task restored from that snapshot, and its
+ * history-derived used RESUBMIT count, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1554,7 +1578,98 @@ export async function runDemo(): Promise<DemoResult> {
     "  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)",
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, lines };
+  // JSON snapshot round-trip segment (closing): every segment
+  // above either drives the main task or reads its history back
+  // through the NDJSON / history-only paths; the persistence
+  // path a real deployment uses — the snapshot envelope — never
+  // appeared. Here the main task is exported with `toJSON()`,
+  // serialized with `JSON.stringify` (the exact detached
+  // plain-JSON text a document store would persist), parsed
+  // back, and restored with `TaskLifecycle.fromJSON()` — the
+  // untrusted-snapshot reader, which re-validates the envelope
+  // (schema version, seq continuity, from/to chain, legal
+  // edges, canonical timestamps, hash chain) before rebuilding.
+  // Hand-written expectations — written out here from the main
+  // task's construction at the top of this demo, never derived
+  // by calling toJSON/fromJSON themselves:
+  //   - the snapshot carries v 1, id DEMO-001, state PAID, and
+  //     exactly 12 history entries;
+  //   - maxResubmits 2 is stored in the envelope (the demo set
+  //     a finite budget of 2); the used count is NOT stored —
+  //     it is derived from the history on both sides, and the
+  //     main history holds exactly 1 RESUBMIT entry, so the
+  //     used count reads 1 of 2 before and after the trip;
+  //   - the restored task's state and full history equal the
+  //     original's entry for entry (compared through the
+  //     canonical NDJSON serialization, hashes included);
+  //   - re-exporting the restored task yields the identical
+  //     snapshot content at the same serialized byte length —
+  //     the round-trip is a fixed point. (The JSON text is not
+  //     string-identical: fromJSON's sanitizer rebuilds each
+  //     history entry in canonical field order, so `prevHash`
+  //     moves after `note`; every value and hash is unchanged,
+  //     which the demo tests pin with a deep equality check.)
+  // The serialized byte count is exact on every run: the only
+  // fields that vary between runs (the main task's wall-clock
+  // timestamps and the hashes computed over them) are
+  // fixed-length, so the total never moves. The segment
+  // asserts all of this here, outside the printed lines: a
+  // snapshot that lost fidelity would fail the demo itself,
+  // not just a test. No network, no randomness, and no new
+  // wall clock is read — the segment only serializes the main
+  // task's existing state.
+  const snapshot = task.toJSON();
+  const snapshotJsonText = JSON.stringify(snapshot);
+  const snapshotBytes = new TextEncoder().encode(snapshotJsonText).length;
+  const restoredTask = TaskLifecycle.fromJSON(
+    JSON.parse(snapshotJsonText) as unknown,
+  );
+  const resubmitUsedOf = (t: TaskLifecycle): number =>
+    t.history.filter((entry) => entry.event === "RESUBMIT").length;
+  const snapshotResubmitUsed = resubmitUsedOf(task);
+  const restoredResubmitUsed = resubmitUsedOf(restoredTask);
+  const restoredSnapshot = restoredTask.toJSON();
+  const restoredJsonText = JSON.stringify(restoredSnapshot);
+  const restoredBytes = new TextEncoder().encode(restoredJsonText).length;
+  const snapshotRoundTripMatches =
+    restoredTask.id === task.id &&
+    restoredTask.state === task.state &&
+    historyToNdjson(restoredTask) === historyToNdjson(task);
+  const snapshotFixedPoint =
+    restoredSnapshot.v === snapshot.v &&
+    restoredSnapshot.id === snapshot.id &&
+    restoredSnapshot.state === snapshot.state &&
+    restoredSnapshot.maxResubmits === snapshot.maxResubmits &&
+    JSON.stringify(restoredSnapshot.slaDeadlines) ===
+      JSON.stringify(snapshot.slaDeadlines) &&
+    snapshotRoundTripMatches &&
+    restoredBytes === snapshotBytes;
+  if (
+    snapshot.v !== 1 ||
+    snapshot.id !== "DEMO-001" ||
+    snapshot.state !== "PAID" ||
+    snapshot.history.length !== 12 ||
+    snapshot.maxResubmits !== 2 ||
+    !snapshotRoundTripMatches ||
+    snapshotResubmitUsed !== 1 ||
+    restoredResubmitUsed !== 1 ||
+    !snapshotFixedPoint
+  ) {
+    throw new Error(
+      "demo fixture broken: toJSON()/fromJSON() round-trip lost fidelity (snapshot envelope, restored state/history, used RESUBMIT count, or re-export fixed point mismatch)",
+    );
+  }
+  lines.push(
+    "",
+    "JSON snapshot round-trip (toJSON/fromJSON on the main task):",
+    `  toJSON(): snapshot v${snapshot.v} for ${task.id} — state ${snapshot.state}, ${snapshot.history.length} history entries, maxResubmits ${snapshot.maxResubmits} stored (the finite budget travels in the envelope; the used count is derived from the history, never stored)`,
+    `  serialized: ${snapshotBytes} bytes (JSON.stringify of the snapshot — the detached plain-JSON form a document store persists)`,
+    `  TaskLifecycle.fromJSON(parsed snapshot): state ${restoredTask.state}, ${restoredTask.history.length} history entries — state and full history match the original: ${snapshotRoundTripMatches} (entry for entry, hashes included)`,
+    `  RESUBMIT budget: ${snapshotResubmitUsed} of ${snapshot.maxResubmits} used before and after the round-trip (derived from the history on both sides)`,
+    `  fixed point: re-exporting the restored task yields the identical snapshot content (${restoredBytes} bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, lines };
 }
 
 async function main(): Promise<void> {

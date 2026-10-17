@@ -343,11 +343,18 @@ State diagram generation (stateDiagram from the transition table):
 README diagram sync check (readmeDiagramInSync on this repo's README):
   readmeDiagramInSync(): true (README.md embeds the exact stateDiagram() block generated above — no diagram drift)
   checked file: README.md (this repo only — the sole file read by the check; no network, no wall clock)
-  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)`;
+  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)
+
+JSON snapshot round-trip (toJSON/fromJSON on the main task):
+  toJSON(): snapshot v1 for DEMO-001 — state PAID, 12 history entries, maxResubmits 2 stored (the finite budget travels in the envelope; the used count is derived from the history, never stored)
+  serialized: 3838 bytes (JSON.stringify of the snapshot — the detached plain-JSON form a document store persists)
+  TaskLifecycle.fromJSON(parsed snapshot): state PAID, 12 history entries — state and full history match the original: true (entry for entry, hashes included)
+  RESUBMIT budget: 1 of 2 used before and after the round-trip (derived from the history on both sides)
+  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 290);
+  assert.equal(lines.length, 297);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1677,7 +1684,8 @@ test("demo shows the state diagram generation segment in-process: the generated 
   assert.ok(readme.includes(stateDiagramText));
   // The segment follows the transition-table JSON export
   // segment and prints its summary lines verbatim; the README
-  // diagram sync check segment now closes the demo after it.
+  // diagram sync check segment follows it (the JSON snapshot
+  // round-trip segment now closes the demo).
   const diagramAt = text.indexOf(
     "State diagram generation (stateDiagram from the transition table):",
   );
@@ -1740,9 +1748,9 @@ test("demo shows the README diagram sync check segment in-process: the verdict i
   assert.equal(readmeDiagramInSync(), true);
   const readme = readFileSync(path.join(repoRoot, "README.md"), "utf8");
   assert.ok(readme.includes(stateDiagramText));
-  // The segment closes the demo: it follows the state diagram
-  // generation segment, prints its lines verbatim, and its
-  // CLI-equivalent line is the demo's last line.
+  // The segment follows the state diagram generation segment
+  // and prints its lines verbatim; the JSON snapshot round-trip
+  // segment now closes the demo after it.
   const syncAt = text.indexOf(
     "README diagram sync check (readmeDiagramInSync on this repo's README):",
   );
@@ -1759,9 +1767,11 @@ test("demo shows the README diagram sync check segment in-process: the verdict i
   ]) {
     assert.ok(text.includes(line), `missing sync line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)",
+  assert.ok(
+    text.indexOf(
+      "JSON snapshot round-trip (toJSON/fromJSON on the main task):",
+    ) > syncAt,
+    "JSON snapshot round-trip segment must follow the README diagram sync check segment",
   );
 });
 
@@ -1769,6 +1779,7 @@ test("demo README diagram sync check segment is deterministic: two runs print by
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("README diagram sync check (readmeDiagramInSync on this repo's README):"),
+      ls.indexOf("JSON snapshot round-trip (toJSON/fromJSON on the main task):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1788,7 +1799,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 290);
+  assert.equal(out.trimEnd().split("\n").length, 297);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2119,4 +2130,121 @@ test("demo SLA watchdog execution segment is deterministic in its printed lines:
     a.expireExecutionFound.map((t) => t.id),
     b.expireExecutionFound.map((t) => t.id),
   );
+});
+
+test("demo shows the JSON snapshot round-trip segment in-process: state, history and used RESUBMIT count survive toJSON/fromJSON", async () => {
+  const {
+    task,
+    snapshotJsonText,
+    snapshotBytes,
+    restoredTask,
+    snapshotResubmitUsed,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the main
+  // task's construction (DEMO-001, maxResubmits 2, the 12-step
+  // chain with exactly one RESUBMIT), never derived by calling
+  // toJSON/fromJSON themselves: the serialized snapshot is
+  // exactly 3838 bytes on every run, because the only varying
+  // fields (wall-clock timestamps and the hashes over them)
+  // are fixed-length.
+  assert.equal(snapshotBytes, 3838);
+  assert.equal(snapshotJsonText.length, 3838);
+  assert.equal(new TextEncoder().encode(snapshotJsonText).length, 3838);
+  const snapshot = JSON.parse(snapshotJsonText) as {
+    v?: number;
+    id: string;
+    state: string;
+    history: unknown[];
+    slaDeadlines: Record<string, string>;
+    maxResubmits?: number;
+  };
+  assert.equal(snapshot.v, 1);
+  assert.equal(snapshot.id, "DEMO-001");
+  assert.equal(snapshot.state, "PAID");
+  assert.equal(snapshot.history.length, 12);
+  assert.deepEqual(snapshot.slaDeadlines, {});
+  assert.equal(snapshot.maxResubmits, 2);
+  // The restored task matches the original on every surface the
+  // backlog pins: id, state, the full history entry for entry,
+  // and an identical re-export (the fixed point): deep-equal
+  // content at the same serialized length. The JSON text is
+  // not string-identical — fromJSON rebuilds history entries
+  // in canonical field order — so the test pins content, not
+  // key order.
+  assert.equal(restoredTask.id, "DEMO-001");
+  assert.equal(restoredTask.state, "PAID");
+  assert.equal(restoredTask.isTerminal, true);
+  assert.deepEqual(restoredTask.history, task.history);
+  assert.deepEqual(restoredTask.toJSON(), task.toJSON());
+  assert.equal(
+    new TextEncoder().encode(JSON.stringify(restoredTask.toJSON())).length,
+    3838,
+  );
+  // The used RESUBMIT count is the history-derived count on
+  // both sides: exactly 1 of the demo's budget of 2.
+  assert.equal(snapshotResubmitUsed, 1);
+  assert.equal(
+    task.history.filter((h) => h.event === "RESUBMIT").length,
+    1,
+  );
+  assert.equal(
+    restoredTask.history.filter((h) => h.event === "RESUBMIT").length,
+    1,
+  );
+  // An independent round-trip built in the test from the
+  // returned task reproduces the same snapshot — the demo
+  // segment is not self-certifying.
+  const independent = TaskLifecycle.fromJSON(
+    JSON.parse(JSON.stringify(task.toJSON())) as unknown,
+  );
+  assert.deepEqual(independent.toJSON(), task.toJSON());
+  assert.deepEqual(independent.history, task.history);
+  // The segment closes the demo: it follows the README diagram
+  // sync check segment, prints its lines verbatim, and its
+  // fixed-point line is the demo's last line.
+  const snapAt = text.indexOf(
+    "JSON snapshot round-trip (toJSON/fromJSON on the main task):",
+  );
+  assert.ok(
+    snapAt >
+      text.indexOf(
+        "README diagram sync check (readmeDiagramInSync on this repo's README):",
+      ),
+    "JSON snapshot round-trip segment must follow the README diagram sync check segment",
+  );
+  for (const line of [
+    "  toJSON(): snapshot v1 for DEMO-001 — state PAID, 12 history entries, maxResubmits 2 stored (the finite budget travels in the envelope; the used count is derived from the history, never stored)",
+    "  serialized: 3838 bytes (JSON.stringify of the snapshot — the detached plain-JSON form a document store persists)",
+    "  TaskLifecycle.fromJSON(parsed snapshot): state PAID, 12 history entries — state and full history match the original: true (entry for entry, hashes included)",
+    "  RESUBMIT budget: 1 of 2 used before and after the round-trip (derived from the history on both sides)",
+  ]) {
+    assert.ok(text.includes(line), `missing snapshot line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  fixed point: re-exporting the restored task yields the identical snapshot content (3838 bytes; fromJSON normalizes history-entry key order — values and hashes unchanged) — a second round-trip changes nothing",
+  );
+});
+
+test("demo JSON snapshot round-trip segment is deterministic: two runs print byte-identical snapshot lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("JSON snapshot round-trip (toJSON/fromJSON on the main task):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + toJSON / serialized / fromJSON / budget /
+  // fixed-point lines; the snapshot text itself differs
+  // between runs (wall-clock timestamps), but every printed
+  // value is a hand-pinned constant or a fixed-length-derived
+  // byte count, so the printed segment is byte-identical.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.snapshotBytes, b.snapshotBytes);
+  assert.equal(a.snapshotResubmitUsed, b.snapshotResubmitUsed);
+  assert.equal(a.restoredTask.state, b.restoredTask.state);
 });
