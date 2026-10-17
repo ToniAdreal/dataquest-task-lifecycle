@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark coverage for the JSON snapshot round-trip:
+  `toJSON()` + `TaskLifecycle.fromJSON()` over the fixed
+  full-lifecycle task (8-entry history) now appears in
+  `npm run bench` — the persistence path every restart
+  pays (plain-JSON envelope export plus strict rehydration
+  through the untrusted-snapshot reader). Per-iteration
+  self-checks pin the restored state and the full history
+  to the hand-written expectations in the bench comments
+  (entry for entry, hashes included), the history-derived
+  used RESUBMIT / DISPUTE counts (0 on both sides — the
+  used counts are derived from the history, never stored),
+  and the re-export fixed point at the same serialized
+  byte length; outside the timed loop, a JSON text
+  round-trip (`JSON.stringify` / `JSON.parse`) is pinned
+  to restore identically. No network, no randomness, and
+  no wall-clock reads. The README Benchmarks table is
+  refreshed from one real run. Benchmark only; no library
+  behavior change.
 - A JSON snapshot round-trip segment closing the CLI demo:
   the main task is exported with `toJSON()`, serialized with
   `JSON.stringify` (the demo prints the serialized byte

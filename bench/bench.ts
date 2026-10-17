@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-one hot-path
+ * Measures real, locally-observed throughput for the twenty-two hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -213,6 +213,26 @@
  *      its peer. No network, no randomness, and no wall
  *      clock: every dispatch timestamp is fixed.
  *
+ *  22. JSON snapshot round-trip — `toJSON()` +
+ *      `TaskLifecycle.fromJSON(snapshot)` over the fixed
+ *      full-lifecycle task (see the snapshot fixture below).
+ *      This is the persistence path every restart pays: export
+ *      the live task as a plain JSON snapshot envelope (schema
+ *      version, state, full history, SLA deadlines), then
+ *      rehydrate it through the strict untrusted-snapshot
+ *      reader (envelope validation, seq / from-to chain,
+ *      hash-chain re-verification, used-budget re-derivation
+ *      from the history). One timed pass is one export + one
+ *      rehydration of the 8-entry snapshot; its per-iteration
+ *      self-check pins the restored state, the full history
+ *      entry for entry, the history-derived used RESUBMIT /
+ *      DISPUTE counts, and the re-export fixed point to the
+ *      hand-written expectations. Outside the timed loop, a
+ *      JSON text round-trip (stringify / parse) pins that the
+ *      persisted text form restores identically. No network,
+ *      no randomness, and no wall clock: every dispatch
+ *      timestamp is fixed.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -254,6 +274,7 @@ import {
   type PayoutWebhookFetchImpl,
   type TaskEvent,
   type TaskHistoryEntry,
+  type TaskSnapshot,
   type TaskState,
 } from "../src/index.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
@@ -1714,6 +1735,122 @@ function checkSubscribe(
   }
 }
 
+// Snapshot round-trip fixture: the module-scope `paidTask` above
+// (the same fixed full lifecycle as group 1: BENCH-001 driven
+// DRAFT -> PAID by the LIFECYCLE table — same events, actors,
+// per-step timestamp offsets from BASE_MS, ACCEPT quote 125 and
+// PAYOUT_COMPLETE settlement ref bench-pay-001 / amount 125)
+// exported once with `toJSON()`.
+// Hand-written expectations — written out here from the snapshot
+// contract in src/taskLifecycle.ts and cross-checked against
+// test/serialization.test.ts, test/snapshotVersion.test.ts, and
+// the demo's JSON snapshot segment, never derived by calling
+// toJSON/fromJSON themselves:
+//   - the envelope carries exactly v 1 (SNAPSHOT_VERSION), id
+//     BENCH-001, state PAID, and the full 8-entry history;
+//   - slaDeadlines is the empty object (the lifecycle sets no
+//     deadlines) and the optional envelope fields are all absent:
+//     maxResubmits / maxDisputes (both budgets unlimited, and JSON
+//     cannot carry Infinity), rolePolicy (none set), and
+//     idempotencyKeys (no key consumed);
+//   - the used budget counts are NOT stored in the envelope —
+//     they are derived from the history on both sides, and the
+//     lifecycle history holds no RESUBMIT and no DISPUTE entry,
+//     so both used counts read 0 before and after the trip;
+//   - re-exporting a restored task yields the identical snapshot
+//     content at the same serialized byte length — the round-trip
+//     is a fixed point (fromJSON normalizes history-entry key
+//     order; every value and hash is unchanged).
+const snapshotFixture: TaskSnapshot = paidTask.toJSON();
+const snapshotFixtureJsonText = JSON.stringify(snapshotFixture);
+const snapshotFixtureBytes = new TextEncoder().encode(
+  snapshotFixtureJsonText,
+).length;
+const SNAPSHOT_RESUBMIT_USED = 0;
+const SNAPSHOT_DISPUTE_USED = 0;
+function usedCountOf(task: TaskLifecycle, event: TaskEvent): number {
+  return task.history.filter((entry) => entry.event === event).length;
+}
+function checkSnapshotRoundTrip(
+  restored: TaskLifecycle,
+  where: string,
+): void {
+  if (
+    restored.id !== "BENCH-001" ||
+    restored.state !== "PAID" ||
+    restored.history.length !== 8 ||
+    usedCountOf(restored, "RESUBMIT") !== SNAPSHOT_RESUBMIT_USED ||
+    usedCountOf(restored, "DISPUTE") !== SNAPSHOT_DISPUTE_USED ||
+    historyToNdjson(restored.history) !== ndjsonFixture
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  for (let i = 0; i < 8; i++) {
+    const a = restored.history[i];
+    const b = paidTask.history[i];
+    if (
+      a.seq !== b.seq ||
+      a.event !== b.event ||
+      a.from !== b.from ||
+      a.to !== b.to ||
+      a.at !== b.at ||
+      a.actor !== b.actor ||
+      a.note !== b.note ||
+      a.quotedAmount !== b.quotedAmount ||
+      a.payoutRef !== b.payoutRef ||
+      a.payoutAmount !== b.payoutAmount ||
+      a.prevHash !== b.prevHash ||
+      a.hash !== b.hash
+    ) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+  const reExported = restored.toJSON();
+  const reExportedBytes = new TextEncoder().encode(
+    JSON.stringify(reExported),
+  ).length;
+  if (
+    reExported.v !== snapshotFixture.v ||
+    reExported.id !== snapshotFixture.id ||
+    reExported.state !== snapshotFixture.state ||
+    reExported.maxResubmits !== snapshotFixture.maxResubmits ||
+    reExported.maxDisputes !== snapshotFixture.maxDisputes ||
+    JSON.stringify(reExported.slaDeadlines) !==
+      JSON.stringify(snapshotFixture.slaDeadlines) ||
+    reExportedBytes !== snapshotFixtureBytes
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+if (
+  snapshotFixture.v !== 1 ||
+  snapshotFixture.id !== "BENCH-001" ||
+  snapshotFixture.state !== "PAID" ||
+  snapshotFixture.history.length !== 8 ||
+  Object.keys(snapshotFixture.slaDeadlines).length !== 0 ||
+  snapshotFixture.maxResubmits !== undefined ||
+  snapshotFixture.maxDisputes !== undefined ||
+  snapshotFixture.rolePolicy !== undefined ||
+  snapshotFixture.idempotencyKeys !== undefined ||
+  usedCountOf(paidTask, "RESUBMIT") !== SNAPSHOT_RESUBMIT_USED ||
+  usedCountOf(paidTask, "DISPUTE") !== SNAPSHOT_DISPUTE_USED
+) {
+  throw new Error("benchmark fixture failed: snapshot shape");
+}
+// One-time validation (outside the timed loop): the in-memory
+// envelope restores to exactly the hand-written expectations.
+checkSnapshotRoundTrip(
+  TaskLifecycle.fromJSON(snapshotFixture),
+  "snapshot fixture",
+);
+// One-time JSON text round-trip validation (outside the timed
+// loop): the persisted text form (JSON.stringify / JSON.parse —
+// what a document store actually keeps) restores identically.
+checkSnapshotRoundTrip(
+  TaskLifecycle.fromJSON(JSON.parse(snapshotFixtureJsonText) as unknown),
+  "snapshot text round-trip",
+);
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -2005,6 +2142,17 @@ function benchSubscribe(): number {
   }, ITERATIONS);
 }
 
+function benchSnapshotRoundTrip(): number {
+  return measure(() => {
+    // Per-iteration self-check: the restored task's state, full
+    // history (entry for entry), and history-derived used budget
+    // counts match the hand-written expectations, and its
+    // re-export is the fixed point (see the fixture above).
+    const restored = TaskLifecycle.fromJSON(paidTask.toJSON());
+    checkSnapshotRoundTrip(restored, "snapshotRoundTrip");
+  }, ITERATIONS);
+}
+
 function benchReadmeDiagramInSync(): number {
   return measure(() => {
     // Per-iteration self-check: the return value is the
@@ -2030,7 +2178,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -2065,6 +2213,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "readmeDiagramInSync (README file read)", ops: benchReadmeDiagramInSync() },
   { path: "isOverdue (4-task corpus)", ops: benchIsOverdue() },
   { path: "subscribe (full lifecycle, 1 collecting listener)", ops: benchSubscribe() },
+  { path: "toJSON + fromJSON snapshot round-trip (8 entries)", ops: benchSnapshotRoundTrip() },
 ];
 
 console.log("path                                              throughput");
