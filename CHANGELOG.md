@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Full-fidelity benchmark self-checks for the event-sourced
+  rebuild: the `fromHistory (8-entry history)` path in
+  `npm run bench` (timed since the first bench commit, but
+  previously self-checked only on the rebuilt task's final
+  state) now pins, on every iteration, the rebuilt task's
+  id and state and its full history against the source
+  history entry for entry (hashes included; compared
+  field-wise and through the canonical NDJSON serializer,
+  because rehydration normalizes history-entry key order).
+  Outside the timed loop, a detached tampered copy (the
+  `PAYOUT_COMPLETE` entry's `payoutAmount` altered from
+  125 to 126) is pinned to be rejected with the hash-chain
+  error, and the intact fixture is pinned to rebuild
+  afterwards. No network, no randomness, and no
+  wall-clock reads. The README Benchmarks table is
+  refreshed from one real run. Benchmark only; no library
+  behavior change.
 - Benchmark coverage for the JSON snapshot round-trip:
   `toJSON()` + `TaskLifecycle.fromJSON()` over the fixed
   full-lifecycle task (8-entry history) now appears in

@@ -8,7 +8,12 @@
  *      appending a hash-chained audit entry) on a fresh task;
  *   2. event-sourced replay / rehydration — `replay(history)` deriving
  *      the final state, and `TaskLifecycle.fromHistory(...)` rebuilding
- *      the task, both over a fixed 8-entry chained history;
+ *      the task, both over a fixed 8-entry chained history. The
+ *      `fromHistory` path's per-iteration self-check pins the rebuilt
+ *      task's id and state and its full history, entry for entry
+ *      (hashes included), against the source history, and a detached
+ *      tampered history is rejected once, outside the timed loop
+ *      (see the fromHistory fidelity fixture below);
  *   3. `verifyHistoryChain(history)` — full SHA-256 hash-chain
  *      re-verification of that same history;
  *   4. payout webhook build / verify — `buildPayoutWebhook` (HMAC-SHA256
@@ -1851,6 +1856,96 @@ checkSnapshotRoundTrip(
   "snapshot text round-trip",
 );
 
+// FromHistory fidelity fixture: reuse the module-scope
+// `historyFixture` above — the same detached 8-entry chained
+// history the replay path (group 2) and the NDJSON paths
+// (group 5) use. The bench has timed `TaskLifecycle.fromHistory`
+// since the first bench commit, but its self-check pinned only
+// the rebuilt task's final state; this fixture pins the rebuild
+// fidelity itself. Hand-written expectations — written out here
+// from the fixture composition and cross-checked against
+// test/replay.test.ts ("history is the only source of truth"),
+// never derived by calling fromHistory itself:
+//   - the rebuilt task carries the requested id BENCH-001, lands
+//     in PAID (the fixture's full DRAFT -> PAID lifecycle), and
+//     holds exactly 8 history entries;
+//   - every rebuilt entry equals the source entry field for
+//     field (seq / event / from / to / at / actor / note /
+//     quotedAmount / payoutRef / payoutAmount / prevHash /
+//     hash), so its canonical NDJSON form is the fixture's own
+//     `ndjsonFixture` (fromHistory normalizes history-entry key
+//     order on rehydration, so the comparison is field-wise and
+//     through the canonical serializer, never raw JSON text);
+//   - a detached copy whose PAYOUT_COMPLETE entry's
+//     payoutAmount is altered from 125 to 126 no longer
+//     recomputes its stored hash, so fromHistory must reject it
+//     with the hash-chain error — checked once, outside the
+//     timed loop, mirroring the parseHistory tamper check.
+function checkFromHistory(restored: TaskLifecycle, where: string): void {
+  if (
+    restored.id !== "BENCH-001" ||
+    restored.state !== "PAID" ||
+    restored.history.length !== 8 ||
+    historyToNdjson(restored.history) !== ndjsonFixture
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  for (let i = 0; i < 8; i++) {
+    const a = restored.history[i];
+    const b = historyFixture[i];
+    if (
+      a.seq !== b.seq ||
+      a.event !== b.event ||
+      a.from !== b.from ||
+      a.to !== b.to ||
+      a.at !== b.at ||
+      a.actor !== b.actor ||
+      a.note !== b.note ||
+      a.quotedAmount !== b.quotedAmount ||
+      a.payoutRef !== b.payoutRef ||
+      a.payoutAmount !== b.payoutAmount ||
+      a.prevHash !== b.prevHash ||
+      a.hash !== b.hash
+    ) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+}
+// One-time validation (outside the timed loop): the intact
+// fixture rebuilds to exactly the hand-written expectations.
+checkFromHistory(
+  TaskLifecycle.fromHistory("BENCH-001", historyFixture),
+  "fromHistory fixture",
+);
+// Tamper rejection (outside the timed loop): the altered copy
+// must be rejected explicitly — and the original fixture must
+// still rebuild afterwards, proving the tamper copy was
+// detached.
+const fromHistoryTampered: TaskHistoryEntry[] = historyFixture.map(
+  (e) => ({ ...e }),
+);
+fromHistoryTampered[7] = {
+  ...fromHistoryTampered[7],
+  payoutAmount: 126,
+};
+let fromHistoryTamperRejected = false;
+try {
+  TaskLifecycle.fromHistory("BENCH-001", fromHistoryTampered);
+} catch (err) {
+  fromHistoryTamperRejected =
+    err instanceof Error &&
+    err.message.includes("history hash chain is broken");
+}
+if (!fromHistoryTamperRejected) {
+  throw new Error(
+    "benchmark fixture failed: fromHistory accepted a tampered history",
+  );
+}
+checkFromHistory(
+  TaskLifecycle.fromHistory("BENCH-001", historyFixture),
+  "fromHistory fixture after tamper check",
+);
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -1874,10 +1969,13 @@ function benchReplay(): number {
 
 function benchFromHistory(): number {
   return measure(() => {
-    const task = TaskLifecycle.fromHistory("BENCH-001", historyFixture);
-    if (task.state !== "PAID") {
-      throw new Error("benchmark self-check failed: fromHistory");
-    }
+    // Per-iteration self-check: the rebuilt task's id, state, and
+    // full history match the source history entry for entry
+    // (see the fromHistory fidelity fixture above).
+    checkFromHistory(
+      TaskLifecycle.fromHistory("BENCH-001", historyFixture),
+      "fromHistory",
+    );
   }, ITERATIONS);
 }
 
@@ -2178,7 +2276,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
