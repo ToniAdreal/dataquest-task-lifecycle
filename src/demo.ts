@@ -104,7 +104,15 @@
  * initial, first-edge, last-edge, and last lines, hand-pinned in
  * the segment comment and cross-checked against the full
  * generated block by the demo tests) — the docs-drift guard's
- * own output, shown instead of only asserted.
+ * own output, shown instead of only asserted — and finally a
+ * README diagram sync check segment: `readmeDiagramInSync()`
+ * (imported directly from `src/diagram.ts`, as the benchmark
+ * does — it is not re-exported from the package entry) reads
+ * this repo's README and reports whether it embeds the exact
+ * generated block, and the demo prints that verdict (hand-pinned
+ * to `true` in the segment comment and cross-checked against
+ * the diagram tests) — the sync conclusion itself, shown
+ * instead of only asserted by the test suite.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -123,7 +131,8 @@
  * external history entries with their main-prefix match verdict
  * and the invalid copy's rejection message, the transition-table
  * JSON export text with its parsed-back edges, the generated
- * state diagram text with its edge-line count, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * state diagram text with its edge-line count, the README
+ * diagram sync check verdict, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -171,6 +180,7 @@ import {
   type TaskState,
   type TransitionEdge,
 } from "./index.js";
+import { readmeDiagramInSync } from "./diagram.js";
 
 /**
  * Signing secret for the demo webhook only — a placeholder printed in
@@ -289,6 +299,8 @@ export interface DemoResult {
   stateDiagramText: string;
   /** Edge lines inside `stateDiagramText` (the 19 transition edges). */
   stateDiagramEdgeCount: number;
+  /** `readmeDiagramInSync()` verdict on this repo's README. */
+  readmeDiagramInSync: boolean;
   lines: string[];
 }
 
@@ -315,7 +327,8 @@ export interface DemoResult {
  * with their main-prefix match verdict and the invalid copy's
  * rejection message, the transition-table JSON export text with
  * its parsed-back edges, the generated state diagram text with
- * its edge-line count, and the exact lines
+ * its edge-line count, the README diagram sync check verdict,
+ * and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -1505,7 +1518,43 @@ export async function runDemo(): Promise<DemoResult> {
     `  last line: ${stateDiagramLines.at(-1)}`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, lines };
+  // README diagram sync check segment (closing): the segment
+  // above generates the diagram block; this one reports the
+  // conclusion the whole docs-drift guard exists for —
+  // `readmeDiagramInSync()` (imported directly from
+  // src/diagram.ts, as the benchmark does — it is not
+  // re-exported from the package entry) reads this repo's
+  // README.md and returns true iff it embeds the exact
+  // generated block. Hand-written expectation — written out
+  // here from the state the test suite pins, never derived by
+  // calling readmeDiagramInSync itself:
+  //   - the return value is exactly true: test/diagram.test.ts
+  //     runs the CLI `--check` form of this same function and
+  //     requires the in-sync outcome, and
+  //     test/stateDiagram.test.ts asserts the README embeds
+  //     the exact generated diagram (no drift). A drifted
+  //     README would fail the test suite before it could fail
+  //     here, so true is the only expectation consistent with
+  //     a green suite.
+  // The segment asserts that here, outside the printed
+  // verdict: a drifted README would fail the demo itself, not
+  // just a test. The only file read is this repo's README.md;
+  // no network, no randomness, no wall clock.
+  const readmeDiagramInSyncValue = readmeDiagramInSync();
+  if (readmeDiagramInSyncValue !== true) {
+    throw new Error(
+      "demo fixture broken: readmeDiagramInSync() returned false — README.md diagram drifted from stateDiagram()",
+    );
+  }
+  lines.push(
+    "",
+    "README diagram sync check (readmeDiagramInSync on this repo's README):",
+    `  readmeDiagramInSync(): ${readmeDiagramInSyncValue} (README.md embeds the exact stateDiagram() block generated above — no diagram drift)`,
+    "  checked file: README.md (this repo only — the sole file read by the check; no network, no wall clock)",
+    "  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)",
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, lines };
 }
 
 async function main(): Promise<void> {

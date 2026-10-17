@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
+import { readmeDiagramInSync } from "../src/diagram.js";
 import {
   PayoutEventDedupe,
   TaskLifecycle,
@@ -337,11 +338,16 @@ State diagram generation (stateDiagram from the transition table):
   initial transition (line 4): [*] --> DRAFT
   first edge (line 5): DRAFT --> OPEN : PUBLISH
   last edge (line 23): DISPUTED --> REJECTED : ARBITRATE_REJECT
-  last line: \`\`\``;
+  last line: \`\`\`
+
+README diagram sync check (readmeDiagramInSync on this repo's README):
+  readmeDiagramInSync(): true (README.md embeds the exact stateDiagram() block generated above — no diagram drift)
+  checked file: README.md (this repo only — the sole file read by the check; no network, no wall clock)
+  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 285);
+  assert.equal(lines.length, 290);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1570,7 +1576,8 @@ test("demo shows the transition-table JSON export segment in-process: the parsed
   }
   // The segment follows the standalone history parsing segment
   // and prints its summary lines verbatim; the state diagram
-  // generation segment now closes the demo after it.
+  // generation segment follows it (the README diagram sync
+  // check segment now closes the demo after that).
   const exportAt = text.indexOf(
     "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
   );
@@ -1668,9 +1675,9 @@ test("demo shows the state diagram generation segment in-process: the generated 
   assert.equal(stateDiagramText, stateDiagram());
   const readme = readFileSync(path.join(repoRoot, "README.md"), "utf8");
   assert.ok(readme.includes(stateDiagramText));
-  // The segment closes the demo: it follows the transition-table
-  // JSON export segment, prints its summary lines verbatim, and
-  // its closing-fence line is the demo's last line.
+  // The segment follows the transition-table JSON export
+  // segment and prints its summary lines verbatim; the README
+  // diagram sync check segment now closes the demo after it.
   const diagramAt = text.indexOf(
     "State diagram generation (stateDiagram from the transition table):",
   );
@@ -1691,13 +1698,20 @@ test("demo shows the state diagram generation segment in-process: the generated 
   ]) {
     assert.ok(text.includes(line), `missing diagram line: ${line}`);
   }
-  assert.equal(lines[lines.length - 1], "  last line: ```");
+  assert.ok(lines.includes("  last line: ```"));
+  assert.ok(
+    text.indexOf(
+      "README diagram sync check (readmeDiagramInSync on this repo's README):",
+    ) > diagramAt,
+    "README diagram sync check segment must follow the state diagram generation segment",
+  );
 });
 
 test("demo state diagram generation segment is deterministic: two runs print byte-identical diagram lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("State diagram generation (stateDiagram from the transition table):"),
+      ls.indexOf("README diagram sync check (readmeDiagramInSync on this repo's README):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1711,6 +1725,62 @@ test("demo state diagram generation segment is deterministic: two runs print byt
   assert.equal(a.stateDiagramEdgeCount, b.stateDiagramEdgeCount);
 });
 
+test("demo shows the README diagram sync check segment in-process: the verdict is the hand-pinned true", async () => {
+  const { readmeDiagramInSync: demoSync, stateDiagramText, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectation — written out here from the state
+  // the test suite pins, never derived by calling
+  // readmeDiagramInSync itself: exactly true.
+  assert.equal(demoSync, true);
+  // Cross-check against the library check itself and the
+  // README-embedded copy — the demo segment is not
+  // self-certifying.
+  assert.equal(readmeDiagramInSync(), true);
+  const readme = readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  assert.ok(readme.includes(stateDiagramText));
+  // The segment closes the demo: it follows the state diagram
+  // generation segment, prints its lines verbatim, and its
+  // CLI-equivalent line is the demo's last line.
+  const syncAt = text.indexOf(
+    "README diagram sync check (readmeDiagramInSync on this repo's README):",
+  );
+  assert.ok(
+    syncAt >
+      text.indexOf(
+        "State diagram generation (stateDiagram from the transition table):",
+      ),
+    "README diagram sync check segment must follow the state diagram generation segment",
+  );
+  for (const line of [
+    "  readmeDiagramInSync(): true (README.md embeds the exact stateDiagram() block generated above — no diagram drift)",
+    "  checked file: README.md (this repo only — the sole file read by the check; no network, no wall clock)",
+  ]) {
+    assert.ok(text.includes(line), `missing sync line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  CLI equivalent: node dist/src/diagram.js --check (exit 0 in sync, exit 1 on drift — the same check test/diagram.test.ts runs)",
+  );
+});
+
+test("demo README diagram sync check segment is deterministic: two runs print byte-identical sync lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("README diagram sync check (readmeDiagramInSync on this repo's README):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + verdict / checked-file / CLI-equivalent lines;
+  // every value is the pinned in-sync verdict, so no
+  // normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.readmeDiagramInSync, b.readmeDiagramInSync);
+});
+
 test("CLI entry point still runs as a subprocess and prints the same golden output", async () => {
   const out = execFileSync(
     "node",
@@ -1718,7 +1788,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 285);
+  assert.equal(out.trimEnd().split("\n").length, 290);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

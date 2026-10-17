@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A README diagram sync check segment closing the CLI demo:
+  `readmeDiagramInSync()` — imported directly from
+  `src/diagram.ts` (it is not re-exported from the package
+  entry, the same import the benchmark uses) — reads this
+  repo's README and reports whether it embeds the exact
+  `stateDiagram()` block generated in the previous segment,
+  and the demo prints that verdict plus the checked file and
+  the CLI `--check` equivalent. The segment itself asserts
+  the hand-pinned expectation (`true` — the in-sync state
+  the test suite pins via the CLI `--check` test and the
+  README drift test) outside the printed verdict.
+  `runDemo()` returns the verdict; the demo tests pin it
+  against hand-written expectations cross-checked against
+  the library check itself and the README-embedded copy, the
+  exact printed lines in the golden output, and the
+  segment's printed-line determinism across two runs. The
+  only file read is this repo's `README.md`; no network, no
+  randomness, and no wall clock. Demo and tests only; no
+  library behavior change.
 - Benchmark coverage for SLA overdue judgement:
   `isOverdue(task, now)` over a fixed corpus of 4 tasks now
   appears in `npm run bench`. All four tasks sit in ACCEPTED

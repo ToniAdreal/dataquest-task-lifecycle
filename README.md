@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 530 tests, all local
+npm test   # 532 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -144,7 +144,15 @@ that runs `stateDiagram()` and prints a generation summary:
 the 24-line total and 19-edge count plus the first, second,
 initial, first-edge, last-edge, and last lines (the demo tests
 cross-check the full generated block line by line against
-hand-written expectations and the copy embedded above).
+hand-written expectations and the copy embedded above) — and
+a closing README diagram sync check segment that runs
+`readmeDiagramInSync()` (imported directly from
+`src/diagram.ts`, as the benchmark does) and prints its
+verdict: `true`, the README embeds the exact generated block
+with no diagram drift, asserted outside the printed verdict
+against the hand-pinned expectation and cross-checked
+against the diagram tests (the only file read is this
+README; no network, no randomness, and no wall clock).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1169,7 +1177,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 530 tests covering the happy path, reject→resubmit
+`npm test` runs 532 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
