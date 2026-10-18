@@ -11,6 +11,35 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An SLA deadline clearing segment closing the CLI
+  demo: a dedicated task (DEMO-021) sits in ACCEPTED
+  carrying fixed SLA deadlines for three states —
+  ACCEPTED at `2026-03-25T09:00:00.000Z`, CAPTURING at
+  `2026-03-26T09:00:00.000Z`, and SUBMITTED at
+  `2026-03-27T09:00:00.000Z` — and is overdue at the
+  fixed screening instant `2026-03-25T10:00:00.000Z`.
+  `clearSlaDeadline("ACCEPTED")` clears only the current
+  state's deadline: its read-back is `undefined` and the
+  `isOverdue` verdict at the same instant turns `false`,
+  while the CAPTURING and SUBMITTED deadlines read back
+  untouched; `clearSlaDeadline()` with no argument then
+  clears every remaining deadline (all three states read
+  back `undefined`). Clearing is configuration, not a
+  dispatch — the task stays in ACCEPTED with its 2
+  history entries throughout. The segment itself asserts
+  all of this outside the printed lines against the
+  hand-pinned deadlines and verdicts (cross-checked
+  against the `clearSlaDeadline` source and the SLA
+  tests). `runDemo()` returns the dedicated task, the
+  hand-pinned deadlines, and the before / after verdicts
+  and read-backs; the demo tests pin them against
+  hand-written expectations cross-checked against an
+  independent in-test task, the exact printed lines in
+  the golden output, and the segment's printed-line
+  determinism across two runs. No network, no
+  randomness, and no wall clock (fixed timestamps
+  throughout). Demo and tests only; no library behavior
+  change.
 - An SLA deadline-read benchmark path: `npm run bench`
   now also times `getSlaDeadline(state)` over all 13
   states on one fixed ACCEPTED task carrying a deadline

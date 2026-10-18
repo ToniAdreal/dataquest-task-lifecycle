@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 544 tests, all local
+npm test   # 546 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -223,7 +223,19 @@ and the instance getter, all asserted outside the printed
 lines against the hand-pinned verdicts (cross-checked
 against the `TERMINAL` set in the source and the
 `isTerminal` tests; the branches above only ever showed
-the getter as a `(terminal: …)` aside).
+the getter as a `(terminal: …)` aside) — and a closing
+SLA deadline clearing segment that drives a dedicated
+task (DEMO-021) in ACCEPTED carrying fixed deadlines for
+ACCEPTED, CAPTURING, and SUBMITTED, overdue at a fixed
+instant: `clearSlaDeadline("ACCEPTED")` clears only that
+state (its read-back is `undefined` and the overdue
+verdict turns `false`, the other states untouched), and
+`clearSlaDeadline()` with no argument then clears every
+remaining deadline — the renegotiated / cancelled
+deadline revocation, asserted outside the printed lines
+against the hand-pinned deadlines and verdicts
+(cross-checked against the `clearSlaDeadline` source and
+the SLA tests).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1248,7 +1260,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 544 tests covering the happy path, reject→resubmit
+`npm test` runs 546 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

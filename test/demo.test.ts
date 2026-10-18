@@ -396,11 +396,17 @@ Terminal-state judgement (isTerminal over all 13 states):
   EXPIRED         -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())
   terminal states: PAID, ABANDONED, EXPIRED (3 of 13 states)
   cross-check: the isTerminal set equals the transition table's no-outgoing-edge set (PAID, ABANDONED, EXPIRED): true (every terminal state has no outgoing edges, and every state with no outgoing edges is terminal)
-  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)`;
+  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)
+
+SLA deadline clearing (clearSlaDeadline on a fixed task):
+  before clearing: DEMO-021 (ACCEPTED, ACCEPTED deadline <timestamp>) at <timestamp> -> isOverdue: true (past its ACCEPTED deadline; CAPTURING and SUBMITTED also carry deadlines)
+  clear one state: clearSlaDeadline("ACCEPTED") -> getSlaDeadline("ACCEPTED"): undefined, isOverdue at the same instant: false (a renegotiated or cancelled deadline no longer makes the task overdue)
+  other states untouched: getSlaDeadline("CAPTURING"): <timestamp>, getSlaDeadline("SUBMITTED"): <timestamp> (clearing one state leaves the other states' deadlines in place)
+  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state's deadline is cleared)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 338);
+  assert.equal(lines.length, 344);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1845,7 +1851,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 338);
+  assert.equal(out.trimEnd().split("\n").length, 344);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2715,9 +2721,9 @@ test("demo shows the terminal-state judgement segment in-process: all 13 states 
   assert.equal(task.state, "PAID");
   assert.equal(isTerminal(task.state), true);
   assert.equal(task.isTerminal, true);
-  // The segment closes the demo: it follows the standalone
-  // overdue judgement segment, prints its lines verbatim,
-  // and its main-task line is the demo's last line.
+  // The segment follows the standalone overdue judgement
+  // segment and prints its lines verbatim (the SLA deadline
+  // clearing segment now closes the demo after it).
   const terminalAt = text.indexOf(
     "Terminal-state judgement (isTerminal over all 13 states):",
   );
@@ -2746,15 +2752,26 @@ test("demo shows the terminal-state judgement segment in-process: all 13 states 
   ]) {
     assert.ok(text.includes(line), `missing terminal-state line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)",
+  assert.ok(
+    lines.includes(
+      "  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)",
+    ),
+  );
+  // The SLA deadline clearing segment closes the demo after
+  // this one (its own test pins the demo's last line).
+  assert.ok(
+    text.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):") >
+      terminalAt,
+    "SLA deadline clearing segment must follow the terminal-state judgement segment",
   );
 });
 
 test("demo terminal-state judgement segment is deterministic: two runs print byte-identical judgement lines", async () => {
   const segment = (ls: string[]) =>
-    ls.slice(ls.indexOf("Terminal-state judgement (isTerminal over all 13 states):"));
+    ls.slice(
+      ls.indexOf("Terminal-state judgement (isTerminal over all 13 states):"),
+      ls.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):") - 1,
+    );
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -2767,4 +2784,111 @@ test("demo terminal-state judgement segment is deterministic: two runs print byt
   assert.deepEqual(a.terminalByState, b.terminalByState);
   assert.deepEqual(a.terminalStates, b.terminalStates);
   assert.deepEqual(a.noOutEdgeStates, b.noOutEdgeStates);
+});
+
+test("demo shows the SLA deadline clearing segment in-process: per-state clear revokes overdue, no-arg clear revokes all", async () => {
+  const {
+    slaClearTask,
+    slaClearDeadline,
+    slaClearOtherDeadlines,
+    slaClearOverdueBefore,
+    slaClearOverdueAfterStateClear,
+    slaClearAcceptedAfterStateClear,
+    slaClearOthersAfterStateClear,
+    slaClearAfterAllClear,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // clearSlaDeadline source and the SLA tests, never derived
+  // by calling the clearing methods themselves.
+  assert.equal(slaClearDeadline, "2026-03-25T09:00:00.000Z");
+  assert.deepEqual(slaClearOtherDeadlines, [
+    "2026-03-26T09:00:00.000Z",
+    "2026-03-27T09:00:00.000Z",
+  ]);
+  assert.equal(slaClearOverdueBefore, true);
+  assert.equal(slaClearAcceptedAfterStateClear, undefined);
+  assert.equal(slaClearOverdueAfterStateClear, false);
+  assert.deepEqual(slaClearOthersAfterStateClear, [
+    "2026-03-26T09:00:00.000Z",
+    "2026-03-27T09:00:00.000Z",
+  ]);
+  assert.deepEqual(slaClearAfterAllClear, [undefined, undefined, undefined]);
+  assert.equal(slaClearTask.id, "DEMO-021");
+  assert.equal(slaClearTask.state, "ACCEPTED");
+  assert.equal(slaClearTask.history.length, 2);
+  assert.equal(slaClearTask.getSlaDeadline("ACCEPTED"), undefined);
+  assert.equal(slaClearTask.getSlaDeadline("CAPTURING"), undefined);
+  assert.equal(slaClearTask.getSlaDeadline("SUBMITTED"), undefined);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh task reproduces the same
+  // before / after verdicts at the same fixed instant.
+  const independent = new TaskLifecycle("sla-clear-check");
+  independent.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-25T07:00:00.000Z",
+  });
+  independent.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-25T07:05:00.000Z",
+  });
+  independent.setSlaDeadline("2026-03-25T09:00:00.000Z");
+  independent.setSlaDeadline("2026-03-26T09:00:00.000Z", "CAPTURING");
+  const NOW = new Date("2026-03-25T10:00:00.000Z");
+  assert.equal(isOverdue(independent, NOW), true);
+  independent.clearSlaDeadline("ACCEPTED");
+  assert.equal(independent.getSlaDeadline("ACCEPTED"), undefined);
+  assert.equal(isOverdue(independent, NOW), false);
+  assert.equal(
+    independent.getSlaDeadline("CAPTURING"),
+    "2026-03-26T09:00:00.000Z",
+  );
+  independent.clearSlaDeadline();
+  assert.equal(independent.getSlaDeadline("CAPTURING"), undefined);
+  // The segment closes the demo: it follows the terminal-state
+  // judgement segment, prints its lines verbatim, and its
+  // clear-all line is the demo's last line.
+  const clearAt = text.indexOf(
+    "SLA deadline clearing (clearSlaDeadline on a fixed task):",
+  );
+  assert.ok(
+    clearAt >
+      text.indexOf("Terminal-state judgement (isTerminal over all 13 states):"),
+    "SLA deadline clearing segment must follow the terminal-state judgement segment",
+  );
+  for (const line of [
+    "  before clearing: DEMO-021 (ACCEPTED, ACCEPTED deadline 2026-03-25T09:00:00.000Z) at 2026-03-25T10:00:00.000Z -> isOverdue: true (past its ACCEPTED deadline; CAPTURING and SUBMITTED also carry deadlines)",
+    '  clear one state: clearSlaDeadline("ACCEPTED") -> getSlaDeadline("ACCEPTED"): undefined, isOverdue at the same instant: false (a renegotiated or cancelled deadline no longer makes the task overdue)',
+    '  other states untouched: getSlaDeadline("CAPTURING"): 2026-03-26T09:00:00.000Z, getSlaDeadline("SUBMITTED"): 2026-03-27T09:00:00.000Z (clearing one state leaves the other states\' deadlines in place)',
+    '  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state\'s deadline is cleared)',
+  ]) {
+    assert.ok(text.includes(line), `missing SLA clearing line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    '  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state\'s deadline is cleared)',
+  );
+});
+
+test("demo SLA deadline clearing segment is deterministic: two runs print byte-identical clearing lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(ls.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):"));
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + before / clear-one / other-states / clear-all
+  // lines; every value is a hand-pinned constant under fixed
+  // timestamps, so no normalization is needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.slaClearDeadline, b.slaClearDeadline);
+  assert.deepEqual(a.slaClearOtherDeadlines, b.slaClearOtherDeadlines);
+  assert.equal(a.slaClearOverdueBefore, b.slaClearOverdueBefore);
+  assert.equal(
+    a.slaClearOverdueAfterStateClear,
+    b.slaClearOverdueAfterStateClear,
+  );
+  assert.deepEqual(a.slaClearAfterAllClear, b.slaClearAfterAllClear);
 });

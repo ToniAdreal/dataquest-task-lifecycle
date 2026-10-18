@@ -171,7 +171,16 @@
  * the transition table itself: it is exactly the set of
  * states with no outgoing edges (the branches above only
  * ever showed the instance getter as a `(terminal: …)`
- * aside on a branch's final line, never the full set).
+ * aside on a branch's final line, never the full set) —
+ * and finally an SLA deadline clearing segment: a dedicated
+ * task carries fixed SLA deadlines for three states and is
+ * overdue at a fixed instant; `clearSlaDeadline(state)`
+ * clears only its current state's deadline (the read-back
+ * is `undefined` and the overdue verdict turns `false`),
+ * and `clearSlaDeadline()` with no argument then clears
+ * the remaining states' deadlines — the renegotiated /
+ * cancelled deadline a reader would otherwise never see
+ * revoked, shown instead of only asserted by the SLA tests.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -207,7 +216,10 @@
  * deadline, and terminal), the terminal-state judgement
  * segment's per-state verdicts with the terminal set and
  * the transition table's no-outgoing-edge set it is
- * cross-checked against, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * cross-checked against, the SLA deadline clearing
+ * segment's dedicated task with its hand-pinned deadlines
+ * and its before / after overdue verdicts and read-backs,
+ * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -428,6 +440,22 @@ export interface DemoResult {
   terminalStates: TaskState[];
   /** States with no outgoing edges in `transitionTable()`, same order. */
   noOutEdgeStates: TaskState[];
+  /** Dedicated task for the clearSlaDeadline segment (DEMO-021). */
+  slaClearTask: TaskLifecycle;
+  /** ACCEPTED-state SLA deadline carried by DEMO-021. */
+  slaClearDeadline: string;
+  /** CAPTURING / SUBMITTED deadlines carried by DEMO-021, in that order. */
+  slaClearOtherDeadlines: string[];
+  /** `isOverdue` verdict for DEMO-021 before any clearing (true). */
+  slaClearOverdueBefore: boolean;
+  /** `isOverdue` verdict after clearing only ACCEPTED (false). */
+  slaClearOverdueAfterStateClear: boolean;
+  /** ACCEPTED read-back after the per-state clear — undefined. */
+  slaClearAcceptedAfterStateClear: string | undefined;
+  /** CAPTURING / SUBMITTED read-backs after the per-state clear. */
+  slaClearOthersAfterStateClear: Array<string | undefined>;
+  /** ACCEPTED / CAPTURING / SUBMITTED read-backs after the no-arg clear. */
+  slaClearAfterAllClear: Array<string | undefined>;
   lines: string[];
 }
 
@@ -2198,7 +2226,90 @@ export async function runDemo(): Promise<DemoResult> {
     `  main task ${task.id} (${task.state}): isTerminal: ${isTerminal(task.state)} (the standalone function and the instance getter agree — a finished task offers no further events)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, lines };
+  // SLA deadline clearing segment (closing): every SLA branch
+  // above sets deadlines and judges overdue, but never shows a
+  // deadline being revoked — yet `clearSlaDeadline` is the only
+  // clearing entry point (per-state, or all states with no
+  // argument), and a renegotiated / cancelled deadline is exactly
+  // the case a watchdog must stop acting on. One dedicated task
+  // is driven under fixed timestamps (no network, no randomness,
+  // no wall clock): DEMO-021 sits in ACCEPTED carrying three
+  // fixed deadlines — ACCEPTED 2026-03-25T09:00:00.000Z,
+  // CAPTURING 2026-03-26T09:00:00.000Z, SUBMITTED
+  // 2026-03-27T09:00:00.000Z — so at the fixed screening instant
+  // 2026-03-25T10:00:00.000Z it is overdue on its current state.
+  // Hand-written expectations — written out here from the
+  // clearSlaDeadline source and the SLA tests, never derived by
+  // calling the clearing methods themselves:
+  //   - before clearing -> isOverdue true;
+  //   - clearSlaDeadline("ACCEPTED") -> getSlaDeadline("ACCEPTED")
+  //     is undefined and isOverdue at the same instant turns
+  //     false, while CAPTURING / SUBMITTED read back untouched;
+  //   - clearSlaDeadline() with no argument -> all three states
+  //     read back undefined.
+  // Clearing is configuration, not a dispatch: the task stays in
+  // ACCEPTED with its 2 history entries throughout. The segment
+  // asserts all of this here, outside the printed lines: a
+  // clearing semantic that drifted would fail the demo itself,
+  // not just a test.
+  const slaClearDeadline = "2026-03-25T09:00:00.000Z";
+  const slaClearOtherDeadlines = [
+    "2026-03-26T09:00:00.000Z",
+    "2026-03-27T09:00:00.000Z",
+  ];
+  const slaClearNow = new Date("2026-03-25T10:00:00.000Z");
+  const slaClearTask = new TaskLifecycle("DEMO-021");
+  slaClearTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-25T07:00:00.000Z",
+  });
+  slaClearTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-25T07:05:00.000Z",
+  });
+  slaClearTask.setSlaDeadline(slaClearDeadline);
+  slaClearTask.setSlaDeadline(slaClearOtherDeadlines[0], "CAPTURING");
+  slaClearTask.setSlaDeadline(slaClearOtherDeadlines[1], "SUBMITTED");
+  const slaClearOverdueBefore = isOverdue(slaClearTask, slaClearNow);
+  slaClearTask.clearSlaDeadline("ACCEPTED");
+  const slaClearAcceptedAfterStateClear =
+    slaClearTask.getSlaDeadline("ACCEPTED");
+  const slaClearOverdueAfterStateClear = isOverdue(slaClearTask, slaClearNow);
+  const slaClearOthersAfterStateClear: Array<string | undefined> = [
+    slaClearTask.getSlaDeadline("CAPTURING"),
+    slaClearTask.getSlaDeadline("SUBMITTED"),
+  ];
+  slaClearTask.clearSlaDeadline();
+  const slaClearAfterAllClear: Array<string | undefined> = [
+    slaClearTask.getSlaDeadline("ACCEPTED"),
+    slaClearTask.getSlaDeadline("CAPTURING"),
+    slaClearTask.getSlaDeadline("SUBMITTED"),
+  ];
+  if (
+    slaClearOverdueBefore !== true ||
+    slaClearAcceptedAfterStateClear !== undefined ||
+    slaClearOverdueAfterStateClear !== false ||
+    slaClearOthersAfterStateClear[0] !== slaClearOtherDeadlines[0] ||
+    slaClearOthersAfterStateClear[1] !== slaClearOtherDeadlines[1] ||
+    slaClearAfterAllClear.length !== 3 ||
+    slaClearAfterAllClear.some((d) => d !== undefined) ||
+    slaClearTask.state !== "ACCEPTED" ||
+    slaClearTask.history.length !== 2
+  ) {
+    throw new Error(
+      "demo fixture broken: clearSlaDeadline does not match the hand-pinned contract (before clearing the task must be overdue, clearing ACCEPTED must read back undefined and turn the verdict false while leaving the other states untouched, and clearing with no argument must clear every state, with no dispatch or history change)",
+    );
+  }
+  lines.push(
+    "",
+    "SLA deadline clearing (clearSlaDeadline on a fixed task):",
+    `  before clearing: ${slaClearTask.id} (ACCEPTED, ACCEPTED deadline ${slaClearDeadline}) at ${slaClearNow.toISOString()} -> isOverdue: ${slaClearOverdueBefore} (past its ACCEPTED deadline; CAPTURING and SUBMITTED also carry deadlines)`,
+    `  clear one state: clearSlaDeadline("ACCEPTED") -> getSlaDeadline("ACCEPTED"): ${slaClearAcceptedAfterStateClear}, isOverdue at the same instant: ${slaClearOverdueAfterStateClear} (a renegotiated or cancelled deadline no longer makes the task overdue)`,
+    `  other states untouched: getSlaDeadline("CAPTURING"): ${slaClearOthersAfterStateClear[0]}, getSlaDeadline("SUBMITTED"): ${slaClearOthersAfterStateClear[1]} (clearing one state leaves the other states' deadlines in place)`,
+    `  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): ${slaClearAfterAllClear[0]}, getSlaDeadline("CAPTURING"): ${slaClearAfterAllClear[1]}, getSlaDeadline("SUBMITTED"): ${slaClearAfterAllClear[2]} (every state's deadline is cleared)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {
