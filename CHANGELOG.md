@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch note length guard benchmark path:
+  `npm run bench` now also times the `MAX_NOTE_LENGTH`
+  boundary in `dispatch()` over a fixed 2-case corpus
+  (a note of exactly 32768 characters accepted on a
+  fresh task, and a note of 32769 characters rejected)
+  — the audit-history anti-inflation guard every
+  dispatch pays, whose cost was previously invisible
+  inside the dispatch totals. Its per-iteration
+  self-check pins both cases to the hand-written
+  expectations in the bench comments (the at-limit
+  dispatch lands in OPEN with exactly 1 history entry
+  whose stored note length is 32768; the over-limit
+  dispatch is rejected with exactly `invalid dispatch
+  options: note must be at most 32768 characters, got
+  32769`, leaving the fresh task in DRAFT with 0
+  history entries; cross-checked against the
+  actor/note hardening tests); the notes are
+  presented only by length and are never printed.
+  The README Benchmarks table is refreshed from one
+  real run and gains the new row
+  (`MAX_NOTE_LENGTH note guard (2-case corpus)` at
+  ~6,908 ops/sec on that run). No network, no
+  randomness, and no wall clock: every dispatch
+  timestamp is fixed. Benchmark only; no library
+  behavior change.
 - An SLA deadline clearing segment closing the CLI
   demo: a dedicated task (DEMO-021) sits in ACCEPTED
   carrying fixed SLA deadlines for three states —

@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-three hot-path
+ * Measures real, locally-observed throughput for the twenty-four hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -267,6 +267,25 @@
  *      randomness, and no wall clock: every dispatch
  *      timestamp and every deadline is fixed.
  *
+ *  24. dispatch note length guard — the `MAX_NOTE_LENGTH`
+ *      boundary in `dispatch()` over a fixed 2-case corpus
+ *      (see the note-length fixture below). This is the
+ *      audit-history anti-inflation guard every dispatch
+ *      pays: a note is written verbatim into the append-only
+ *      history and serialized by every export, so a note
+ *      longer than the limit is rejected before anything
+ *      mutates. Its cost was previously invisible inside the
+ *      dispatch totals. One timed pass is one full corpus
+ *      pass of 2 dispatch attempts on fresh tasks (one
+ *      accepted at exactly the limit, one rejected one
+ *      character over); its per-iteration self-check pins
+ *      the accepted task's state and stored note length and
+ *      the rejected task's untouched state and history to
+ *      the hand-written expectations, and the notes are
+ *      presented only by length, never printed. No network,
+ *      no randomness, and no wall clock: every dispatch
+ *      timestamp is fixed.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -287,6 +306,7 @@ import {
   expireOverdueTasks,
   GENESIS_PREV_HASH,
   historyFromNdjson,
+  MAX_NOTE_LENGTH,
   historyToNdjson,
   isOverdue,
   isTerminal,
@@ -2204,6 +2224,79 @@ if (
 }
 checkGetSlaDeadline("getSlaDeadline fixture after overwrite probe");
 
+// Note-length guard fixture: a fixed 2-case corpus for the
+// `MAX_NOTE_LENGTH` boundary in `dispatch()`. Hand-written
+// expectations — written out here from `src/taskLifecycle.ts`
+// (the exported constant and the dispatch validation) and
+// cross-checked against `test/actorNoteHardening.test.ts`
+// ("dispatch: oversized note is rejected with no history
+// residue" and "dispatch: note at exactly the limit passes"),
+// never derived by calling dispatch itself:
+//   - `MAX_NOTE_LENGTH` is 32768;
+//   - a note of exactly 32768 characters is accepted: a fresh
+//     task dispatched with PUBLISH lands in OPEN with exactly
+//     1 history entry (seq 1) whose stored note is the exact
+//     note, of length 32768;
+//   - a note of 32769 characters is rejected with exactly
+//     "invalid dispatch options: note must be at most 32768
+//     characters, got 32769", before anything mutates: the
+//     fresh task stays in DRAFT with 0 history entries.
+// The filler notes are built once, outside the timed loop,
+// from the hand-pinned limit below — a drift between that
+// pin, the exported constant, and the rejection text fails
+// the bench itself. Notes are presented only by length:
+// neither filler string is ever printed.
+const NOTE_LIMIT_PINNED: number = 32768;
+const NOTE_EXACT = "x".repeat(NOTE_LIMIT_PINNED);
+const NOTE_OVER = "x".repeat(NOTE_LIMIT_PINNED + 1);
+const EXPECTED_NOTE_REJECTION =
+  "invalid dispatch options: note must be at most 32768 characters, got 32769";
+function checkMaxNoteLength(where: string): void {
+  if (
+    MAX_NOTE_LENGTH !== NOTE_LIMIT_PINNED ||
+    NOTE_EXACT.length !== NOTE_LIMIT_PINNED ||
+    NOTE_OVER.length !== NOTE_LIMIT_PINNED + 1
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  const accepted = new TaskLifecycle("BENCH-NOTE-001");
+  accepted.dispatch("PUBLISH", {
+    actor: "researcher",
+    note: NOTE_EXACT,
+    at: new Date(BASE_MS).toISOString(),
+  });
+  if (
+    accepted.state !== "OPEN" ||
+    accepted.history.length !== 1 ||
+    accepted.history[0].seq !== 1 ||
+    accepted.history[0].note !== NOTE_EXACT ||
+    accepted.history[0].note?.length !== NOTE_LIMIT_PINNED
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  const rejected = new TaskLifecycle("BENCH-NOTE-002");
+  let rejection = "";
+  try {
+    rejected.dispatch("PUBLISH", {
+      actor: "researcher",
+      note: NOTE_OVER,
+      at: new Date(BASE_MS).toISOString(),
+    });
+  } catch (err) {
+    rejection = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    rejection !== EXPECTED_NOTE_REJECTION ||
+    rejected.state !== "DRAFT" ||
+    rejected.history.length !== 0
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time exhaustive validation (outside the timed loop):
+// both corpus cases match their hand-written expectations.
+checkMaxNoteLength("MAX_NOTE_LENGTH fixture");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -2519,6 +2612,17 @@ function benchGetSlaDeadline(): number {
   }, ITERATIONS);
 }
 
+function benchMaxNoteLength(): number {
+  return measure(() => {
+    // Fresh tasks per iteration: the accepted dispatch mutates
+    // its task, so no corpus task can be reused across calls.
+    // Per-iteration self-check: the at-limit dispatch appends
+    // exactly one entry and the over-limit dispatch leaves no
+    // trace (see the fixture above).
+    checkMaxNoteLength("MAX_NOTE_LENGTH guard");
+  }, ITERATIONS);
+}
+
 function benchReadmeDiagramInSync(): number {
   return measure(() => {
     // Per-iteration self-check: the return value is the
@@ -2544,7 +2648,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -2581,6 +2685,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "subscribe (full lifecycle, 1 collecting listener)", ops: benchSubscribe() },
   { path: "toJSON + fromJSON snapshot round-trip (8 entries)", ops: benchSnapshotRoundTrip() },
   { path: "getSlaDeadline (13 states, 2 set)", ops: benchGetSlaDeadline() },
+  { path: "MAX_NOTE_LENGTH note guard (2-case corpus)", ops: benchMaxNoteLength() },
 ];
 
 console.log("path                                              throughput");
