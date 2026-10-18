@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A single-step transition dispatch benchmark path:
+  `npm run bench` now also times `benchTransition` —
+  restoring a fixed OPEN snapshot (one `PUBLISH` entry
+  at the fixed base instant) and dispatching exactly
+  one legal step (`ACCEPT` with the quoted amount 125,
+  pinned at `BASE + 1s`) on every iteration — the
+  steady-state cost of a single dispatch (restore plus
+  one hash-chained audit append), previously visible
+  only inside the full-lifecycle aggregate. Its
+  per-iteration self-check pins the hand-written
+  expectations in the bench comments (the state
+  advances exactly one step, OPEN to ACCEPTED; the
+  history grows by exactly one entry; the appended
+  entry's `seq` continues the snapshot's `seq` with no
+  gap — cross-checked against the transition table);
+  outside the timed loop, an exhaustive
+  pure-`transition()` check pins all 13 states x 15
+  events (the 19 legal edges return their hand-pinned
+  targets, every other pair throws exactly
+  `invalid transition: <event> from <state>`), and the
+  illegal `PAYOUT_COMPLETE` dispatch from OPEN is
+  pinned to be rejected with that same message,
+  leaving the restored task untouched. The README
+  Benchmarks table is refreshed from one real run and
+  gains the new row (`benchTransition (single step,
+  snapshot restore)` at ~26,157 ops/sec on that run).
+  No network, no randomness, and no wall clock: every
+  dispatch timestamp is fixed. Benchmark only; no
+  library behavior change.
+
 - An SLA deadline write benchmark path:
   `npm run bench` now also times
   `setSlaDeadline` / `clearSlaDeadline` as one

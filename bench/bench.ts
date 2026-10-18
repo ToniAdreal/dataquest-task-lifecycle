@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-five hot-path
+ * Measures real, locally-observed throughput for the twenty-six hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -312,6 +312,33 @@
  *      wall clock: every dispatch timestamp and every deadline
  *      is fixed.
  *
+ *  26. single-step transition dispatch — `benchTransition`:
+ *      one legal step (`ACCEPT`) dispatched on a task restored
+ *      from the same fixed OPEN snapshot (one PUBLISH entry at
+ *      the fixed base instant) on every iteration (see the
+ *      single-step transition fixture below). This is the
+ *      steady-state cost of a single dispatch — restore plus
+ *      one hash-chained audit append — that the full-lifecycle
+ *      row (group 1) only reports as an 8-step aggregate, so a
+ *      per-step regression could previously hide inside the
+ *      lifecycle average. The restore cost is inside the timed
+ *      region (dispatch mutates the task, so no instance can
+ *      be reused), the same accounting the watchdog-execution
+ *      rows use. Every timed iteration checks the state
+ *      advanced exactly one step (OPEN -> ACCEPTED), the
+ *      history grew by exactly one entry, and the appended
+ *      entry's seq continues the snapshot's seq with no gap.
+ *      Outside the timed loop, an exhaustive pure-`transition()`
+ *      check pins every state/event pair: the 19 legal edges
+ *      return their hand-pinned target and every other pair
+ *      throws the exact message `invalid transition: <event>
+ *      from <state>` — including the one-step illegal dispatch
+ *      PAYOUT_COMPLETE from OPEN, whose rejection through
+ *      `TaskLifecycle.dispatch` is pinned with that same exact
+ *      message and leaves the restored task untouched. No
+ *      network, no randomness, and no wall clock: every
+ *      dispatch timestamp is fixed.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -346,6 +373,7 @@ import {
   stateDiagram,
   TaskLifecycle,
   totalPaidOut,
+  transition,
   transitionTableJson,
   unreconciledPayouts,
   verifyHistoryChain,
@@ -2501,6 +2529,190 @@ if (
 checkSetClearSlaDeadline("set/clear SLA fixture after probes");
 
 // ---------------------------------------------------------------------
+// Single-step transition fixture: one fixed OPEN task — published
+// in a single PUBLISH dispatch at BASE_MS — exported ONCE, outside
+// the timed loop, as a plain snapshot. The timed path restores that
+// snapshot with `TaskLifecycle.fromJSON()` and dispatches exactly
+// one legal step, ACCEPT (carrying the same quotedAmount 125 the
+// full lifecycle's ACCEPT step carries), pinned to BASE_MS + 1s.
+// Hand-written expectations — written out here from the transition
+// table in src/taskLifecycle.ts (OPEN carries ACCEPT -> ACCEPTED;
+// PAYOUT_COMPLETE is not an edge from OPEN) and cross-checked
+// against the committed transition-table snapshot (19 edges),
+// never derived by calling the timed path itself:
+//   - the snapshot is exactly { state OPEN, 1 history entry:
+//     seq 1, PUBLISH, DRAFT -> OPEN, actor researcher, at BASE_MS };
+//   - after the one step, the restored task is in ACCEPTED, its
+//     history holds exactly 2 entries, and the appended entry is
+//     seq 2 (the snapshot's last seq + 1, no gap), ACCEPT,
+//     OPEN -> ACCEPTED, actor contributor, quotedAmount 125, at
+//     BASE_MS + 1s.
+// ---------------------------------------------------------------------
+const TRANSITION_STEP_AT = new Date(BASE_MS + 1000).toISOString();
+const transitionOpenTask = new TaskLifecycle("BENCH-TRANSITION-001");
+transitionOpenTask.dispatch("PUBLISH", {
+  actor: "researcher",
+  at: new Date(BASE_MS).toISOString(),
+});
+const transitionSnapshot: TaskSnapshot = transitionOpenTask.toJSON();
+if (
+  transitionSnapshot.state !== "OPEN" ||
+  transitionSnapshot.history.length !== 1 ||
+  transitionSnapshot.history[0].seq !== 1 ||
+  transitionSnapshot.history[0].event !== "PUBLISH" ||
+  transitionSnapshot.history[0].from !== "DRAFT" ||
+  transitionSnapshot.history[0].to !== "OPEN" ||
+  transitionSnapshot.history[0].actor !== "researcher" ||
+  transitionSnapshot.history[0].at !== new Date(BASE_MS).toISOString()
+) {
+  throw new Error(
+    "benchmark fixture failed: single-step transition snapshot shape",
+  );
+}
+function checkTransitionStep(restored: TaskLifecycle, where: string): void {
+  const history = restored.history;
+  const last = history[history.length - 1];
+  if (
+    restored.state !== "ACCEPTED" ||
+    history.length !== transitionSnapshot.history.length + 1 ||
+    last.seq !==
+      transitionSnapshot.history[transitionSnapshot.history.length - 1].seq +
+        1 ||
+    last.event !== "ACCEPT" ||
+    last.from !== "OPEN" ||
+    last.to !== "ACCEPTED" ||
+    last.actor !== "contributor" ||
+    last.quotedAmount !== 125 ||
+    last.at !== TRANSITION_STEP_AT
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+function runTransitionStep(): TaskLifecycle {
+  const restored = TaskLifecycle.fromJSON(transitionSnapshot);
+  restored.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: TRANSITION_STEP_AT,
+    quotedAmount: 125,
+  });
+  return restored;
+}
+// One-time validation (outside the timed loop): the restored +
+// stepped task matches the hand-written expectations exactly.
+checkTransitionStep(runTransitionStep(), "single-step transition fixture");
+// Exhaustive pure-transition check (outside the timed loop): every
+// state/event pair is pinned — the 19 legal edges (hand-written
+// from the transition table, in declaration order below) return
+// their target, and every other pair throws the exact message
+// `invalid transition: <event> from <state>`.
+{
+  const states: TaskState[] = [
+    "DRAFT",
+    "OPEN",
+    "ACCEPTED",
+    "CAPTURING",
+    "SUBMITTED",
+    "IN_REVIEW",
+    "APPROVED",
+    "PAYOUT_PENDING",
+    "PAID",
+    "REJECTED",
+    "DISPUTED",
+    "ABANDONED",
+    "EXPIRED",
+  ];
+  const events: TaskEvent[] = [
+    "PUBLISH",
+    "ACCEPT",
+    "START_CAPTURE",
+    "SUBMIT",
+    "BEGIN_REVIEW",
+    "APPROVE",
+    "REJECT",
+    "RESUBMIT",
+    "REQUEST_PAYOUT",
+    "PAYOUT_COMPLETE",
+    "DISPUTE",
+    "ARBITRATE_APPROVE",
+    "ARBITRATE_REJECT",
+    "ABANDON",
+    "EXPIRE",
+  ];
+  const legal = new Map<string, TaskState>([
+    ["DRAFT/PUBLISH", "OPEN"],
+    ["OPEN/ACCEPT", "ACCEPTED"],
+    ["OPEN/EXPIRE", "EXPIRED"],
+    ["ACCEPTED/START_CAPTURE", "CAPTURING"],
+    ["ACCEPTED/ABANDON", "ABANDONED"],
+    ["ACCEPTED/EXPIRE", "EXPIRED"],
+    ["CAPTURING/SUBMIT", "SUBMITTED"],
+    ["CAPTURING/ABANDON", "ABANDONED"],
+    ["CAPTURING/EXPIRE", "EXPIRED"],
+    ["SUBMITTED/BEGIN_REVIEW", "IN_REVIEW"],
+    ["SUBMITTED/EXPIRE", "EXPIRED"],
+    ["IN_REVIEW/APPROVE", "APPROVED"],
+    ["IN_REVIEW/REJECT", "REJECTED"],
+    ["APPROVED/REQUEST_PAYOUT", "PAYOUT_PENDING"],
+    ["PAYOUT_PENDING/PAYOUT_COMPLETE", "PAID"],
+    ["REJECTED/DISPUTE", "DISPUTED"],
+    ["REJECTED/RESUBMIT", "CAPTURING"],
+    ["DISPUTED/ARBITRATE_APPROVE", "APPROVED"],
+    ["DISPUTED/ARBITRATE_REJECT", "REJECTED"],
+  ]);
+  if (legal.size !== 19) {
+    throw new Error("benchmark fixture failed: single-step legal edge count");
+  }
+  for (const state of states) {
+    for (const event of events) {
+      const expected = legal.get(`${state}/${event}`);
+      if (expected !== undefined) {
+        if (transition(state, event) !== expected) {
+          throw new Error(
+            `benchmark fixture failed: transition ${event} from ${state}`,
+          );
+        }
+      } else {
+        let message = "";
+        try {
+          transition(state, event);
+        } catch (err) {
+          message = err instanceof Error ? err.message : String(err);
+        }
+        if (message !== `invalid transition: ${event} from ${state}`) {
+          throw new Error(
+            `benchmark fixture failed: transition rejection for ${event} from ${state}`,
+          );
+        }
+      }
+    }
+  }
+  // The one-step illegal dispatch, through TaskLifecycle.dispatch
+  // itself: PAYOUT_COMPLETE from OPEN is rejected with that same
+  // exact message and leaves the restored task's state and history
+  // untouched.
+  const illegal = TaskLifecycle.fromJSON(transitionSnapshot);
+  let illegalMessage = "";
+  try {
+    illegal.dispatch("PAYOUT_COMPLETE", {
+      actor: "system",
+      at: TRANSITION_STEP_AT,
+    });
+  } catch (err) {
+    illegalMessage = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    illegalMessage !== "invalid transition: PAYOUT_COMPLETE from OPEN" ||
+    illegal.state !== "OPEN" ||
+    illegal.history.length !== transitionSnapshot.history.length
+  ) {
+    throw new Error(
+      "benchmark fixture failed: single-step illegal dispatch rejection",
+    );
+  }
+}
+
+
+// ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
 // ---------------------------------------------------------------------
@@ -2838,6 +3050,16 @@ function benchSetClearSlaDeadline(): number {
   }, ITERATIONS);
 }
 
+function benchTransition(): number {
+  return measure(() => {
+    // Per-iteration self-check: the state advanced exactly one
+    // step, the history grew by exactly one entry, and the
+    // appended entry's seq continues the snapshot's seq with no
+    // gap (see the single-step transition fixture above).
+    checkTransitionStep(runTransitionStep(), "benchTransition");
+  }, ITERATIONS);
+}
+
 function benchReadmeDiagramInSync(): number {
   return measure(() => {
     // Per-iteration self-check: the return value is the
@@ -2863,7 +3085,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop; single-step transition dispatch (benchTransition restoring the fixed OPEN snapshot \u2014 1 PUBLISH entry at the base instant \u2014 and dispatching one ACCEPT step pinned at BASE + 1s with quotedAmount 125, checked on every iteration for the one-step state advance OPEN -> ACCEPTED, exactly one appended entry, and a gap-free seq continuation, with an exhaustive pure-transition check over all 13 states x 15 events \u2014 19 legal edges returning their hand-pinned targets, every other pair throwing the exact invalid-transition message, including the illegal PAYOUT_COMPLETE dispatch from OPEN \u2014 asserted once outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -2902,6 +3124,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "getSlaDeadline (13 states, 2 set)", ops: benchGetSlaDeadline() },
   { path: "MAX_NOTE_LENGTH note guard (2-case corpus)", ops: benchMaxNoteLength() },
   { path: "setSlaDeadline + clearSlaDeadline (OPEN task write cycle)", ops: benchSetClearSlaDeadline() },
+  { path: "benchTransition (single step, snapshot restore)", ops: benchTransition() },
 ];
 
 console.log("path                                              throughput");
