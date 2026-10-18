@@ -18,6 +18,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
+  isTerminal,
   parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
@@ -27,6 +28,7 @@ import {
   transitionTableJson,
   verifyHistoryChain,
   verifyPayoutWebhook,
+  type TaskState,
 } from "../src/index.js";
 
 const repoRoot = path.dirname(
@@ -376,11 +378,29 @@ Standalone overdue judgement (isOverdue on fixed tasks):
   exactly at the deadline: DEMO-018 at <timestamp> -> isOverdue: true (the boundary is inclusive — now >= deadline)
   after the deadline: DEMO-018 at <timestamp> -> isOverdue: true (past the deadline and still non-terminal)
   no deadline set: DEMO-019 (ACCEPTED, no SLA deadline) at <timestamp> -> isOverdue: false (a task with no deadline is never overdue)
-  terminal state: DEMO-020 (ABANDONED, deadline <timestamp>) at <timestamp> -> isOverdue: false (a finished task is no longer overdue, even past its deadline)`;
+  terminal state: DEMO-020 (ABANDONED, deadline <timestamp>) at <timestamp> -> isOverdue: false (a finished task is no longer overdue, even past its deadline)
+
+Terminal-state judgement (isTerminal over all 13 states):
+  DRAFT           -> isTerminal: false (1 outgoing edge in transitionTable())
+  OPEN            -> isTerminal: false (2 outgoing edges in transitionTable())
+  ACCEPTED        -> isTerminal: false (3 outgoing edges in transitionTable())
+  CAPTURING       -> isTerminal: false (3 outgoing edges in transitionTable())
+  SUBMITTED       -> isTerminal: false (2 outgoing edges in transitionTable())
+  IN_REVIEW       -> isTerminal: false (2 outgoing edges in transitionTable())
+  APPROVED        -> isTerminal: false (1 outgoing edge in transitionTable())
+  PAYOUT_PENDING  -> isTerminal: false (1 outgoing edge in transitionTable())
+  PAID            -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())
+  REJECTED        -> isTerminal: false (2 outgoing edges in transitionTable())
+  DISPUTED        -> isTerminal: false (2 outgoing edges in transitionTable())
+  ABANDONED       -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())
+  EXPIRED         -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())
+  terminal states: PAID, ABANDONED, EXPIRED (3 of 13 states)
+  cross-check: the isTerminal set equals the transition table's no-outgoing-edge set (PAID, ABANDONED, EXPIRED): true (every terminal state has no outgoing edges, and every state with no outgoing edges is terminal)
+  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 320);
+  assert.equal(lines.length, 338);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1825,7 +1845,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 320);
+  assert.equal(out.trimEnd().split("\n").length, 338);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2603,9 +2623,9 @@ test("demo shows the standalone overdue judgement segment in-process: five bound
   assert.equal(isOverdue(independent, new Date("2026-03-24T10:00:00.000Z")), true);
   independent.clearSlaDeadline();
   assert.equal(isOverdue(independent, new Date("2026-03-24T10:00:00.000Z")), false);
-  // The segment closes the demo: it follows the note length
-  // limit segment, prints its lines verbatim, and its
-  // terminal-state line is the demo's last line.
+  // The segment follows the note length limit segment and
+  // prints its lines verbatim (the terminal-state judgement
+  // segment now closes the demo after it).
   const overdueAt = text.indexOf(
     "Standalone overdue judgement (isOverdue on fixed tasks):",
   );
@@ -2623,15 +2643,21 @@ test("demo shows the standalone overdue judgement segment in-process: five bound
   ]) {
     assert.ok(text.includes(line), `missing overdue judgement line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  terminal state: DEMO-020 (ABANDONED, deadline 2026-03-24T09:00:00.000Z) at 2026-03-24T10:00:00.000Z -> isOverdue: false (a finished task is no longer overdue, even past its deadline)",
+  // The terminal-state judgement segment closes the demo
+  // after this one (its own test pins the demo's last line).
+  assert.ok(
+    text.indexOf("Terminal-state judgement (isTerminal over all 13 states):") >
+      overdueAt,
+    "terminal-state judgement segment must follow the standalone overdue judgement segment",
   );
 });
 
 test("demo standalone overdue judgement segment is deterministic: two runs print byte-identical judgement lines", async () => {
   const segment = (ls: string[]) =>
-    ls.slice(ls.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):"));
+    ls.slice(
+      ls.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):"),
+      ls.indexOf("Terminal-state judgement (isTerminal over all 13 states):") - 1,
+    );
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -2642,4 +2668,103 @@ test("demo standalone overdue judgement segment is deterministic: two runs print
   assert.deepEqual(segA, segment(b.lines));
   assert.equal(a.overdueStandaloneDeadline, b.overdueStandaloneDeadline);
   assert.deepEqual(a.overdueStandaloneVerdicts, b.overdueStandaloneVerdicts);
+});
+
+test("demo shows the terminal-state judgement segment in-process: all 13 states with the no-outgoing-edge cross-check", async () => {
+  const { task, terminalByState, terminalStates, noOutEdgeStates, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TERMINAL set in src/taskLifecycle.ts and the isTerminal
+  // tests, never derived by calling isTerminal itself: only
+  // PAID / ABANDONED / EXPIRED are terminal.
+  const EXPECTED: Array<{ state: TaskState; terminal: boolean }> = [
+    { state: "DRAFT", terminal: false },
+    { state: "OPEN", terminal: false },
+    { state: "ACCEPTED", terminal: false },
+    { state: "CAPTURING", terminal: false },
+    { state: "SUBMITTED", terminal: false },
+    { state: "IN_REVIEW", terminal: false },
+    { state: "APPROVED", terminal: false },
+    { state: "PAYOUT_PENDING", terminal: false },
+    { state: "PAID", terminal: true },
+    { state: "REJECTED", terminal: false },
+    { state: "DISPUTED", terminal: false },
+    { state: "ABANDONED", terminal: true },
+    { state: "EXPIRED", terminal: true },
+  ];
+  assert.deepEqual(terminalByState, EXPECTED);
+  assert.deepEqual(terminalStates, ["PAID", "ABANDONED", "EXPIRED"]);
+  assert.deepEqual(noOutEdgeStates, ["PAID", "ABANDONED", "EXPIRED"]);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the standalone function reproduces
+  // the same verdicts, and the transition table's own shape
+  // (states with no outgoing edge, 19 edges in total)
+  // reproduces the same terminal set.
+  for (const { state, terminal } of EXPECTED) {
+    assert.equal(isTerminal(state), terminal, `state ${state}`);
+  }
+  const edges = transitionTable();
+  assert.equal(edges.length, 19);
+  const withOutgoing = new Set(edges.map((e) => e.from));
+  assert.deepEqual(
+    EXPECTED.map(({ state }) => state).filter((s) => !withOutgoing.has(s)),
+    ["PAID", "ABANDONED", "EXPIRED"],
+  );
+  assert.equal(task.state, "PAID");
+  assert.equal(isTerminal(task.state), true);
+  assert.equal(task.isTerminal, true);
+  // The segment closes the demo: it follows the standalone
+  // overdue judgement segment, prints its lines verbatim,
+  // and its main-task line is the demo's last line.
+  const terminalAt = text.indexOf(
+    "Terminal-state judgement (isTerminal over all 13 states):",
+  );
+  assert.ok(
+    terminalAt >
+      text.indexOf("Standalone overdue judgement (isOverdue on fixed tasks):"),
+    "terminal-state judgement segment must follow the standalone overdue judgement segment",
+  );
+  for (const line of [
+    "  DRAFT           -> isTerminal: false (1 outgoing edge in transitionTable())",
+    "  OPEN            -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  ACCEPTED        -> isTerminal: false (3 outgoing edges in transitionTable())",
+    "  CAPTURING       -> isTerminal: false (3 outgoing edges in transitionTable())",
+    "  SUBMITTED       -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  IN_REVIEW       -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  APPROVED        -> isTerminal: false (1 outgoing edge in transitionTable())",
+    "  PAYOUT_PENDING  -> isTerminal: false (1 outgoing edge in transitionTable())",
+    "  PAID            -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())",
+    "  REJECTED        -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  DISPUTED        -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  ABANDONED       -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())",
+    "  EXPIRED         -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())",
+    "  terminal states: PAID, ABANDONED, EXPIRED (3 of 13 states)",
+    "  cross-check: the isTerminal set equals the transition table's no-outgoing-edge set (PAID, ABANDONED, EXPIRED): true (every terminal state has no outgoing edges, and every state with no outgoing edges is terminal)",
+    "  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)",
+  ]) {
+    assert.ok(text.includes(line), `missing terminal-state line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  main task DEMO-001 (PAID): isTerminal: true (the standalone function and the instance getter agree — a finished task offers no further events)",
+  );
+});
+
+test("demo terminal-state judgement segment is deterministic: two runs print byte-identical judgement lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(ls.indexOf("Terminal-state judgement (isTerminal over all 13 states):"));
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + 13 state lines + terminal-set / cross-check /
+  // main-task lines; every value is a hand-pinned constant
+  // derived from the transition table alone, so no
+  // normalization is needed.
+  assert.equal(segA.length, 17);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.terminalByState, b.terminalByState);
+  assert.deepEqual(a.terminalStates, b.terminalStates);
+  assert.deepEqual(a.noOutEdgeStates, b.noOutEdgeStates);
 });

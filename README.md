@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 542 tests, all local
+npm test   # 544 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -209,7 +209,21 @@ deadline `true`, the no-deadline task `false`, and the
 terminal task past its deadline `false` — the advisory
 SLA judgement itself, asserted outside the printed lines
 against the hand-pinned verdicts (cross-checked against
-the `isOverdue` source and the SLA tests).
+the `isOverdue` source and the SLA tests) — and a closing
+terminal-state judgement segment that calls the standalone
+`isTerminal(state)` over all 13 states in transition-table
+order and prints every verdict with that state's
+outgoing-edge count: only PAID / ABANDONED / EXPIRED are
+terminal (3 of 13), and the segment cross-checks the
+printed set against the transition table itself — it is
+exactly the set of states with no outgoing edges in
+`transitionTable()` — with the main task's PAID state
+called out as terminal under both the standalone function
+and the instance getter, all asserted outside the printed
+lines against the hand-pinned verdicts (cross-checked
+against the `TERMINAL` set in the source and the
+`isTerminal` tests; the branches above only ever showed
+the getter as a `(terminal: …)` aside).
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1234,7 +1248,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 542 tests covering the happy path, reject→resubmit
+`npm test` runs 544 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

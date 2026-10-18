@@ -11,6 +11,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A terminal-state judgement segment closing the CLI
+  demo: the standalone `isTerminal(state)` is called over
+  all 13 states in transition-table declaration order and
+  every verdict is printed with that state's outgoing-edge
+  count — only PAID / ABANDONED / EXPIRED are terminal
+  (3 of 13, each with 0 outgoing edges; the other ten
+  states carry 1–3 outgoing edges, 19 edges in total). The
+  segment itself asserts all of this outside the printed
+  lines against the hand-pinned verdicts and counts
+  (cross-checked against the `TERMINAL` set in the source
+  and the `isTerminal` tests) and cross-checks the two
+  views against each other: the isTerminal set equals,
+  state for state, the set of states with no outgoing edge
+  in `transitionTable()`, whose from/to enumeration is
+  exactly the 13 listed states; the main task's PAID state
+  reads terminal under both the standalone function and
+  the instance getter. `runDemo()` returns the per-state
+  verdicts, the terminal set, and the no-outgoing-edge
+  set; the demo tests pin them against hand-written
+  expectations cross-checked against an independent
+  in-test recomputation, the exact printed lines in the
+  golden output, and the segment's printed-line
+  determinism across two runs. No network, no randomness,
+  and no wall clock (the segment reads only the transition
+  table). Demo and tests only; no library behavior change.
 - Envelope-rejection benchmark self-checks for the JSON
   snapshot round-trip: the `toJSON + fromJSON snapshot
   round-trip (8 entries)` path in `npm run bench` (timed

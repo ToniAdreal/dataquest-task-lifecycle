@@ -161,7 +161,17 @@
  * deadline `false`, and a terminal task past its deadline
  * `false` — the advisory SLA judgement itself, shown
  * instead of only asserted by the SLA tests (the watchdog
- * branches above show the batch screens built on it).
+ * branches above show the batch screens built on it) —
+ * and finally a terminal-state judgement segment:
+ * the standalone `isTerminal(state)` is called over all
+ * 13 states in transition-table declaration order and
+ * every verdict is printed with that state's outgoing-edge
+ * count — only PAID / ABANDONED / EXPIRED are terminal —
+ * and the printed terminal set is cross-checked against
+ * the transition table itself: it is exactly the set of
+ * states with no outgoing edges (the branches above only
+ * ever showed the instance getter as a `(terminal: …)`
+ * aside on a branch's final line, never the full set).
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -194,7 +204,10 @@
  * history length, the standalone overdue judgement
  * segment's three tasks with its hand-pinned deadline and
  * its five verdicts (before / at / after the deadline, no
- * deadline, and terminal), plus the exact `lines` the CLI prints — so tests assert on structured values
+ * deadline, and terminal), the terminal-state judgement
+ * segment's per-state verdicts with the terminal set and
+ * the transition table's no-outgoing-edge set it is
+ * cross-checked against, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -219,6 +232,7 @@ import {
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
+  isTerminal,
   MAX_NOTE_LENGTH,
   mismatchedPayouts,
   parseHistory,
@@ -408,6 +422,12 @@ export interface DemoResult {
   overdueStandaloneDeadline: string;
   /** `isOverdue` verdicts in case order: before, at, after, no-deadline, terminal. */
   overdueStandaloneVerdicts: boolean[];
+  /** `isTerminal(state)` for every state, in transition-table order. */
+  terminalByState: Array<{ state: TaskState; terminal: boolean }>;
+  /** States where `isTerminal(state)` is true, in transition-table order. */
+  terminalStates: TaskState[];
+  /** States with no outgoing edges in `transitionTable()`, same order. */
+  noOutEdgeStates: TaskState[];
   lines: string[];
 }
 
@@ -2047,7 +2067,138 @@ export async function runDemo(): Promise<DemoResult> {
     `  terminal state: ${overdueStandaloneTerminalTask.id} (ABANDONED, deadline ${overdueStandaloneDeadline}) at ${overdueAfterAt.toISOString()} -> isOverdue: ${overdueStandaloneVerdicts[4]} (a finished task is no longer overdue, even past its deadline)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, lines };
+  // Terminal-state judgement segment (closing): every branch
+  // above shows terminality only as an aside — the instance
+  // getter in a branch's `(terminal: …)` final line — and the
+  // allowed-events listing shows its consequence (the empty
+  // list) without ever naming the standalone predicate or
+  // presenting the full terminal set at once. Here
+  // `isTerminal(state)` is called over all 13 states in
+  // transition-table declaration order (the `ALL_STATES` list
+  // the allowed-events segment built) and every verdict is
+  // printed with that state's outgoing-edge count. The
+  // function is pure: no task instance, no dispatch, no
+  // network, no randomness, no wall clock. Hand-written
+  // expectations — written out here from the TERMINAL set in
+  // src/taskLifecycle.ts and the isTerminal tests, never
+  // derived by calling isTerminal itself:
+  //   DRAFT          -> false (1 outgoing edge)
+  //   OPEN           -> false (2 outgoing edges)
+  //   ACCEPTED       -> false (3 outgoing edges)
+  //   CAPTURING      -> false (3 outgoing edges)
+  //   SUBMITTED      -> false (2 outgoing edges)
+  //   IN_REVIEW      -> false (2 outgoing edges)
+  //   APPROVED       -> false (1 outgoing edge)
+  //   PAYOUT_PENDING -> false (1 outgoing edge)
+  //   PAID           -> true  (terminal, 0 outgoing edges)
+  //   REJECTED       -> false (2 outgoing edges)
+  //   DISPUTED       -> false (2 outgoing edges)
+  //   ABANDONED      -> true  (terminal, 0 outgoing edges)
+  //   EXPIRED        -> true  (terminal, 0 outgoing edges)
+  // The outgoing counts are the transition table's own shape
+  // (19 edges in total), and the segment cross-checks the two
+  // views against each other outside the printed lines: the
+  // isTerminal set must equal, state for state, the set of
+  // states with no outgoing edge in `transitionTable()`, and
+  // the states enumerated from the table (every edge's from
+  // and to) must be exactly the 13 listed. A judgement that
+  // drifted from either view would fail the demo itself, not
+  // just a test.
+  const terminalExpected: Record<TaskState, boolean> = {
+    DRAFT: false,
+    OPEN: false,
+    ACCEPTED: false,
+    CAPTURING: false,
+    SUBMITTED: false,
+    IN_REVIEW: false,
+    APPROVED: false,
+    PAYOUT_PENDING: false,
+    PAID: true,
+    REJECTED: false,
+    DISPUTED: false,
+    ABANDONED: true,
+    EXPIRED: true,
+  };
+  const outgoingExpected: Record<TaskState, number> = {
+    DRAFT: 1,
+    OPEN: 2,
+    ACCEPTED: 3,
+    CAPTURING: 3,
+    SUBMITTED: 2,
+    IN_REVIEW: 2,
+    APPROVED: 1,
+    PAYOUT_PENDING: 1,
+    PAID: 0,
+    REJECTED: 2,
+    DISPUTED: 2,
+    ABANDONED: 0,
+    EXPIRED: 0,
+  };
+  const terminalEdges = transitionTable();
+  const enumeratedStates = new Set<TaskState>();
+  for (const edge of terminalEdges) {
+    enumeratedStates.add(edge.from);
+    enumeratedStates.add(edge.to);
+  }
+  const outgoingCounts = new Map<TaskState, number>(
+    ALL_STATES.map((state) => [state, 0]),
+  );
+  for (const edge of terminalEdges) {
+    outgoingCounts.set(edge.from, (outgoingCounts.get(edge.from) ?? 0) + 1);
+  }
+  const terminalByState = ALL_STATES.map((state) => ({
+    state,
+    terminal: isTerminal(state),
+  }));
+  const terminalStates = terminalByState
+    .filter(({ terminal }) => terminal)
+    .map(({ state }) => state);
+  const noOutEdgeStates = ALL_STATES.filter(
+    (state) => (outgoingCounts.get(state) ?? 0) === 0,
+  );
+  const terminalCrossCheckMatches =
+    terminalStates.length === noOutEdgeStates.length &&
+    terminalStates.every((state, i) => state === noOutEdgeStates[i]);
+  if (
+    ALL_STATES.length !== 13 ||
+    enumeratedStates.size !== 13 ||
+    !ALL_STATES.every((state) => enumeratedStates.has(state)) ||
+    terminalEdges.length !== 19 ||
+    terminalByState.length !== 13 ||
+    !terminalByState.every(
+      ({ state, terminal }) => terminal === terminalExpected[state],
+    ) ||
+    !ALL_STATES.every(
+      (state) => outgoingCounts.get(state) === outgoingExpected[state],
+    ) ||
+    terminalStates.join(",") !== "PAID,ABANDONED,EXPIRED" ||
+    !terminalCrossCheckMatches ||
+    isTerminal(task.state) !== true ||
+    task.isTerminal !== true
+  ) {
+    throw new Error(
+      "demo fixture broken: isTerminal judgement does not match the hand-pinned contract (only PAID / ABANDONED / EXPIRED are terminal, the terminal set must equal the transition table's no-outgoing-edge set, and the main task's PAID state must read terminal both ways)",
+    );
+  }
+  lines.push(
+    "",
+    "Terminal-state judgement (isTerminal over all 13 states):",
+  );
+  for (const { state, terminal } of terminalByState) {
+    const outgoing = outgoingCounts.get(state) ?? 0;
+    lines.push(
+      terminal
+        ? `  ${state.padEnd(15)} -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())`
+        : `  ${state.padEnd(15)} -> isTerminal: false (${outgoing} outgoing edge${outgoing === 1 ? "" : "s"} in transitionTable())`,
+    );
+  }
+  lines.push(
+    `  terminal states: ${terminalStates.join(", ")} (${terminalStates.length} of ${ALL_STATES.length} states)`,
+    `  cross-check: the isTerminal set equals the transition table's no-outgoing-edge set (${noOutEdgeStates.join(", ")}): ${terminalCrossCheckMatches} (every terminal state has no outgoing edges, and every state with no outgoing edges is terminal)`,
+    `  main task ${task.id} (${task.state}): isTerminal: ${isTerminal(task.state)} (the standalone function and the instance getter agree — a finished task offers no further events)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, lines };
 }
 
 async function main(): Promise<void> {
