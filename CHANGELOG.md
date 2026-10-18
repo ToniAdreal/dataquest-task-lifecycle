@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An SLA deadline-read benchmark path: `npm run bench`
+  now also times `getSlaDeadline(state)` over all 13
+  states on one fixed ACCEPTED task carrying a deadline
+  for exactly two states (OPEN at
+  `2026-02-01T09:00:00.000Z` and ACCEPTED at
+  `2026-03-01T09:00:00.000Z`) — the read a watchdog pays
+  on every poll tick before it may judge overdue, whose
+  cost was previously invisible inside the watchdog /
+  `isOverdue` totals. Its per-iteration self-check pins
+  every returned value to the hand-written expectations
+  in the bench comments (the two set states return their
+  fixed ISO deadlines, the other eleven states return
+  `undefined`, and the no-argument form returns the
+  current ACCEPTED state's deadline; cross-checked
+  against the SLA tests); outside the timed loop, an
+  exhaustive check on a separate probe task pins that
+  overwriting a deadline reads back the new value and
+  leaves the timed fixture untouched. The README
+  Benchmarks table is refreshed from one real run and
+  gains the new row (`getSlaDeadline (13 states, 2 set)`
+  at ~681,379 ops/sec on that run). No network, no
+  randomness, and no wall clock: every dispatch
+  timestamp and every deadline is fixed. Benchmark
+  only; no library behavior change.
 - A terminal-state judgement segment closing the CLI
   demo: the standalone `isTerminal(state)` is called over
   all 13 states in transition-table declaration order and

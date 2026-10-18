@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-two hot-path
+ * Measures real, locally-observed throughput for the twenty-three hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -247,6 +247,25 @@
  *      field is rejected with the unknown-field error. No
  *      network, no randomness, and no wall clock: every
  *      dispatch timestamp is fixed.
+ *
+ *  23. SLA deadline read — `getSlaDeadline(state)` over all
+ *      13 states on one fixed task (see the getSlaDeadline
+ *      fixture below). This is the read a watchdog pays on
+ *      every poll tick before it may judge overdue: look up
+ *      the deadline attached to a state, or `undefined` when
+ *      none is set. Its cost was previously invisible inside
+ *      the watchdog / isOverdue totals (those paths call it
+ *      internally for one state at a time). One timed pass
+ *      is one full state-set pass of 13 per-state calls on a
+ *      task carrying deadlines for exactly two states; the
+ *      other eleven states must read back `undefined`, and
+ *      the no-argument form must read back the current
+ *      state's deadline. Outside the timed loop, an
+ *      exhaustive check on a separate probe task pins that
+ *      overwriting a deadline reads back the new value and
+ *      leaves the timed fixture untouched. No network, no
+ *      randomness, and no wall clock: every dispatch
+ *      timestamp and every deadline is fixed.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -2081,6 +2100,110 @@ checkFromHistory(
   "fromHistory fixture after tamper check",
 );
 
+// GetSlaDeadline fixture: one fixed task in ACCEPTED (PUBLISH at
+// BASE_MS, ACCEPT at BASE_MS + 1s, the same fixed timestamps the
+// isOverdue fixture uses), carrying an SLA deadline for exactly
+// two states. Hand-written expectations — written out here from
+// the deadlines set immediately below and cross-checked against
+// test/sla.test.ts ("deadline is per-state: another state's
+// deadline is ignored" pins the OPEN value and the ACCEPTED
+// `undefined` on a task that set only OPEN; "setSlaDeadline:
+// overwrites, stores normalized ISO, clears" pins the normalized
+// ISO storage), never derived by calling getSlaDeadline itself:
+//   DRAFT          -> undefined (never set)
+//   OPEN           -> "2026-02-01T09:00:00.000Z" (set below)
+//   ACCEPTED       -> "2026-03-01T09:00:00.000Z" (set below)
+//   CAPTURING      -> undefined (never set)
+//   SUBMITTED      -> undefined (never set)
+//   IN_REVIEW      -> undefined (never set)
+//   APPROVED       -> undefined (never set)
+//   PAYOUT_PENDING -> undefined (never set)
+//   PAID           -> undefined (never set)
+//   REJECTED       -> undefined (never set)
+//   DISPUTED       -> undefined (never set)
+//   ABANDONED      -> undefined (never set)
+//   EXPIRED        -> undefined (never set)
+// The task's current state is ACCEPTED, so the no-argument form
+// getSlaDeadline() must read back the ACCEPTED deadline — the
+// default-argument behaviour the watchdog relies on when it
+// polls the state a task is actually in.
+const GET_SLA_OPEN_DEADLINE = "2026-02-01T09:00:00.000Z";
+const GET_SLA_ACCEPTED_DEADLINE = "2026-03-01T09:00:00.000Z";
+function buildGetSlaDeadlineTask(id: string): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  task.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: new Date(BASE_MS).toISOString(),
+  });
+  task.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 1000).toISOString(),
+  });
+  task.setSlaDeadline(new Date(GET_SLA_OPEN_DEADLINE), "OPEN");
+  task.setSlaDeadline(new Date(GET_SLA_ACCEPTED_DEADLINE), "ACCEPTED");
+  return task;
+}
+const getSlaDeadlineTask = buildGetSlaDeadlineTask("BENCH-SLA-001");
+const getSlaDeadlineFixture: Array<{
+  state: TaskState;
+  expected: string | undefined;
+}> = [
+  { state: "DRAFT", expected: undefined },
+  { state: "OPEN", expected: GET_SLA_OPEN_DEADLINE },
+  { state: "ACCEPTED", expected: GET_SLA_ACCEPTED_DEADLINE },
+  { state: "CAPTURING", expected: undefined },
+  { state: "SUBMITTED", expected: undefined },
+  { state: "IN_REVIEW", expected: undefined },
+  { state: "APPROVED", expected: undefined },
+  { state: "PAYOUT_PENDING", expected: undefined },
+  { state: "PAID", expected: undefined },
+  { state: "REJECTED", expected: undefined },
+  { state: "DISPUTED", expected: undefined },
+  { state: "ABANDONED", expected: undefined },
+  { state: "EXPIRED", expected: undefined },
+];
+if (
+  getSlaDeadlineFixture.length !== 13 ||
+  getSlaDeadlineTask.state !== "ACCEPTED" ||
+  getSlaDeadlineTask.history.length !== 2
+) {
+  throw new Error("benchmark fixture failed: getSlaDeadline corpus shape");
+}
+function checkGetSlaDeadline(where: string): void {
+  for (const { state, expected } of getSlaDeadlineFixture) {
+    if (getSlaDeadlineTask.getSlaDeadline(state) !== expected) {
+      throw new Error(`benchmark self-check failed: ${where}`);
+    }
+  }
+  if (getSlaDeadlineTask.getSlaDeadline() !== GET_SLA_ACCEPTED_DEADLINE) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time exhaustive validation (outside the timed loop): every
+// state returns exactly its hand-written expectation, and the
+// no-argument form returns the current (ACCEPTED) state's value.
+checkGetSlaDeadline("getSlaDeadline fixture");
+// Outside the timed loop, on a separate probe task built the
+// same way: overwriting a state's deadline reads back the new
+// normalized value, the other set state is untouched, and the
+// timed fixture above is untouched by the probe's mutation.
+const getSlaDeadlineProbe = buildGetSlaDeadlineTask("BENCH-SLA-002");
+getSlaDeadlineProbe.setSlaDeadline(
+  new Date("2026-04-01T09:00:00.000Z"),
+  "OPEN",
+);
+if (
+  getSlaDeadlineProbe.getSlaDeadline("OPEN") !==
+    "2026-04-01T09:00:00.000Z" ||
+  getSlaDeadlineProbe.getSlaDeadline("ACCEPTED") !==
+    GET_SLA_ACCEPTED_DEADLINE
+) {
+  throw new Error(
+    "benchmark fixture failed: getSlaDeadline overwrite readback",
+  );
+}
+checkGetSlaDeadline("getSlaDeadline fixture after overwrite probe");
+
 // ---------------------------------------------------------------------
 // Scenarios (each with a self-check so a broken path cannot report a
 // plausible-looking number).
@@ -2388,6 +2511,14 @@ function benchSnapshotRoundTrip(): number {
   }, ITERATIONS);
 }
 
+function benchGetSlaDeadline(): number {
+  return measure(() => {
+    // Per-iteration self-check: every state returns exactly its
+    // hand-written expectation (see the fixture above).
+    checkGetSlaDeadline("getSlaDeadline");
+  }, ITERATIONS);
+}
+
 function benchReadmeDiagramInSync(): number {
   return measure(() => {
     // Per-iteration self-check: the return value is the
@@ -2413,7 +2544,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -2449,6 +2580,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "isOverdue (4-task corpus)", ops: benchIsOverdue() },
   { path: "subscribe (full lifecycle, 1 collecting listener)", ops: benchSubscribe() },
   { path: "toJSON + fromJSON snapshot round-trip (8 entries)", ops: benchSnapshotRoundTrip() },
+  { path: "getSlaDeadline (13 states, 2 set)", ops: benchGetSlaDeadline() },
 ];
 
 console.log("path                                              throughput");
