@@ -1590,7 +1590,14 @@ re-export fixed point (identical snapshot content at the
 same serialized byte length); outside the timed loop, a
 JSON text round-trip (`JSON.stringify` / `JSON.parse` — the
 form a document store actually persists) is pinned to
-restore identically; one timed pass is one export + one
+restore identically, and two detached tampered copies are
+pinned to be rejected with their hand-pinned envelope
+errors (a copy whose `v` is rewritten to 2 with
+`invalid snapshot: unsupported snapshot version 2`, and a
+copy carrying one extra top-level field with
+`invalid snapshot: unknown field "benchExtraField"`),
+with the intact fixture pinned to restore afterwards;
+one timed pass is one export + one
 rehydration of the 8-entry snapshot. The
 `fromHistory` path rebuilds a task from the same fixed
 8-entry history on every iteration (no network, no

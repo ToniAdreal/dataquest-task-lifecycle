@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Envelope-rejection benchmark self-checks for the JSON
+  snapshot round-trip: the `toJSON + fromJSON snapshot
+  round-trip (8 entries)` path in `npm run bench` (timed
+  since the snapshot bench commit, but previously
+  self-checked only on the positive fidelity side — the
+  restored state, the full history entry for entry, and
+  the re-export fixed point) now also pins, outside the
+  timed loop, the strict snapshot reader's rejection
+  side: a detached copy whose `v` is rewritten from 1 to
+  2 is rejected with exactly `invalid snapshot:
+  unsupported snapshot version 2`, and a detached copy
+  carrying one extra top-level field is rejected with
+  exactly `invalid snapshot: unknown field
+  "benchExtraField"`; the intact fixture is pinned to
+  restore afterwards, proving both tamper copies were
+  detached. No network, no randomness, and no wall-clock
+  reads. The README Benchmarks table is not refreshed in
+  this change: the timed path set is unchanged (this
+  strengthens an existing path's self-check rather than
+  adding a path). Benchmark only; no library behavior
+  change.
 - A standalone overdue judgement segment closing the CLI
   demo: `isOverdue(task, now)` is called on three dedicated
   tasks (DEMO-018 in ACCEPTED with an ACCEPTED-state SLA
