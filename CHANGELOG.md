@@ -11,6 +11,41 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An SLA deadline write benchmark path:
+  `npm run bench` now also times
+  `setSlaDeadline` / `clearSlaDeadline` as one
+  write–overwrite–clear cycle on a shared fixed OPEN
+  task (set the current state's deadline from a `Date`
+  at `2026-05-01T09:00:00.000Z`, overwrite it from an
+  ISO string at `2026-06-01T09:00:00.000Z`, then clear
+  it — the clear restores the fixture's initial
+  no-deadline state, so the same task serves every
+  iteration) — the write side of the existing
+  `getSlaDeadline` read path, whose cost was
+  previously invisible inside the watchdog totals.
+  Its per-iteration self-check pins every read-back
+  to the hand-written expectations in the bench
+  comments (the set and overwritten deadlines read
+  back exactly, the cleared state reads back
+  `undefined`, and the task stays in OPEN with its
+  single PUBLISH entry throughout — the writes are
+  configuration, never a dispatch; cross-checked
+  against the SLA tests); outside the timed loop,
+  exhaustive checks on separate probe tasks pin the
+  per-state and clear-all forms, the normalized-ISO
+  storage of a non-ISO parseable input, the setter's
+  one rejection (an unparseable deadline, rejected
+  with exactly `invalid SLA deadline: not-a-date`,
+  leaving the stored value untouched), and that
+  setting a deadline on a terminal (ABANDONED) task
+  is stored rather than rejected — the setter has
+  no state guard. The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`setSlaDeadline + clearSlaDeadline (OPEN task
+  write cycle)` at ~194,121 ops/sec on that run).
+  No network, no randomness, and no wall clock:
+  every dispatch timestamp and every deadline is
+  fixed. Benchmark only; no library behavior change.
 - A dispatch note length guard benchmark path:
   `npm run bench` now also times the `MAX_NOTE_LENGTH`
   boundary in `dispatch()` over a fixed 2-case corpus
