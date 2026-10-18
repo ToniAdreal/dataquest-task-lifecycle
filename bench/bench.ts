@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-six hot-path
+ * Measures real, locally-observed throughput for the twenty-seven hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -339,6 +339,21 @@
  *      network, no randomness, and no wall clock: every
  *      dispatch timestamp is fixed.
  *
+ *  27. transition-table pure object construction —
+ *      `transitionTable()` with no arguments (see the
+ *      transition-table fixture below). This is the plain-object
+ *      edge list in declaration order, without any serialization,
+ *      that the JSON export (group 17) and the diagram (group 18)
+ *      both derive from: the enumeration a state-machine consumer
+ *      pays when it wants the edges as objects rather than text.
+ *      Its cost was previously invisible inside the JSON row's
+ *      construction-plus-serialization total, so a pure
+ *      construction regression could previously hide inside the
+ *      serialization share. One timed pass is one full
+ *      construction call; the output must equal exactly the 19
+ *      edges pinned by the committed snapshot, written out in
+ *      full in declaration order. No network and no wall clock.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -374,6 +389,7 @@ import {
   TaskLifecycle,
   totalPaidOut,
   transition,
+  transitionTable,
   transitionTableJson,
   unreconciledPayouts,
   verifyHistoryChain,
@@ -385,6 +401,7 @@ import {
   type TaskHistoryEntry,
   type TaskSnapshot,
   type TaskState,
+  type TransitionEdge,
 } from "../src/index.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
 
@@ -1507,6 +1524,105 @@ function checkTransitionTableJson(where: string): void {
 // One-time validation (outside the timed loop): the export parses
 // to exactly the hand-written expectations above.
 checkTransitionTableJson("transitionTableJson fixture");
+
+// Transition-table fixture: the pure object construction behind
+// the JSON export above. Hand-written expectations — written out
+// here in full from the committed snapshot
+// (test/__snapshots__/transitionTable.snapshot.json) and the
+// transition table in src/taskLifecycle.ts, never derived by
+// calling transitionTable itself:
+//   - the output is an array of exactly 19 edges, in declaration
+//     order (state, then event within state), written out in full
+//     below;
+//   - every edge's keys are in the pinned order from, event, to;
+//   - the first edge is DRAFT --PUBLISH--> OPEN, the payout edge
+//     at index 14 is PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID, and
+//     the last edge is DISPUTED --ARBITRATE_REJECT--> REJECTED —
+//     the same three edges the transitionTableJson fixture above
+//     pins, so the per-iteration check also spot-checks
+//     consistency with the JSON edge set.
+// Outside the timed loop, an exhaustive check compares the full
+// edge set to the parsed transitionTableJson() edge set edge for
+// edge and confirms the hand-pinned non-existent edge
+// DRAFT --PAYOUT_COMPLETE--> PAID is absent from both.
+const TRANSITION_TABLE_EDGE_COUNT = 19;
+const TRANSITION_TABLE_PAYOUT_INDEX = 14;
+const TRANSITION_TABLE_EDGES: readonly TransitionEdge[] = [
+  { from: "DRAFT", event: "PUBLISH", to: "OPEN" },
+  { from: "OPEN", event: "ACCEPT", to: "ACCEPTED" },
+  { from: "OPEN", event: "EXPIRE", to: "EXPIRED" },
+  { from: "ACCEPTED", event: "START_CAPTURE", to: "CAPTURING" },
+  { from: "ACCEPTED", event: "ABANDON", to: "ABANDONED" },
+  { from: "ACCEPTED", event: "EXPIRE", to: "EXPIRED" },
+  { from: "CAPTURING", event: "SUBMIT", to: "SUBMITTED" },
+  { from: "CAPTURING", event: "ABANDON", to: "ABANDONED" },
+  { from: "CAPTURING", event: "EXPIRE", to: "EXPIRED" },
+  { from: "SUBMITTED", event: "BEGIN_REVIEW", to: "IN_REVIEW" },
+  { from: "SUBMITTED", event: "EXPIRE", to: "EXPIRED" },
+  { from: "IN_REVIEW", event: "APPROVE", to: "APPROVED" },
+  { from: "IN_REVIEW", event: "REJECT", to: "REJECTED" },
+  { from: "APPROVED", event: "REQUEST_PAYOUT", to: "PAYOUT_PENDING" },
+  { from: "PAYOUT_PENDING", event: "PAYOUT_COMPLETE", to: "PAID" },
+  { from: "REJECTED", event: "DISPUTE", to: "DISPUTED" },
+  { from: "REJECTED", event: "RESUBMIT", to: "CAPTURING" },
+  { from: "DISPUTED", event: "ARBITRATE_APPROVE", to: "APPROVED" },
+  { from: "DISPUTED", event: "ARBITRATE_REJECT", to: "REJECTED" },
+];
+const TRANSITION_TABLE_ABSENT_EDGE: TransitionEdge = {
+  from: "DRAFT",
+  event: "PAYOUT_COMPLETE",
+  to: "PAID",
+};
+const transitionTableTriple = (edge: TransitionEdge): string =>
+  `${edge.from}/${edge.event}/${edge.to}`;
+function checkTransitionTable(where: string): void {
+  const edges = transitionTable();
+  if (
+    edges.length !== TRANSITION_TABLE_EDGE_COUNT ||
+    edges.some(
+      (edge, i) =>
+        transitionTableTriple(edge) !==
+          transitionTableTriple(TRANSITION_TABLE_EDGES[i]!) ||
+        Object.keys(edge).join(",") !== "from,event,to",
+    ) ||
+    transitionTableTriple(edges[0]!) !==
+      transitionTableTriple(TRANSITION_TABLE_EDGES[0]!) ||
+    transitionTableTriple(edges[TRANSITION_TABLE_PAYOUT_INDEX]!) !==
+      transitionTableTriple(
+        TRANSITION_TABLE_EDGES[TRANSITION_TABLE_PAYOUT_INDEX]!,
+      ) ||
+    transitionTableTriple(edges[edges.length - 1]!) !==
+      transitionTableTriple(
+        TRANSITION_TABLE_EDGES[TRANSITION_TABLE_EDGES.length - 1]!,
+      )
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the pure
+// construction matches every hand-pinned expectation above.
+checkTransitionTable("transitionTable fixture");
+// Exhaustive check outside the timed loop: the pure edge set
+// equals the parsed transitionTableJson() edge set edge for edge,
+// and the pinned non-existent edge is absent from both.
+{
+  const pureTriples = transitionTable().map(transitionTableTriple);
+  const jsonTriples = (
+    JSON.parse(transitionTableJson()) as TransitionEdge[]
+  ).map(transitionTableTriple);
+  const absent = transitionTableTriple(TRANSITION_TABLE_ABSENT_EDGE);
+  if (
+    pureTriples.length !== TRANSITION_TABLE_EDGE_COUNT ||
+    jsonTriples.length !== TRANSITION_TABLE_EDGE_COUNT ||
+    pureTriples.some((triple, i) => triple !== jsonTriples[i]) ||
+    pureTriples.includes(absent) ||
+    jsonTriples.includes(absent)
+  ) {
+    throw new Error(
+      "benchmark fixture failed: transitionTable exhaustive JSON consistency / absent-edge check",
+    );
+  }
+}
 
 // State-diagram fixture: the Mermaid rendering of the full
 // transition table. Hand-written expectations — written out here
@@ -2978,6 +3094,15 @@ function benchTransitionTableJson(): number {
   }, ITERATIONS);
 }
 
+function benchTransitionTable(): number {
+  return measure(() => {
+    // Per-iteration self-check: every edge matches the
+    // hand-pinned edge list in declaration order, with the key
+    // order pinned (see the fixture above).
+    checkTransitionTable("transitionTable");
+  }, ITERATIONS);
+}
+
 function benchStateDiagram(): number {
   return measure(() => {
     // Per-iteration self-check: every state is present, the edge
@@ -3085,7 +3210,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop; single-step transition dispatch (benchTransition restoring the fixed OPEN snapshot \u2014 1 PUBLISH entry at the base instant \u2014 and dispatching one ACCEPT step pinned at BASE + 1s with quotedAmount 125, checked on every iteration for the one-step state advance OPEN -> ACCEPTED, exactly one appended entry, and a gap-free seq continuation, with an exhaustive pure-transition check over all 13 states x 15 events \u2014 19 legal edges returning their hand-pinned targets, every other pair throwing the exact invalid-transition message, including the illegal PAYOUT_COMPLETE dispatch from OPEN \u2014 asserted once outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop; single-step transition dispatch (benchTransition restoring the fixed OPEN snapshot \u2014 1 PUBLISH entry at the base instant \u2014 and dispatching one ACCEPT step pinned at BASE + 1s with quotedAmount 125, checked on every iteration for the one-step state advance OPEN -> ACCEPTED, exactly one appended entry, and a gap-free seq continuation, with an exhaustive pure-transition check over all 13 states x 15 events \u2014 19 legal edges returning their hand-pinned targets, every other pair throwing the exact invalid-transition message, including the illegal PAYOUT_COMPLETE dispatch from OPEN \u2014 asserted once outside the timed loop; transition-table pure object construction (transitionTable) with no arguments, checked on every iteration against the hand-pinned 19 edges written out in full in declaration order (every edge key order from, event, to; spot-checked against the transitionTableJson edge set via the shared pinned first, payout (index 14), and last edges), with the full edge set compared to the parsed JSON edge set edge for edge and a hand-pinned non-existent edge (DRAFT / PAYOUT_COMPLETE / PAID) confirmed absent from both once outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -3116,6 +3241,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "parseHistory (8-entry history)", ops: benchParseHistory() },
   { path: "isTerminal (13 states)", ops: benchIsTerminal() },
   { path: "transitionTableJson (19 edges)", ops: benchTransitionTableJson() },
+  { path: "transitionTable (19 edges)", ops: benchTransitionTable() },
   { path: "stateDiagram (19 edges)", ops: benchStateDiagram() },
   { path: "readmeDiagramInSync (README file read)", ops: benchReadmeDiagramInSync() },
   { path: "isOverdue (4-task corpus)", ops: benchIsOverdue() },

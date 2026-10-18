@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A transition-table pure object construction benchmark
+  path: `npm run bench` now also times `transitionTable()`
+  with no arguments — the plain-object edge list in
+  declaration order, without any serialization, that the
+  JSON export and the diagram both derive from — whose
+  cost was previously invisible inside the JSON row's
+  construction-plus-serialization total. Its
+  per-iteration self-check pins the output to the
+  hand-written expectations in the bench comments (all
+  19 edges written out in full in declaration order —
+  the list pinned by the committed snapshot — with
+  every edge's keys in from / event / to order,
+  spot-checked against the `transitionTableJson` edge
+  set through the shared pinned first edge, payout edge
+  (index 14), and last edge); outside the timed loop,
+  the full edge set is compared to the parsed JSON edge
+  set edge for edge and a hand-pinned non-existent edge
+  (`DRAFT` / `PAYOUT_COMPLETE` / `PAID`) is confirmed
+  absent from both. The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`transitionTable (19 edges)` at ~91,351 ops/sec on
+  that run, against ~11,489 ops/sec for the JSON row —
+  the serialization share of the export is now
+  separable from the pure construction cost). No
+  network, no randomness, and no wall clock. Benchmark
+  only; no library behavior change.
+
 - A single-step transition dispatch benchmark path:
   `npm run bench` now also times `benchTransition` —
   restoring a fixed OPEN snapshot (one `PUBLISH` entry
