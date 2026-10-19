@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 550 tests, all local
+npm test   # 552 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -263,7 +263,21 @@ the hand-pinned chain, and — on a separate probe task
 (DEMO-023) — that an `onError` hook that itself throws is
 swallowed too — the listener-failure observability path,
 shown instead of only asserted by the subscribe onError
-tests.
+tests. — and a closing payout dedupe snapshot
+persistence segment that records two fixed payout
+`eventId`s on a fresh `PayoutEventDedupe` under an
+injected fixed clock (each new on first sight, a
+duplicate on immediate redelivery), exports them with
+`exportSnapshot()` (only the snapshot version and entry
+count are printed), round-trips the snapshot through
+JSON text, and restores it with
+`PayoutEventDedupe.restore()`: the restored store's
+observability counters start at zero, yet both ids still
+read as duplicates and an unseen id reads as new, and a
+detached copy of the snapshot with its version rewritten
+to 2 is rejected with the exact invalid-snapshot error —
+the receiver-restart persistence path, shown instead of
+only asserted by the dedupe snapshot tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1288,7 +1302,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 550 tests covering the happy path, reject→resubmit
+`npm test` runs 552 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

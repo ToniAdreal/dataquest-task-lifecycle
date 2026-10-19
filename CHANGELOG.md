@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout dedupe snapshot persistence segment closing
+  the CLI demo: a fresh `PayoutEventDedupe` under an
+  injected fixed clock records two fixed payout
+  `eventId`s (each new on first sight, a duplicate on
+  immediate redelivery), exports them with
+  `exportSnapshot()` (only the snapshot version and
+  entry count are printed, never the full entries),
+  round-trips the snapshot through JSON text, and
+  restores it with `PayoutEventDedupe.restore()` — the
+  restored store's observability counters start at
+  zero, yet both ids still read as duplicates and an
+  unseen id reads as new — and a detached copy of the
+  snapshot with its version rewritten to 2 is rejected
+  with the exact invalid-snapshot error
+  (`PayoutEventDedupe: invalid snapshot: unsupported
+  snapshot version 2 (expected 1)`). The demo tests pin
+  the segment against hand-written expectations,
+  including an independent in-test round-trip and
+  version rejection. Demo and tests only; no library
+  behavior change.
+
 - A subscribe `onError` error routing benchmark path:
   `npm run bench` now also times `subscribe` with one
   fixed throwing listener and a collecting `onError`

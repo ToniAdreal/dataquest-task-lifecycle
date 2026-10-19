@@ -203,7 +203,21 @@
  * chain, and — on a separate probe task — that an `onError`
  * hook that itself throws is swallowed too — the
  * listener-failure observability path a reader has only
- * seen with a collecting listener so far.
+ * seen with a collecting listener so far — and finally a
+ * payout dedupe snapshot persistence segment: a fresh
+ * `PayoutEventDedupe` under an injected fixed clock records
+ * two fixed payout `eventId`s (each new on first sight, a
+ * duplicate on immediate redelivery), exports them with
+ * `exportSnapshot()` (only the snapshot version and entry
+ * count are printed, never the full entries), round-trips
+ * the snapshot through JSON text, and restores it with
+ * `PayoutEventDedupe.restore()` — the restored store's
+ * observability counters start at zero, yet both ids still
+ * read as duplicates and an unseen id reads as new — and a
+ * detached copy of the snapshot with its version rewritten
+ * to 2 is rejected with the exact invalid-snapshot error —
+ * the receiver-restart persistence path a reader has only
+ * seen asserted by the dedupe snapshot tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -246,7 +260,12 @@
  * captured wire calls and wire-body verification verdict,
  * the subscribe onError segment's dedicated task with its
  * collected error reports and its throwing-onError probe
- * task, plus the exact `lines` the CLI prints — so tests assert on structured values
+ * task, the payout dedupe snapshot persistence segment's
+ * source and restored dedupes with their first-sight /
+ * duplicate outcomes, the exported snapshot, the restored
+ * store's zeroed stats, its still-duplicate and unseen
+ * verdicts, and the tampered copy's rejection error,
+ * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -291,6 +310,8 @@ import {
   type DeliverPayoutWebhookToManyResult,
   type DeliverWebhookResult,
   type ExpireOverdueResult,
+  type PayoutEventDedupeSnapshot,
+  type PayoutEventDedupeStats,
   type PayoutMismatch,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
@@ -400,6 +421,24 @@ export interface DemoResult {
   onErrorReports: ListenerErrorReport[];
   /** Probe task whose own `onError` hook throws (DEMO-023). */
   onErrorProbeTask: TaskLifecycle;
+  /** Source dedupe for the closing snapshot persistence segment. */
+  dedupeSnapshotSource: PayoutEventDedupe;
+  /** First-sight `checkAndRecord` outcomes for the segment's two ids. */
+  dedupeSnapshotFirst: boolean[];
+  /** Immediate-redelivery outcomes for the same two ids. */
+  dedupeSnapshotDuplicate: boolean[];
+  /** Snapshot exported by the source dedupe ({ v: 1, entries }). */
+  dedupeSnapshot: PayoutEventDedupeSnapshot;
+  /** Dedupe restored from the snapshot after a JSON round-trip. */
+  dedupeSnapshotRestored: PayoutEventDedupe;
+  /** Restored store's stats read before any probe (counters at zero). */
+  dedupeSnapshotStatsAfterRestore: PayoutEventDedupeStats;
+  /** Restored store's outcomes for the two recorded ids (duplicates). */
+  dedupeSnapshotRestoredSeen: boolean[];
+  /** Restored store's outcome for a never-recorded id (new). */
+  dedupeSnapshotRestoredUnseen: boolean;
+  /** Rejection for the detached `v: 2` copy ("" if it was accepted). */
+  dedupeSnapshotTamperedError: string;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -2555,7 +2594,131 @@ export async function runDemo(): Promise<DemoResult> {
     `  final state: ${onErrorTask.state} (terminal: ${onErrorTask.isTerminal})`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout dedupe snapshot persistence segment (closing): the
+  // receiver-side dedupe segment above ran entirely in memory:
+  // a receiver restart would forget every id inside its TTL and
+  // reopen exactly the double-payout window the store exists to
+  // close — at deploy time. Here a FRESH dedupe under an
+  // injected fixed clock (2026-03-24T09:00:00.000Z, the same
+  // 60_000 ms demo TTL policy as the dedupe segment above)
+  // records two fixed payout eventIds (each new on first sight,
+  // a duplicate on immediate redelivery), exports them with
+  // exportSnapshot(), round-trips the snapshot through JSON
+  // text — the persistence channel a real receiver writes
+  // before shutdown — and restores it with
+  // PayoutEventDedupe.restore(): the restored store's
+  // observability counters start at zero (captured before any
+  // probe runs), yet both ids still read as duplicates, while
+  // a never-seen id reads as new. A detached copy of the
+  // snapshot with its version rewritten to 2 is then rejected
+  // with the exact invalid-snapshot error, and the exported
+  // snapshot object itself still reads v: 1. Hand-written
+  // expectations — written out here from the snapshot docs in
+  // src/settlementWebhook.ts and the payoutEventDedupeSnapshot
+  // tests, never derived by calling the snapshot pair itself:
+  //   - each fixed id's first checkAndRecord is false (new
+  //     event) and its immediate second is true (duplicate);
+  //   - exportSnapshot() is exactly
+  //     { v: 1, entries: [[id1, startMs], [id2, startMs]] } —
+  //     the original first-seen timestamps, so a restored id
+  //     keeps counting down its original TTL;
+  //   - the restored store's stats() read immediately after
+  //     restore is exactly { size: 2, hits: 0, misses: 0,
+  //     evictions: 0 } — counters do not travel with the
+  //     snapshot;
+  //   - on the restored store both fixed ids read true
+  //     (duplicate) and the unseen id reads false (new),
+  //     leaving its size at 3;
+  //   - the v: 2 copy throws exactly
+  //     "PayoutEventDedupe: invalid snapshot: unsupported
+  //     snapshot version 2 (expected 1)".
+  // Only the snapshot's version and entry count are printed —
+  // never the full entries. The clock never advances, so zero
+  // network, zero randomness, and no wall clock enter the
+  // segment. The segment asserts all of this here, outside the
+  // printed lines: a snapshot that dropped or re-stamped an
+  // entry, a restore that reopened the window or carried the
+  // counters across, or a tampered version that slipped
+  // through would fail the demo itself, not just a test.
+  const DEDUPE_SNAPSHOT_START_MS = Date.parse("2026-03-24T09:00:00.000Z");
+  const DEDUPE_SNAPSHOT_TTL_MS = 60_000;
+  const DEDUPE_SNAPSHOT_EVENT_IDS = [
+    "evt_demo_payout_001",
+    "evt_demo_payout_002",
+  ];
+  const DEDUPE_SNAPSHOT_UNSEEN_EVENT_ID = "evt_demo_payout_003";
+  const dedupeSnapshotSource = new PayoutEventDedupe({
+    ttlMs: DEDUPE_SNAPSHOT_TTL_MS,
+    now: () => DEDUPE_SNAPSHOT_START_MS,
+  });
+  const dedupeSnapshotFirst = DEDUPE_SNAPSHOT_EVENT_IDS.map((eventId) =>
+    dedupeSnapshotSource.checkAndRecord(eventId),
+  );
+  const dedupeSnapshotDuplicate = DEDUPE_SNAPSHOT_EVENT_IDS.map((eventId) =>
+    dedupeSnapshotSource.checkAndRecord(eventId),
+  );
+  const dedupeSnapshot = dedupeSnapshotSource.exportSnapshot();
+  const dedupeSnapshotRestored = PayoutEventDedupe.restore(
+    JSON.parse(JSON.stringify(dedupeSnapshot)) as unknown,
+    {
+      ttlMs: DEDUPE_SNAPSHOT_TTL_MS,
+      now: () => DEDUPE_SNAPSHOT_START_MS,
+    },
+  );
+  const dedupeSnapshotStatsAfterRestore = dedupeSnapshotRestored.stats();
+  const dedupeSnapshotRestoredSeen = DEDUPE_SNAPSHOT_EVENT_IDS.map(
+    (eventId) => dedupeSnapshotRestored.checkAndRecord(eventId),
+  );
+  const dedupeSnapshotRestoredUnseen = dedupeSnapshotRestored.checkAndRecord(
+    DEDUPE_SNAPSHOT_UNSEEN_EVENT_ID,
+  );
+  let dedupeSnapshotTamperedError = "";
+  try {
+    PayoutEventDedupe.restore(
+      { ...dedupeSnapshot, v: 2 },
+      {
+        ttlMs: DEDUPE_SNAPSHOT_TTL_MS,
+        now: () => DEDUPE_SNAPSHOT_START_MS,
+      },
+    );
+  } catch (err) {
+    dedupeSnapshotTamperedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (
+    JSON.stringify(dedupeSnapshotFirst) !== JSON.stringify([false, false]) ||
+    JSON.stringify(dedupeSnapshotDuplicate) !==
+      JSON.stringify([true, true]) ||
+    dedupeSnapshot.v !== 1 ||
+    JSON.stringify(dedupeSnapshot.entries) !==
+      JSON.stringify([
+        [DEDUPE_SNAPSHOT_EVENT_IDS[0], DEDUPE_SNAPSHOT_START_MS],
+        [DEDUPE_SNAPSHOT_EVENT_IDS[1], DEDUPE_SNAPSHOT_START_MS],
+      ]) ||
+    JSON.stringify(dedupeSnapshotStatsAfterRestore) !==
+      JSON.stringify({ size: 2, hits: 0, misses: 0, evictions: 0 }) ||
+    JSON.stringify(dedupeSnapshotRestoredSeen) !==
+      JSON.stringify([true, true]) ||
+    dedupeSnapshotRestoredUnseen !== false ||
+    dedupeSnapshotRestored.size !== 3 ||
+    dedupeSnapshotTamperedError !==
+      "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)"
+  ) {
+    throw new Error(
+      "demo fixture broken: PayoutEventDedupe snapshot persistence does not match the hand-pinned contract (two ids new then duplicate, snapshot exactly the pinned v1 entries with their original first-seen timestamps, restored counters at zero, both ids still duplicates and the unseen id new after restore, the v:2 copy rejected with the pinned error)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
+    `  source dedupe (fixed clock ${new Date(DEDUPE_SNAPSHOT_START_MS).toISOString()}, TTL ${DEDUPE_SNAPSHOT_TTL_MS} ms): eventId ${DEDUPE_SNAPSHOT_EVENT_IDS[0]} — checkAndRecord: ${dedupeSnapshotFirst[0]} (new event), again: ${dedupeSnapshotDuplicate[0]} (duplicate); eventId ${DEDUPE_SNAPSHOT_EVENT_IDS[1]} — checkAndRecord: ${dedupeSnapshotFirst[1]} (new event), again: ${dedupeSnapshotDuplicate[1]} (duplicate)`,
+    `  exportSnapshot(): v ${dedupeSnapshot.v}, ${dedupeSnapshot.entries.length} entries — only the version and entry count are printed, never the full entries (persist the JSON before shutdown)`,
+    `  after JSON round-trip + PayoutEventDedupe.restore(): stats size ${dedupeSnapshotStatsAfterRestore.size}, hits ${dedupeSnapshotStatsAfterRestore.hits}, misses ${dedupeSnapshotStatsAfterRestore.misses}, evictions ${dedupeSnapshotStatsAfterRestore.evictions} — counters restart at zero, the recorded ids do not`,
+    `  restored dedupe: eventId ${DEDUPE_SNAPSHOT_EVENT_IDS[0]} — checkAndRecord: ${dedupeSnapshotRestoredSeen[0]} (duplicate — the restart did not reopen the dedupe window); eventId ${DEDUPE_SNAPSHOT_EVENT_IDS[1]} — checkAndRecord: ${dedupeSnapshotRestoredSeen[1]} (duplicate); eventId ${DEDUPE_SNAPSHOT_UNSEEN_EVENT_ID} — checkAndRecord: ${dedupeSnapshotRestoredUnseen} (new event, recorded)`,
+    `  tampered snapshot rejected: a detached copy with v changed to 2 throws "${dedupeSnapshotTamperedError}" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

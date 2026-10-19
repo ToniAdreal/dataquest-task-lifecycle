@@ -415,11 +415,18 @@ Subscribe onError error routing (a throwing listener routed to onError):
   listener: DEMO-022 carries 1 listener that throws Error("demo listener failure") on every notification, subscribed with a collecting onError hook
   routed errors: onError received 3 report(s); first report: event=PUBLISH from=DRAFT to=OPEN error="demo listener failure" (the dispatch context handed to the hook)
   dispatch unaffected: all 3 dispatches returned normally (OPEN, ACCEPTED, CAPTURING) and the audit history holds all 3 entries — a failing listener is isolated, never breaking dispatch
-  final state: CAPTURING (terminal: false)`;
+  final state: CAPTURING (terminal: false)
+
+Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):
+  source dedupe (fixed clock <timestamp>, TTL 60000 ms): eventId evt_demo_payout_001 — checkAndRecord: false (new event), again: true (duplicate); eventId evt_demo_payout_002 — checkAndRecord: false (new event), again: true (duplicate)
+  exportSnapshot(): v 1, 2 entries — only the version and entry count are printed, never the full entries (persist the JSON before shutdown)
+  after JSON round-trip + PayoutEventDedupe.restore(): stats size 2, hits 0, misses 0, evictions 0 — counters restart at zero, the recorded ids do not
+  restored dedupe: eventId evt_demo_payout_001 — checkAndRecord: true (duplicate — the restart did not reopen the dedupe window); eventId evt_demo_payout_002 — checkAndRecord: true (duplicate); eventId evt_demo_payout_003 — checkAndRecord: false (new event, recorded)
+  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 356);
+  assert.equal(lines.length, 363);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1864,7 +1871,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 356);
+  assert.equal(out.trimEnd().split("\n").length, 363);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3090,9 +3097,9 @@ test("demo shows the subscribe onError segment in-process: throwing listener rou
   );
   assert.equal(probe.dispatch("PUBLISH"), "OPEN");
   assert.equal(probe.history.length, 1);
-  // The segment closes the demo: it follows the single-target
-  // delivery segment, prints its lines verbatim, and its
-  // final-state line is the demo's last line.
+  // The segment follows the single-target delivery segment
+  // and prints its lines verbatim (the payout dedupe snapshot
+  // persistence segment now closes the demo after it).
   const onErrorAt = text.indexOf(
     "Subscribe onError error routing (a throwing listener routed to onError):",
   );
@@ -3111,9 +3118,11 @@ test("demo shows the subscribe onError segment in-process: throwing listener rou
   ]) {
     assert.ok(text.includes(line), `missing subscribe onError line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  final state: CAPTURING (terminal: false)",
+  assert.ok(
+    text.indexOf(
+      "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
+    ) > onErrorAt,
+    "payout dedupe snapshot segment must follow the subscribe onError segment",
   );
 });
 
@@ -3121,6 +3130,7 @@ test("demo subscribe onError segment is deterministic: two runs print byte-ident
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Subscribe onError error routing (a throwing listener routed to onError):"),
+      ls.indexOf("Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3137,4 +3147,141 @@ test("demo subscribe onError segment is deterministic: two runs print byte-ident
   assert.equal(a.onErrorProbeTask.state, "ACCEPTED");
   assert.equal(b.onErrorProbeTask.state, "ACCEPTED");
   assert.equal(a.onErrorProbeTask.history.length, 2);
+});
+
+test("demo shows the payout dedupe snapshot persistence segment in-process: ids survive a JSON round-trip restore, counters restart at zero, v:2 copy rejected", async () => {
+  const {
+    dedupeSnapshotSource,
+    dedupeSnapshotFirst,
+    dedupeSnapshotDuplicate,
+    dedupeSnapshot,
+    dedupeSnapshotRestored,
+    dedupeSnapshotStatsAfterRestore,
+    dedupeSnapshotRestoredSeen,
+    dedupeSnapshotRestoredUnseen,
+    dedupeSnapshotTamperedError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // snapshot docs in src/settlementWebhook.ts and the
+  // payoutEventDedupeSnapshot tests, never derived by calling
+  // the snapshot pair itself.
+  const START_MS = Date.parse("2026-03-24T09:00:00.000Z");
+  assert.deepEqual(dedupeSnapshotFirst, [false, false]);
+  assert.deepEqual(dedupeSnapshotDuplicate, [true, true]);
+  assert.deepEqual(dedupeSnapshotSource.stats(), {
+    size: 2,
+    hits: 2,
+    misses: 2,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeSnapshot, {
+    v: 1,
+    entries: [
+      ["evt_demo_payout_001", START_MS],
+      ["evt_demo_payout_002", START_MS],
+    ],
+  });
+  // Counters do not travel with the snapshot: the restored
+  // store's stats were read before any probe ran.
+  assert.deepEqual(dedupeSnapshotStatsAfterRestore, {
+    size: 2,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeSnapshotRestoredSeen, [true, true]);
+  assert.equal(dedupeSnapshotRestoredUnseen, false);
+  assert.equal(dedupeSnapshotRestored.size, 3);
+  assert.deepEqual(dedupeSnapshotRestored.stats(), {
+    size: 3,
+    hits: 2,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.equal(
+    dedupeSnapshotTamperedError,
+    "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)",
+  );
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: a fresh dedupe reproduces the
+  // round-trip and the version rejection on its own.
+  const independent = new PayoutEventDedupe({
+    ttlMs: 60_000,
+    now: () => START_MS,
+  });
+  assert.equal(independent.checkAndRecord("evt-independent-1"), false);
+  const revived = PayoutEventDedupe.restore(
+    JSON.parse(JSON.stringify(independent.exportSnapshot())) as unknown,
+    { ttlMs: 60_000, now: () => START_MS },
+  );
+  assert.deepEqual(revived.stats(), {
+    size: 1,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.equal(revived.checkAndRecord("evt-independent-1"), true);
+  assert.equal(revived.checkAndRecord("evt-independent-2"), false);
+  assert.throws(
+    () =>
+      PayoutEventDedupe.restore(
+        { v: 2, entries: [] },
+        { ttlMs: 60_000, now: () => START_MS },
+      ),
+    /^Error: PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 \(expected 1\)$/,
+  );
+  // The segment closes the demo: it follows the subscribe
+  // onError segment, prints its lines verbatim, and its
+  // tampered-snapshot line is the demo's last line.
+  const snapshotAt = text.indexOf(
+    "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
+  );
+  assert.ok(
+    snapshotAt >
+      text.indexOf(
+        "Subscribe onError error routing (a throwing listener routed to onError):",
+      ),
+    "payout dedupe snapshot segment must follow the subscribe onError segment",
+  );
+  for (const line of [
+    "  source dedupe (fixed clock 2026-03-24T09:00:00.000Z, TTL 60000 ms): eventId evt_demo_payout_001 — checkAndRecord: false (new event), again: true (duplicate); eventId evt_demo_payout_002 — checkAndRecord: false (new event), again: true (duplicate)",
+    "  exportSnapshot(): v 1, 2 entries — only the version and entry count are printed, never the full entries (persist the JSON before shutdown)",
+    "  after JSON round-trip + PayoutEventDedupe.restore(): stats size 2, hits 0, misses 0, evictions 0 — counters restart at zero, the recorded ids do not",
+    "  restored dedupe: eventId evt_demo_payout_001 — checkAndRecord: true (duplicate — the restart did not reopen the dedupe window); eventId evt_demo_payout_002 — checkAndRecord: true (duplicate); eventId evt_demo_payout_003 — checkAndRecord: false (new event, recorded)",
+    '  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication',
+  ]) {
+    assert.ok(text.includes(line), `missing payout dedupe snapshot line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    '  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication',
+  );
+});
+
+test("demo payout dedupe snapshot segment is deterministic: two runs print byte-identical persistence lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + source / export / restore-stats / restored /
+  // tampered lines; every value in the segment is a fixed
+  // literal (fixed clock, fixed eventIds, fixed TTL), so no
+  // normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.dedupeSnapshot, b.dedupeSnapshot);
+  assert.deepEqual(
+    a.dedupeSnapshotStatsAfterRestore,
+    b.dedupeSnapshotStatsAfterRestore,
+  );
+  assert.equal(
+    a.dedupeSnapshotTamperedError,
+    b.dedupeSnapshotTamperedError,
+  );
 });
