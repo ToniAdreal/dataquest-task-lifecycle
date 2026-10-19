@@ -180,7 +180,18 @@
  * and `clearSlaDeadline()` with no argument then clears
  * the remaining states' deadlines — the renegotiated /
  * cancelled deadline a reader would otherwise never see
- * revoked, shown instead of only asserted by the SLA tests.
+ * revoked, shown instead of only asserted by the SLA tests
+ * — and finally a single-target payout webhook delivery
+ * segment: the main task's signed webhook (built above) is
+ * delivered with `deliverPayoutWebhook` to one fixed endpoint
+ * through an injected fake fetch scripted to answer 500 then
+ * 200 (backoffMs 0 with a no-op sleep, so the retry never
+ * really waits and no network is touched), and the demo
+ * prints the delivery result and asserts outside the printed
+ * lines that both captured wire calls carry the byte-identical
+ * signed body and that the captured signature verifies over
+ * that body — the single-endpoint delivery path a reader has
+ * only seen fanned out so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -219,6 +230,8 @@
  * cross-checked against, the SLA deadline clearing
  * segment's dedicated task with its hand-pinned deadlines
  * and its before / after overdue verdicts and read-backs,
+ * the single-target delivery segment's endpoint, result,
+ * captured wire calls and wire-body verification verdict,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -238,6 +251,7 @@ import {
   allowedEvents,
   buildPayoutWebhook,
   buildPayoutWebhooks,
+  deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
   expireOverdueTasks,
   expiredTasks,
@@ -261,6 +275,7 @@ import {
   verifyPayoutWebhook,
   type BuildPayoutWebhooksResult,
   type DeliverPayoutWebhookToManyResult,
+  type DeliverWebhookResult,
   type ExpireOverdueResult,
   type PayoutMismatch,
   type PayoutWebhook,
@@ -349,6 +364,14 @@ export interface DemoResult {
   batchVerified: Array<boolean | undefined>;
   fanoutResult: DeliverPayoutWebhookToManyResult;
   fanoutCalls: FanoutCall[];
+  /** Fixed endpoint of the closing single-target delivery segment. */
+  singleDeliveryEndpoint: string;
+  /** `deliverPayoutWebhook` result for the closing segment. */
+  singleDeliveryResult: DeliverWebhookResult;
+  /** Wire calls the closing segment's fake fetch received (2). */
+  singleDeliveryCalls: FanoutCall[];
+  /** Whether the captured wire body verifies under the demo secret. */
+  singleDeliveryBodyVerifies: boolean;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -2309,7 +2332,95 @@ export async function runDemo(): Promise<DemoResult> {
     `  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): ${slaClearAfterAllClear[0]}, getSlaDeadline("CAPTURING"): ${slaClearAfterAllClear[1]}, getSlaDeadline("SUBMITTED"): ${slaClearAfterAllClear[2]} (every state's deadline is cleared)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Single-target payout webhook delivery segment (closing):
+  // every delivery shown so far fanned one event out to many
+  // endpoints (`deliverPayoutWebhookToMany`); the single-endpoint
+  // entry point `deliverPayoutWebhook` — the one a lone receiver
+  // integration actually calls — has never appeared in the demo.
+  // Here the main task's signed webhook (built and verified
+  // above) is delivered on its own to one fixed endpoint through
+  // an injected fake fetch scripted to answer 500 on the first
+  // attempt and 200 on the retry — zero real network. An injected
+  // no-op sleepImpl plus backoffMs 0 mean the retry never really
+  // waits, so no wall clock is waited on either. Hand-written
+  // expectations — written out here from the delivery source and
+  // the delivery tests, never derived by calling
+  // deliverPayoutWebhook itself:
+  //   - the result is { ok: true, attempts: 2, status: 200 }
+  //     with no error (a 500 is retryable, the retry succeeds);
+  //   - the fake fetch sees exactly 2 POSTs to the fixed
+  //     endpoint, with byte-identical bodies (a retry re-POSTs
+  //     the same signed body under the same eventId) and the
+  //     webhook's own signature on both;
+  //   - the captured wire body verifies under the demo secret
+  //     with verifyPayoutWebhook — the receiver-side check on
+  //     exactly the bytes that crossed the wire.
+  // Retry-After semantics: had the first answer been a 429 with
+  // a Retry-After header, the parsed hint (clamped to
+  // maxRetryDelayMs) would have set the retry's delay; a 500
+  // falls back to exponential backoff — here backoffMs 0, so the
+  // recorded sleep is 0 ms. The segment asserts all of this
+  // here, outside the printed lines: a delivery semantic that
+  // drifted would fail the demo itself, not just a test.
+  const singleDeliveryEndpoint = "https://payouts.example.com/hooks/payout";
+  const singleDeliveryCalls: FanoutCall[] = [];
+  let singleDeliveryAttempt = 0;
+  const singleDeliveryFetch: PayoutWebhookFetchImpl = async (url, init) => {
+    singleDeliveryCalls.push({
+      url,
+      body: String(init.body ?? ""),
+      signature: String(
+        new Headers(init.headers).get("x-hub-signature-256") ?? "",
+      ),
+    });
+    singleDeliveryAttempt += 1;
+    return new Response("{}", {
+      status: singleDeliveryAttempt === 1 ? 500 : 200,
+    });
+  };
+  const singleDeliveryResult = await deliverPayoutWebhook(
+    singleDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: singleDeliveryFetch,
+      sleepImpl: async () => {},
+      backoffMs: 0,
+    },
+  );
+  const singleDeliveryBodyVerifies =
+    singleDeliveryCalls.length > 0 &&
+    verifyPayoutWebhook(
+      singleDeliveryCalls[0].body,
+      singleDeliveryCalls[0].signature,
+      DEMO_WEBHOOK_SECRET,
+    );
+  if (
+    singleDeliveryResult.ok !== true ||
+    singleDeliveryResult.attempts !== 2 ||
+    singleDeliveryResult.status !== 200 ||
+    singleDeliveryResult.error !== undefined ||
+    singleDeliveryCalls.length !== 2 ||
+    singleDeliveryCalls.some((c) => c.url !== singleDeliveryEndpoint) ||
+    singleDeliveryCalls[0].body !== singleDeliveryCalls[1].body ||
+    singleDeliveryCalls[0].signature !== webhook.signature ||
+    singleDeliveryCalls[1].signature !== webhook.signature ||
+    singleDeliveryCalls[0].body !== JSON.stringify(webhook.payload) ||
+    !singleDeliveryBodyVerifies
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook single-target delivery does not match the hand-pinned contract (a scripted 500 then 200 must report ok with 2 attempts and status 200, both wire calls must carry the byte-identical signed body and the webhook signature, and the captured wire body must verify under the demo secret)",
+    );
+  }
+  lines.push(
+    "",
+    "Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):",
+    `  endpoint: ${singleDeliveryEndpoint} (the main task's signed payout webhook, delivered on its own — no fan-out)`,
+    `  delivery: ok attempts=${singleDeliveryResult.attempts} status=${singleDeliveryResult.status} (the first attempt answered 500 and the retry succeeded; a 429 Retry-After hint would have set that retry's delay, clamped to maxRetryDelayMs — the 500 fell back to exponential backoff, here backoffMs 0 with a no-op sleep, so nothing really waited)`,
+    `  wire check: ${singleDeliveryCalls.length} POSTs captured with byte-identical bodies: ${singleDeliveryCalls[0].body === singleDeliveryCalls[1].body} (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it)`,
+    `  signature check: verifyPayoutWebhook over the captured wire body: ${singleDeliveryBodyVerifies} (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

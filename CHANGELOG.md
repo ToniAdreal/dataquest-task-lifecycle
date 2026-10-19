@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A single-target payout webhook delivery segment closing
+  the CLI demo: the main task's signed webhook is delivered
+  with `deliverPayoutWebhook` to one fixed endpoint
+  (`https://payouts.example.com/hooks/payout`) through an
+  injected fake fetch scripted to answer 500 then 200, with
+  `backoffMs` 0 and a no-op `sleepImpl` (no network, no real
+  waiting). The demo prints the delivery result (`ok`,
+  2 attempts, status 200) — noting that a 429 `Retry-After`
+  hint would have set the retry's delay, clamped to
+  `maxRetryDelayMs`, while the 500 fell back to exponential
+  backoff — and asserts outside the printed lines that the
+  result matches the hand-pinned contract, that both
+  captured wire calls carry the byte-identical signed body
+  and the webhook's own signature, and that the captured
+  wire body verifies under the demo secret with
+  `verifyPayoutWebhook`; the demo tests pin the segment
+  against hand-written expectations, including an
+  independent in-test redelivery of the same webhook.
+  Demo and tests only; no library behavior change.
+
 - A transition-table pure object construction benchmark
   path: `npm run bench` now also times `transitionTable()`
   with no arguments — the plain-object edge list in

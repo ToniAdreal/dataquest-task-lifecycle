@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 546 tests, all local
+npm test   # 548 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -235,7 +235,21 @@ remaining deadline — the renegotiated / cancelled
 deadline revocation, asserted outside the printed lines
 against the hand-pinned deadlines and verdicts
 (cross-checked against the `clearSlaDeadline` source and
-the SLA tests).
+the SLA tests). — and a closing
+single-target payout webhook delivery segment that
+delivers the main task's signed webhook with
+`deliverPayoutWebhook` to one fixed endpoint through an
+injected fake fetch scripted to answer 500 then 200
+(backoffMs 0 with a no-op sleep — no network, no real
+waiting), prints the result (`ok`, 2 attempts, status
+200; a 429 `Retry-After` hint would have set the retry's
+delay, clamped to `maxRetryDelayMs`, while the 500 fell
+back to exponential backoff), and asserts outside the
+printed lines that both captured wire calls carry the
+byte-identical signed body and that the captured
+signature verifies over that body — the single-endpoint
+delivery path, shown instead of only asserted by the
+delivery tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1260,7 +1274,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 546 tests covering the happy path, reject→resubmit
+`npm test` runs 548 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

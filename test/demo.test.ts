@@ -27,6 +27,7 @@ import {
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
+  deliverPayoutWebhook,
   verifyPayoutWebhook,
   type TaskState,
 } from "../src/index.js";
@@ -402,11 +403,17 @@ SLA deadline clearing (clearSlaDeadline on a fixed task):
   before clearing: DEMO-021 (ACCEPTED, ACCEPTED deadline <timestamp>) at <timestamp> -> isOverdue: true (past its ACCEPTED deadline; CAPTURING and SUBMITTED also carry deadlines)
   clear one state: clearSlaDeadline("ACCEPTED") -> getSlaDeadline("ACCEPTED"): undefined, isOverdue at the same instant: false (a renegotiated or cancelled deadline no longer makes the task overdue)
   other states untouched: getSlaDeadline("CAPTURING"): <timestamp>, getSlaDeadline("SUBMITTED"): <timestamp> (clearing one state leaves the other states' deadlines in place)
-  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state's deadline is cleared)`;
+  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state's deadline is cleared)
+
+Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):
+  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
+  delivery: ok attempts=2 status=200 (the first attempt answered 500 and the retry succeeded; a 429 Retry-After hint would have set that retry's delay, clamped to maxRetryDelayMs — the 500 fell back to exponential backoff, here backoffMs 0 with a no-op sleep, so nothing really waited)
+  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it)
+  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 344);
+  assert.equal(lines.length, 350);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1851,7 +1858,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 344);
+  assert.equal(out.trimEnd().split("\n").length, 350);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2847,9 +2854,9 @@ test("demo shows the SLA deadline clearing segment in-process: per-state clear r
   );
   independent.clearSlaDeadline();
   assert.equal(independent.getSlaDeadline("CAPTURING"), undefined);
-  // The segment closes the demo: it follows the terminal-state
-  // judgement segment, prints its lines verbatim, and its
-  // clear-all line is the demo's last line.
+  // The segment follows the terminal-state judgement segment
+  // and prints its lines verbatim (the single-target delivery
+  // segment now closes the demo after it).
   const clearAt = text.indexOf(
     "SLA deadline clearing (clearSlaDeadline on a fixed task):",
   );
@@ -2866,15 +2873,20 @@ test("demo shows the SLA deadline clearing segment in-process: per-state clear r
   ]) {
     assert.ok(text.includes(line), `missing SLA clearing line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    '  clear all states: clearSlaDeadline() with no argument -> getSlaDeadline("ACCEPTED"): undefined, getSlaDeadline("CAPTURING"): undefined, getSlaDeadline("SUBMITTED"): undefined (every state\'s deadline is cleared)',
+  assert.ok(
+    text.indexOf(
+      "Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):",
+    ) > clearAt,
+    "single-target delivery segment must follow the SLA deadline clearing segment",
   );
 });
 
 test("demo SLA deadline clearing segment is deterministic: two runs print byte-identical clearing lines", async () => {
   const segment = (ls: string[]) =>
-    ls.slice(ls.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):"));
+    ls.slice(
+      ls.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):"),
+      ls.indexOf("Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):") - 1,
+    );
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -2891,4 +2903,105 @@ test("demo SLA deadline clearing segment is deterministic: two runs print byte-i
     b.slaClearOverdueAfterStateClear,
   );
   assert.deepEqual(a.slaClearAfterAllClear, b.slaClearAfterAllClear);
+});
+
+test("demo shows the single-target payout webhook delivery segment in-process: scripted 500 then 200, byte-identical wire bodies, wire signature verifies", async () => {
+  const {
+    webhook,
+    singleDeliveryEndpoint,
+    singleDeliveryResult,
+    singleDeliveryCalls,
+    singleDeliveryBodyVerifies,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // delivery source and the delivery tests, never derived by
+  // calling deliverPayoutWebhook itself.
+  assert.equal(singleDeliveryEndpoint, "https://payouts.example.com/hooks/payout");
+  assert.deepEqual(singleDeliveryResult, { ok: true, attempts: 2, status: 200 });
+  assert.equal(singleDeliveryCalls.length, 2);
+  assert.ok(singleDeliveryCalls.every((c) => c.url === singleDeliveryEndpoint));
+  assert.equal(singleDeliveryCalls[0].body, singleDeliveryCalls[1].body);
+  assert.equal(singleDeliveryCalls[0].body, JSON.stringify(webhook.payload));
+  assert.equal(singleDeliveryCalls[0].signature, webhook.signature);
+  assert.equal(singleDeliveryCalls[1].signature, webhook.signature);
+  assert.equal(singleDeliveryBodyVerifies, true);
+  assert.equal(
+    verifyPayoutWebhook(singleDeliveryCalls[0].body, singleDeliveryCalls[0].signature, DEMO_WEBHOOK_SECRET),
+    true,
+  );
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: a fresh scripted fetch reproduces the
+  // same outcome for the same webhook.
+  const replayCalls: Array<{ url: string; body: string; signature: string }> = [];
+  let replayAttempt = 0;
+  const replayResult = await deliverPayoutWebhook(singleDeliveryEndpoint, webhook, {
+    fetchImpl: async (url, init) => {
+      replayCalls.push({
+        url,
+        body: String(init.body ?? ""),
+        signature: String(new Headers(init.headers).get("x-hub-signature-256") ?? ""),
+      });
+      replayAttempt += 1;
+      return new Response("{}", { status: replayAttempt === 1 ? 500 : 200 });
+    },
+    sleepImpl: async () => {},
+    backoffMs: 0,
+  });
+  assert.deepEqual(replayResult, { ok: true, attempts: 2, status: 200 });
+  assert.equal(replayCalls.length, 2);
+  assert.equal(replayCalls[0].body, replayCalls[1].body);
+  assert.equal(
+    verifyPayoutWebhook(replayCalls[0].body, replayCalls[0].signature, DEMO_WEBHOOK_SECRET),
+    true,
+  );
+  // The segment closes the demo: it follows the SLA deadline
+  // clearing segment, prints its lines verbatim, and its
+  // signature-check line is the demo's last line.
+  const deliveryAt = text.indexOf(
+    "Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):",
+  );
+  assert.ok(
+    deliveryAt > text.indexOf("SLA deadline clearing (clearSlaDeadline on a fixed task):"),
+    "single-target delivery segment must follow the SLA deadline clearing segment",
+  );
+  for (const line of [
+    "  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)",
+    "  delivery: ok attempts=2 status=200 (the first attempt answered 500 and the retry succeeded; a 429 Retry-After hint would have set that retry's delay, clamped to maxRetryDelayMs — the 500 fell back to exponential backoff, here backoffMs 0 with a no-op sleep, so nothing really waited)",
+    "  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it)",
+    "  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  ]) {
+    assert.ok(text.includes(line), `missing single-target delivery line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  );
+});
+
+test("demo single-target delivery segment is deterministic in outcome: two runs agree on the result and printed lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + endpoint / delivery / wire-check / signature-check
+  // lines; the printed lines carry no timestamps, eventIds or
+  // signatures (only fixed verdicts), so no normalization is
+  // needed — the wire bodies themselves differ between runs
+  // (the main webhook's at / eventId do) and are therefore
+  // compared only within each run.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.singleDeliveryResult, b.singleDeliveryResult);
+  assert.equal(a.singleDeliveryEndpoint, b.singleDeliveryEndpoint);
+  assert.equal(a.singleDeliveryCalls.length, 2);
+  assert.equal(a.singleDeliveryCalls[0].body, a.singleDeliveryCalls[1].body);
+  assert.equal(b.singleDeliveryCalls[0].body, b.singleDeliveryCalls[1].body);
+  assert.equal(a.singleDeliveryBodyVerifies, true);
+  assert.equal(b.singleDeliveryBodyVerifies, true);
 });
