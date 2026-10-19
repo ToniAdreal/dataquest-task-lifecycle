@@ -1460,7 +1460,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the twenty-nine hot
+`npm run bench` measures locally-observed throughput for the thirty hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, payout webhook
@@ -1473,7 +1473,8 @@ over a batch of tasks), payout webhook fan-out delivery
 payout webhook delivery (`deliverPayoutWebhook` to 1 endpoint),
 receiver-side
 payout event dedupe (`PayoutEventDedupe.checkAndRecord` duplicate
-hits and `PayoutEventDedupe.restore` snapshot restore), batch
+hits, `PayoutEventDedupe.restore` snapshot restore, and
+`PayoutEventDedupe.exportSnapshot` snapshot export), batch
 payout webhook building (`buildPayoutWebhooks` over
 a batch of PAID tasks), watchdog screening (`expiredTasks` /
 `staleTasks` over a batch of mixed-state tasks), and watchdog
@@ -1535,7 +1536,19 @@ none is evicted); its per-iteration self-checks pin the restored
 size and the zeroed observability counters to the hand-written
 expectations in the bench comments, spot-check the first / middle /
 last snapshot ids as duplicates, and an exhaustive all-ids check
-runs once outside the timed loop. The batch-build
+runs once outside the timed loop. The dedupe export path exports a
+fixed dedupe on every iteration (6 ids recorded under an
+injectable clock that advances only while the fixture is built,
+with a 60-second TTL: the first id recorded exactly one TTL
+before the export instant, so it is expired at export time, and
+5 later ids with staggered first-seen times all still live);
+its per-iteration self-check pins the snapshot to the
+hand-written expectations in the bench comments (`v` is 1,
+exactly the 5 live entries in recorded order, the first and
+last entries pinned in full, the expired id absent); outside
+the timed loop, a mutated detached copy is pinned to leave a
+re-export unchanged, and an empty dedupe is pinned to export
+`{ v: 1, entries: [] }`. The batch-build
 path builds webhooks for a fixed batch of 12 PAID tasks (settled exactly
 as quoted, each with a `payoutRef`) under one shared payload timestamp,
 with per-task `eventId`s from an injected deterministic factory; its
@@ -1844,43 +1857,44 @@ lifecycle of 8 dispatches + 8 routed error reports. One real run on
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~4,209 ops/sec (237.60 µs/op) |
-| replay (8-entry history) | ~3,401 ops/sec (294.00 µs/op) |
-| fromHistory (8-entry history) | ~1,504 ops/sec (664.85 µs/op) |
-| verifyHistoryChain (8 entries) | ~14,603 ops/sec (68.48 µs/op) |
-| buildPayoutWebhook (sign) | ~26,779 ops/sec (37.34 µs/op) |
-| verifyPayoutWebhook | ~47,452 ops/sec (21.07 µs/op) |
-| historyToNdjson (8 entries) | ~5,895 ops/sec (169.65 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~4,174 ops/sec (239.56 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~10,881 ops/sec (91.90 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~6,311 ops/sec (158.46 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~6,224 ops/sec (160.66 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~2,140 ops/sec (467.37 µs/op) |
-| deliverPayoutWebhook (single endpoint) | ~14,587 ops/sec (68.55 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,559,838 ops/sec (0.28 µs/op) |
-| PayoutEventDedupe.restore (1,000-entry snapshot) | ~1,260 ops/sec (793.88 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~2,598 ops/sec (384.96 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~266,047 ops/sec (3.76 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~77,440 ops/sec (12.91 µs/op) |
-| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~1,616 ops/sec (618.90 µs/op) |
-| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~1,487 ops/sec (672.29 µs/op) |
-| parsePayoutRetryAfter (11-value corpus) | ~166,842 ops/sec (5.99 µs/op) |
-| payoutMismatch (5-task set) | ~43,485 ops/sec (23.00 µs/op) |
-| allowedEvents (13 states) | ~302,773 ops/sec (3.30 µs/op) |
-| parseHistory (8-entry history) | ~12,125 ops/sec (82.47 µs/op) |
-| isTerminal (13 states) | ~863,823 ops/sec (1.16 µs/op) |
-| transitionTableJson (19 edges) | ~18,924 ops/sec (52.84 µs/op) |
-| transitionTable (19 edges) | ~64,630 ops/sec (15.47 µs/op) |
-| stateDiagram (19 edges) | ~28,089 ops/sec (35.60 µs/op) |
-| readmeDiagramInSync (README file read) | ~906.4 ops/sec (1103.26 µs/op) |
-| isOverdue (4-task corpus) | ~489,969 ops/sec (2.04 µs/op) |
-| subscribe (full lifecycle, 1 collecting listener) | ~6,392 ops/sec (156.44 µs/op) |
-| subscribe onError (full lifecycle, 1 throwing listener) | ~925.4 ops/sec (1080.66 µs/op) |
-| toJSON + fromJSON snapshot round-trip (8 entries) | ~2,813 ops/sec (355.50 µs/op) |
-| getSlaDeadline (13 states, 2 set) | ~502,383 ops/sec (1.99 µs/op) |
-| MAX_NOTE_LENGTH note guard (2-case corpus) | ~3,777 ops/sec (264.78 µs/op) |
-| setSlaDeadline + clearSlaDeadline (OPEN task write cycle) | ~181,042 ops/sec (5.52 µs/op) |
-| benchTransition (single step, snapshot restore) | ~86,421 ops/sec (11.57 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~5,840 ops/sec (171.24 µs/op) |
+| replay (8-entry history) | ~6,368 ops/sec (157.04 µs/op) |
+| fromHistory (8-entry history) | ~2,907 ops/sec (343.95 µs/op) |
+| verifyHistoryChain (8 entries) | ~13,582 ops/sec (73.63 µs/op) |
+| buildPayoutWebhook (sign) | ~43,123 ops/sec (23.19 µs/op) |
+| verifyPayoutWebhook | ~98,660 ops/sec (10.14 µs/op) |
+| historyToNdjson (8 entries) | ~8,415 ops/sec (118.83 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~8,161 ops/sec (122.54 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~15,039 ops/sec (66.50 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~15,247 ops/sec (65.59 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~13,128 ops/sec (76.18 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~3,239 ops/sec (308.75 µs/op) |
+| deliverPayoutWebhook (single endpoint) | ~47,807 ops/sec (20.92 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~2,585,131 ops/sec (0.39 µs/op) |
+| PayoutEventDedupe.restore (1,000-entry snapshot) | ~1,847 ops/sec (541.37 µs/op) |
+| PayoutEventDedupe.exportSnapshot (5 live entries, 1 expired) | ~637,912 ops/sec (1.57 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~2,462 ops/sec (406.12 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~212,170 ops/sec (4.71 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~57,930 ops/sec (17.26 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~1,742 ops/sec (574.00 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~1,098 ops/sec (910.46 µs/op) |
+| parsePayoutRetryAfter (11-value corpus) | ~277,640 ops/sec (3.60 µs/op) |
+| payoutMismatch (5-task set) | ~57,065 ops/sec (17.52 µs/op) |
+| allowedEvents (13 states) | ~192,119 ops/sec (5.21 µs/op) |
+| parseHistory (8-entry history) | ~15,239 ops/sec (65.62 µs/op) |
+| isTerminal (13 states) | ~865,783 ops/sec (1.16 µs/op) |
+| transitionTableJson (19 edges) | ~27,702 ops/sec (36.10 µs/op) |
+| transitionTable (19 edges) | ~21,982 ops/sec (45.49 µs/op) |
+| stateDiagram (19 edges) | ~26,533 ops/sec (37.69 µs/op) |
+| readmeDiagramInSync (README file read) | ~1,414 ops/sec (707.32 µs/op) |
+| isOverdue (4-task corpus) | ~625,550 ops/sec (1.60 µs/op) |
+| subscribe (full lifecycle, 1 collecting listener) | ~6,879 ops/sec (145.36 µs/op) |
+| subscribe onError (full lifecycle, 1 throwing listener) | ~1,014 ops/sec (986.58 µs/op) |
+| toJSON + fromJSON snapshot round-trip (8 entries) | ~4,645 ops/sec (215.28 µs/op) |
+| getSlaDeadline (13 states, 2 set) | ~631,900 ops/sec (1.58 µs/op) |
+| MAX_NOTE_LENGTH note guard (2-case corpus) | ~5,207 ops/sec (192.05 µs/op) |
+| setSlaDeadline + clearSlaDeadline (OPEN task write cycle) | ~201,968 ops/sec (4.95 µs/op) |
+| benchTransition (single step, snapshot restore) | ~50,428 ops/sec (19.83 µs/op) |
 
 Environment: Node v24.20.0, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host under load, so numbers vary run to run — several paths

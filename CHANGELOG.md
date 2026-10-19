@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout event dedupe snapshot export benchmark path:
+  `npm run bench` now also times
+  `PayoutEventDedupe.exportSnapshot()` on a fixed dedupe
+  (6 ids recorded under an injectable clock that advances
+  only while the fixture is built, with a 60-second TTL —
+  the first id recorded exactly one TTL before the export
+  instant, so it is expired at export time, and 5 later ids
+  with staggered first-seen times all still live) — the
+  export direction a receiver pays before every restart,
+  previously visible only as an incidental fixture
+  construction for the restore row. Its per-iteration
+  self-check pins the snapshot to the hand-written
+  expectations (`v` is 1, exactly the 5 live entries in
+  recorded order, the first and last entries pinned in
+  full, the expired id absent); outside the timed loop, a
+  mutated detached copy is pinned to leave a re-export
+  unchanged, and an empty dedupe is pinned to export
+  `{ v: 1, entries: [] }`. The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`PayoutEventDedupe.exportSnapshot (5 live entries, 1
+  expired)` at ~637,912 ops/sec on that run, against
+  ~1,847 ops/sec for one 1,000-entry restore pass). No
+  network, no randomness, and no wall clock after fixture
+  construction. Benchmark only; no library behavior
+  change.
+
 - A payout dedupe stats observability segment closing
   the CLI demo: a fresh `PayoutEventDedupe` under an
   injected fixed clock with a small `maxEntries` (3)
