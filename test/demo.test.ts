@@ -422,11 +422,18 @@ Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore a
   exportSnapshot(): v 1, 2 entries — only the version and entry count are printed, never the full entries (persist the JSON before shutdown)
   after JSON round-trip + PayoutEventDedupe.restore(): stats size 2, hits 0, misses 0, evictions 0 — counters restart at zero, the recorded ids do not
   restored dedupe: eventId evt_demo_payout_001 — checkAndRecord: true (duplicate — the restart did not reopen the dedupe window); eventId evt_demo_payout_002 — checkAndRecord: true (duplicate); eventId evt_demo_payout_003 — checkAndRecord: false (new event, recorded)
-  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication`;
+  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication
+
+Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):
+  dedupe (fixed clock <timestamp>, TTL 60000 ms, maxEntries 3): initial stats size 0, hits 0, misses 0, evictions 0 — no delivery seen yet
+  eventId evt_demo_stats_001 — checkAndRecord: false (new event) -> stats size 1, hits 0, misses 1, evictions 0; again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0
+  eventId evt_demo_stats_002 — checkAndRecord: false (new event) -> stats size 2, hits 1, misses 2, evictions 0; eventId evt_demo_stats_003 — checkAndRecord: false (new event) -> stats size 3, hits 1, misses 3, evictions 0 (store full)
+  eventId evt_demo_stats_004 — checkAndRecord: false (new event, evicts least recently seen evt_demo_stats_001) -> stats size 3, hits 1, misses 4, evictions 1
+  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 363);
+  assert.equal(lines.length, 370);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1871,7 +1878,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 363);
+  assert.equal(out.trimEnd().split("\n").length, 370);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3099,7 +3106,8 @@ test("demo shows the subscribe onError segment in-process: throwing listener rou
   assert.equal(probe.history.length, 1);
   // The segment follows the single-target delivery segment
   // and prints its lines verbatim (the payout dedupe snapshot
-  // persistence segment now closes the demo after it).
+  // persistence segment follows it, and the payout dedupe
+  // stats segment now closes the demo).
   const onErrorAt = text.indexOf(
     "Subscribe onError error routing (a throwing listener routed to onError):",
   );
@@ -3233,9 +3241,9 @@ test("demo shows the payout dedupe snapshot persistence segment in-process: ids 
       ),
     /^Error: PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 \(expected 1\)$/,
   );
-  // The segment closes the demo: it follows the subscribe
-  // onError segment, prints its lines verbatim, and its
-  // tampered-snapshot line is the demo's last line.
+  // The segment follows the subscribe onError segment and
+  // prints its lines verbatim (the payout dedupe stats
+  // segment now closes the demo after it).
   const snapshotAt = text.indexOf(
     "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
   );
@@ -3255,9 +3263,11 @@ test("demo shows the payout dedupe snapshot persistence segment in-process: ids 
   ]) {
     assert.ok(text.includes(line), `missing payout dedupe snapshot line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    '  tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication',
+  assert.ok(
+    text.indexOf(
+      "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+    ) > snapshotAt,
+    "payout dedupe stats segment must follow the payout dedupe snapshot segment",
   );
 });
 
@@ -3265,6 +3275,7 @@ test("demo payout dedupe snapshot segment is deterministic: two runs print byte-
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):"),
+      ls.indexOf("Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3284,4 +3295,110 @@ test("demo payout dedupe snapshot segment is deterministic: two runs print byte-
     a.dedupeSnapshotTamperedError,
     b.dedupeSnapshotTamperedError,
   );
+});
+
+test("demo shows the payout dedupe stats observability segment in-process: pinned script counters step by step, one LRU eviction, detached copy mutation leaves the store unchanged", async () => {
+  const {
+    dedupeStatsDedupe,
+    dedupeStatsOutcomes,
+    dedupeStatsSnapshots,
+    dedupeStatsAfterMutation,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // stats docs in src/settlementWebhook.ts and the
+  // payoutEventDedupe stats test, never derived by calling
+  // stats() itself.
+  assert.deepEqual(dedupeStatsOutcomes, [false, true, false, false, false]);
+  assert.deepEqual(dedupeStatsSnapshots, [
+    { size: 0, hits: 0, misses: 0, evictions: 0 },
+    { size: 1, hits: 0, misses: 1, evictions: 0 },
+    { size: 1, hits: 1, misses: 1, evictions: 0 },
+    { size: 2, hits: 1, misses: 2, evictions: 0 },
+    { size: 3, hits: 1, misses: 3, evictions: 0 },
+    { size: 3, hits: 1, misses: 4, evictions: 1 },
+  ]);
+  assert.deepEqual(dedupeStatsAfterMutation, {
+    size: 3,
+    hits: 1,
+    misses: 4,
+    evictions: 1,
+  });
+  assert.equal(dedupeStatsDedupe.size, 3);
+  assert.deepEqual(dedupeStatsDedupe.stats(), {
+    size: 3,
+    hits: 1,
+    misses: 4,
+    evictions: 1,
+  });
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: a fresh dedupe reproduces the counter
+  // steps and the detached-copy semantics on its own (the
+  // maxEntries: 2 script from the dedupe stats test).
+  const START_MS = Date.parse("2026-03-25T09:00:00.000Z");
+  const independent = new PayoutEventDedupe({
+    ttlMs: 60_000,
+    maxEntries: 2,
+    now: () => START_MS,
+  });
+  independent.checkAndRecord("a"); // miss
+  independent.checkAndRecord("a"); // hit
+  independent.checkAndRecord("b"); // miss
+  independent.checkAndRecord("c"); // miss, evicts "a" (LRU)
+  assert.deepEqual(independent.stats(), {
+    size: 2,
+    hits: 1,
+    misses: 3,
+    evictions: 1,
+  });
+  const detached = independent.stats();
+  detached.hits = 999;
+  assert.equal(independent.stats().hits, 1);
+  // The segment closes the demo: it follows the payout dedupe
+  // snapshot segment, prints its lines verbatim, and its
+  // detached-copy line is the demo's last line.
+  const statsAt = text.indexOf(
+    "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+  );
+  assert.ok(
+    statsAt >
+      text.indexOf(
+        "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
+      ),
+    "payout dedupe stats segment must follow the payout dedupe snapshot segment",
+  );
+  for (const line of [
+    "  dedupe (fixed clock 2026-03-25T09:00:00.000Z, TTL 60000 ms, maxEntries 3): initial stats size 0, hits 0, misses 0, evictions 0 — no delivery seen yet",
+    "  eventId evt_demo_stats_001 — checkAndRecord: false (new event) -> stats size 1, hits 0, misses 1, evictions 0; again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0",
+    "  eventId evt_demo_stats_002 — checkAndRecord: false (new event) -> stats size 2, hits 1, misses 2, evictions 0; eventId evt_demo_stats_003 — checkAndRecord: false (new event) -> stats size 3, hits 1, misses 3, evictions 0 (store full)",
+    "  eventId evt_demo_stats_004 — checkAndRecord: false (new event, evicts least recently seen evt_demo_stats_001) -> stats size 3, hits 1, misses 4, evictions 1",
+    "  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view",
+  ]) {
+    assert.ok(text.includes(line), `missing payout dedupe stats line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view",
+  );
+});
+
+test("demo payout dedupe stats segment is deterministic: two runs print byte-identical observability lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + dedupe / first-id / fill / eviction /
+  // detached-copy lines; every value in the segment is a fixed
+  // literal (fixed clock, fixed eventIds, fixed TTL and
+  // capacity), so no normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.dedupeStatsOutcomes, b.dedupeStatsOutcomes);
+  assert.deepEqual(a.dedupeStatsSnapshots, b.dedupeStatsSnapshots);
+  assert.deepEqual(a.dedupeStatsAfterMutation, b.dedupeStatsAfterMutation);
 });

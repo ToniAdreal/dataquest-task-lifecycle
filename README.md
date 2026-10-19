@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 552 tests, all local
+npm test   # 554 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -263,7 +263,7 @@ the hand-pinned chain, and — on a separate probe task
 (DEMO-023) — that an `onError` hook that itself throws is
 swallowed too — the listener-failure observability path,
 shown instead of only asserted by the subscribe onError
-tests. — and a closing payout dedupe snapshot
+tests. — and a payout dedupe snapshot
 persistence segment that records two fixed payout
 `eventId`s on a fresh `PayoutEventDedupe` under an
 injected fixed clock (each new on first sight, a
@@ -277,7 +277,21 @@ read as duplicates and an unseen id reads as new, and a
 detached copy of the snapshot with its version rewritten
 to 2 is rejected with the exact invalid-snapshot error —
 the receiver-restart persistence path, shown instead of
-only asserted by the dedupe snapshot tests.
+only asserted by the dedupe snapshot tests. — and a closing payout dedupe stats
+observability segment that runs a fresh
+`PayoutEventDedupe` under an injected fixed clock with a
+small `maxEntries` (3) through a pinned script — a new
+`eventId`, its immediate redelivery, two more new ids that
+fill the store, and a fourth new id that evicts the least
+recently seen one — printing `stats()` (`size` / `hits` /
+`misses` / `evictions`) after every step (the duplicate is
+the only hit, every first sighting is a miss, exactly one
+eviction), and then mutates a returned stats object (hits
+set to 999) to show the store's own counters stay at
+`{ size: 3, hits: 1, misses: 4, evictions: 1 }` — the
+snapshot is a detached copy, not a live view — the
+receiver-operations observability surface, shown instead
+of only asserted by the dedupe stats tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1302,7 +1316,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 552 tests covering the happy path, reject→resubmit
+`npm test` runs 554 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

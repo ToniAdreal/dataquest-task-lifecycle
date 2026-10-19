@@ -203,7 +203,7 @@
  * chain, and — on a separate probe task — that an `onError`
  * hook that itself throws is swallowed too — the
  * listener-failure observability path a reader has only
- * seen with a collecting listener so far — and finally a
+ * seen with a collecting listener so far — and a
  * payout dedupe snapshot persistence segment: a fresh
  * `PayoutEventDedupe` under an injected fixed clock records
  * two fixed payout `eventId`s (each new on first sight, a
@@ -217,7 +217,19 @@
  * detached copy of the snapshot with its version rewritten
  * to 2 is rejected with the exact invalid-snapshot error —
  * the receiver-restart persistence path a reader has only
- * seen asserted by the dedupe snapshot tests so far.
+ * seen asserted by the dedupe snapshot tests so far —
+ * and finally a payout dedupe stats observability segment:
+ * a fresh `PayoutEventDedupe` under an injected fixed clock
+ * with a small `maxEntries` runs a pinned script (a new
+ * `eventId`, its immediate redelivery, two more new ids that
+ * fill the store, and a fourth new id that evicts the least
+ * recently seen one), printing `stats()` — the `{ size,
+ * hits, misses, evictions }` counters — after every step,
+ * and a returned stats object is then mutated to show the
+ * snapshot is a detached copy that leaves the store's own
+ * counters unchanged — the receiver-operations
+ * observability surface a reader has only seen asserted by
+ * the dedupe stats tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -265,6 +277,11 @@
  * duplicate outcomes, the exported snapshot, the restored
  * store's zeroed stats, its still-duplicate and unseen
  * verdicts, and the tampered copy's rejection error,
+ * the payout dedupe stats observability segment's dedupe
+ * with its pinned-script outcomes, its per-step stats
+ * snapshots (the initial reading plus one after each
+ * scripted call), and the stats read back after a detached
+ * copy is mutated,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -439,6 +456,14 @@ export interface DemoResult {
   dedupeSnapshotRestoredUnseen: boolean;
   /** Rejection for the detached `v: 2` copy ("" if it was accepted). */
   dedupeSnapshotTamperedError: string;
+  /** Dedupe for the closing stats observability segment. */
+  dedupeStatsDedupe: PayoutEventDedupe;
+  /** `checkAndRecord` outcomes for the segment's pinned script. */
+  dedupeStatsOutcomes: boolean[];
+  /** `stats()` after the initial read and each scripted call (6). */
+  dedupeStatsSnapshots: PayoutEventDedupeStats[];
+  /** Stats read back after a detached copy was mutated (unchanged). */
+  dedupeStatsAfterMutation: PayoutEventDedupeStats;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -2718,7 +2743,115 @@ export async function runDemo(): Promise<DemoResult> {
     `  tampered snapshot rejected: a detached copy with v changed to 2 throws "${dedupeSnapshotTamperedError}" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+
+  // Payout dedupe stats observability segment (closing): the
+  // receiver-side dedupe segment above showed the duplicate
+  // verdicts themselves and the snapshot segment showed the
+  // ids surviving a restart, but neither showed the counters
+  // a receiver operator watches while deliveries are flowing:
+  // stats() returns { size, hits, misses, evictions } — size
+  // the live entries, hits the deliveries judged duplicates,
+  // misses the first sightings recorded, evictions the
+  // entries dropped to make room. Here a FRESH dedupe under
+  // an injected fixed clock (2026-03-25T09:00:00.000Z, the
+  // same 60_000 ms demo TTL policy) with a small maxEntries
+  // of 3 runs a pinned script — one new eventId, its
+  // immediate redelivery, two more new ids that fill the
+  // store, and a fourth new id that needs room — printing
+  // stats() after every step. A stats object returned at the
+  // end is then mutated (hits set to 999) and the store is
+  // read again: the counters do not move, because stats()
+  // hands out a detached copy, not a live view. Hand-written
+  // expectations — written out here from the stats docs in
+  // src/settlementWebhook.ts and the payoutEventDedupe stats
+  // test, never derived by calling stats() itself:
+  //   - the outcomes are exactly
+  //     [false, true, false, false, false] (new, duplicate,
+  //     new, new, new);
+  //   - the stats readings (initial, then after each call)
+  //     are exactly {0,0,0,0}, {1,0,1,0}, {1,1,1,0},
+  //     {2,1,2,0}, {3,1,3,0}, {3,1,4,1} as
+  //     { size, hits, misses, evictions }: the duplicate is
+  //     the only hit, every first sighting is a miss, and
+  //     the fourth new id evicts exactly one entry — the
+  //     least recently seen evt_demo_stats_001 (its duplicate
+  //     hit refreshed its recency while it was the only
+  //     entry, so it is still the oldest once 002 and 003
+  //     are recorded after it);
+  //   - after the detached copy's hits are set to 999 the
+  //     store still reads {3,1,4,1} and its size is 3.
+  // The clock never advances, so zero network, zero
+  // randomness, and no wall clock enter the segment. The
+  // segment asserts all of this here, outside the printed
+  // lines: a counter that miscounted a hit or an eviction,
+  // or a stats() that leaked a live view, would fail the
+  // demo itself, not just a test.
+  const DEDUPE_STATS_START_MS = Date.parse("2026-03-25T09:00:00.000Z");
+  const DEDUPE_STATS_TTL_MS = 60_000;
+  const DEDUPE_STATS_MAX_ENTRIES = 3;
+  const DEDUPE_STATS_EVENT_IDS = [
+    "evt_demo_stats_001",
+    "evt_demo_stats_002",
+    "evt_demo_stats_003",
+    "evt_demo_stats_004",
+  ];
+  const dedupeStatsDedupe = new PayoutEventDedupe({
+    ttlMs: DEDUPE_STATS_TTL_MS,
+    maxEntries: DEDUPE_STATS_MAX_ENTRIES,
+    now: () => DEDUPE_STATS_START_MS,
+  });
+  const dedupeStatsSnapshots: PayoutEventDedupeStats[] = [
+    dedupeStatsDedupe.stats(),
+  ];
+  const dedupeStatsOutcomes: boolean[] = [];
+  dedupeStatsOutcomes.push(
+    dedupeStatsDedupe.checkAndRecord(DEDUPE_STATS_EVENT_IDS[0]),
+  );
+  dedupeStatsSnapshots.push(dedupeStatsDedupe.stats());
+  dedupeStatsOutcomes.push(
+    dedupeStatsDedupe.checkAndRecord(DEDUPE_STATS_EVENT_IDS[0]),
+  );
+  dedupeStatsSnapshots.push(dedupeStatsDedupe.stats());
+  for (const eventId of DEDUPE_STATS_EVENT_IDS.slice(1)) {
+    dedupeStatsOutcomes.push(dedupeStatsDedupe.checkAndRecord(eventId));
+    dedupeStatsSnapshots.push(dedupeStatsDedupe.stats());
+  }
+  const dedupeStatsDetached = dedupeStatsDedupe.stats();
+  dedupeStatsDetached.hits = 999;
+  const dedupeStatsAfterMutation = dedupeStatsDedupe.stats();
+  if (
+    JSON.stringify(dedupeStatsOutcomes) !==
+      JSON.stringify([false, true, false, false, false]) ||
+    JSON.stringify(dedupeStatsSnapshots) !==
+      JSON.stringify([
+        { size: 0, hits: 0, misses: 0, evictions: 0 },
+        { size: 1, hits: 0, misses: 1, evictions: 0 },
+        { size: 1, hits: 1, misses: 1, evictions: 0 },
+        { size: 2, hits: 1, misses: 2, evictions: 0 },
+        { size: 3, hits: 1, misses: 3, evictions: 0 },
+        { size: 3, hits: 1, misses: 4, evictions: 1 },
+      ]) ||
+    JSON.stringify(dedupeStatsAfterMutation) !==
+      JSON.stringify({ size: 3, hits: 1, misses: 4, evictions: 1 }) ||
+    dedupeStatsDedupe.size !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: PayoutEventDedupe stats observability does not match the hand-pinned contract (pinned script outcomes new/duplicate/new/new/new, per-step stats {0,0,0,0} {1,0,1,0} {1,1,1,0} {2,1,2,0} {3,1,3,0} {3,1,4,1}, one LRU eviction of the first id, and a mutated detached copy leaving the store at {3,1,4,1})",
+    );
+  }
+  const fmtDedupeStats = (st: PayoutEventDedupeStats): string =>
+    `size ${st.size}, hits ${st.hits}, misses ${st.misses}, evictions ${st.evictions}`;
+  lines.push(
+    "",
+    "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+    `  dedupe (fixed clock ${new Date(DEDUPE_STATS_START_MS).toISOString()}, TTL ${DEDUPE_STATS_TTL_MS} ms, maxEntries ${DEDUPE_STATS_MAX_ENTRIES}): initial stats ${fmtDedupeStats(dedupeStatsSnapshots[0])} — no delivery seen yet`,
+    `  eventId ${DEDUPE_STATS_EVENT_IDS[0]} — checkAndRecord: ${dedupeStatsOutcomes[0]} (new event) -> stats ${fmtDedupeStats(dedupeStatsSnapshots[1])}; again: ${dedupeStatsOutcomes[1]} (duplicate) -> stats ${fmtDedupeStats(dedupeStatsSnapshots[2])}`,
+    `  eventId ${DEDUPE_STATS_EVENT_IDS[1]} — checkAndRecord: ${dedupeStatsOutcomes[2]} (new event) -> stats ${fmtDedupeStats(dedupeStatsSnapshots[3])}; eventId ${DEDUPE_STATS_EVENT_IDS[2]} — checkAndRecord: ${dedupeStatsOutcomes[3]} (new event) -> stats ${fmtDedupeStats(dedupeStatsSnapshots[4])} (store full)`,
+    `  eventId ${DEDUPE_STATS_EVENT_IDS[3]} — checkAndRecord: ${dedupeStatsOutcomes[4]} (new event, evicts least recently seen ${DEDUPE_STATS_EVENT_IDS[0]}) -> stats ${fmtDedupeStats(dedupeStatsSnapshots[5])}`,
+    `  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at ${fmtDedupeStats(dedupeStatsAfterMutation)} — the snapshot is a copy, not a live view`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

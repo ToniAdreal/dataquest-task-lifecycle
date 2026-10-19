@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout dedupe stats observability segment closing
+  the CLI demo: a fresh `PayoutEventDedupe` under an
+  injected fixed clock with a small `maxEntries` (3)
+  runs a pinned script (a new `eventId`, its immediate
+  redelivery, two more new ids that fill the store, and
+  a fourth new id that evicts the least recently seen
+  one), printing `stats()` — `{ size, hits, misses,
+  evictions }` — after every step; a returned stats
+  object is then mutated (hits set to 999) and the store
+  still reads `{ size: 3, hits: 1, misses: 4, evictions:
+  1 }`, showing the snapshot is a detached copy, not a
+  live view. The demo tests pin the segment against
+  hand-written expectations, including an independent
+  in-test counter script and detached-copy check. Demo
+  and tests only; no library behavior change.
+
 - A payout dedupe snapshot persistence segment closing
   the CLI demo: a fresh `PayoutEventDedupe` under an
   injected fixed clock records two fixed payout
