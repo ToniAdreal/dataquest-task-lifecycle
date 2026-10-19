@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the twenty-eight hot-path
+ * Measures real, locally-observed throughput for the twenty-nine hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -378,6 +378,26 @@
  *      the backoff waits). Zero network, zero randomness,
  *      and no real waiting.
  *
+ *  29. subscribe onError error routing — `subscribe()` with
+ *      one fixed throwing listener and a collecting `onError`
+ *      hook on a fresh task, driven through the same fixed
+ *      full DRAFT -> PAID lifecycle as group 1 (see the
+ *      subscribe onError fixture below). This is the
+ *      failure-visibility side of group 21: every notification
+ *      throws, every throw is routed to `onError` with the
+ *      dispatch context, and dispatch itself never fails.
+ *      One timed pass is one full subscribed lifecycle of 8
+ *      dispatches + 8 routed error reports; its per-iteration
+ *      self-check pins that every dispatch succeeded, the
+ *      history count and the report count both equal the
+ *      dispatch count (8), and the first report's message and
+ *      context match the hand-written expectations. Outside
+ *      the timed loop, a probe pins that a throwing `onError`
+ *      is swallowed too, and the non-function `onError`
+ *      rejection is pinned to its exact message. No network,
+ *      no randomness, and no wall clock: every dispatch
+ *      timestamp is fixed.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -419,9 +439,11 @@ import {
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
+  type ListenerErrorContext,
   type PayoutMismatch,
   type PayoutWebhookEndpoint,
   type PayoutWebhookFetchImpl,
+  type SubscribeOptions,
   type TaskEvent,
   type TaskHistoryEntry,
   type TaskSnapshot,
@@ -2067,6 +2089,174 @@ function checkSubscribe(
   }
 }
 
+// Subscribe onError fixture: one fixed throwing listener subscribed
+// to a fresh task BEFORE any dispatch, with a collecting `onError`
+// hook, then the task is driven through the same fixed full
+// lifecycle as `runSubscribedLifecycle()` (the LIFECYCLE table
+// above: same events, actors, per-step timestamp offsets from
+// BASE_MS, and ACCEPT quote / PAYOUT_COMPLETE settlement extras).
+// Hand-written expectations — written out here from the subscribe
+// source in src/taskLifecycle.ts and cross-checked against
+// test/subscribeOnError.test.ts and the demo's subscribe onError
+// segment, never derived by calling the routing itself:
+//   - all 8 dispatches return normally, in lifecycle order
+//     (OPEN, ACCEPTED, CAPTURING, SUBMITTED, IN_REVIEW, APPROVED,
+//     PAYOUT_PENDING, PAID), and the task lands in PAID with all
+//     8 audit entries intact;
+//   - `onError` receives exactly 8 reports — one per dispatch,
+//     equal to the dispatch count — each carrying the thrown
+//     error's message ("bench listener failure") and the dispatch
+//     context of the step being notified; the first report is
+//     pinned in full: PUBLISH, DRAFT -> OPEN;
+//   - the task has exactly 1 listener while subscribed.
+const SUBSCRIBE_ONERROR_EXPECTED_COUNT = 8;
+const SUBSCRIBE_ONERROR_EXPECTED_RESULTS: TaskState[] = [
+  "OPEN",
+  "ACCEPTED",
+  "CAPTURING",
+  "SUBMITTED",
+  "IN_REVIEW",
+  "APPROVED",
+  "PAYOUT_PENDING",
+  "PAID",
+];
+const SUBSCRIBE_ONERROR_MESSAGE = "bench listener failure";
+const SUBSCRIBE_ONERROR_FIRST: {
+  message: string;
+  event: TaskEvent;
+  from: TaskState;
+  to: TaskState;
+} = {
+  message: SUBSCRIBE_ONERROR_MESSAGE,
+  event: "PUBLISH",
+  from: "DRAFT",
+  to: "OPEN",
+};
+type SubscribeOnErrorReport = {
+  message: string;
+  ctx: ListenerErrorContext;
+};
+function runSubscribedOnErrorLifecycle(): {
+  task: TaskLifecycle;
+  reports: SubscribeOnErrorReport[];
+  results: TaskState[];
+} {
+  const task = new TaskLifecycle("BENCH-SUB-ONERR-001");
+  const reports: SubscribeOnErrorReport[] = [];
+  task.subscribe(
+    () => {
+      throw new Error(SUBSCRIBE_ONERROR_MESSAGE);
+    },
+    {
+      onError: (err, ctx) => {
+        reports.push({
+          message: err instanceof Error ? err.message : String(err),
+          ctx,
+        });
+      },
+    },
+  );
+  const results: TaskState[] = [];
+  LIFECYCLE.forEach(({ event, actor, extra }, i) => {
+    results.push(
+      task.dispatch(event, {
+        actor,
+        at: new Date(BASE_MS + i * 1000).toISOString(),
+        ...extra,
+      }),
+    );
+  });
+  return { task, reports, results };
+}
+function checkSubscribeOnError(
+  task: TaskLifecycle,
+  reports: SubscribeOnErrorReport[],
+  results: TaskState[],
+  where: string,
+): void {
+  if (
+    task.state !== "PAID" ||
+    task.listenerCount !== 1 ||
+    task.history.length !== SUBSCRIBE_ONERROR_EXPECTED_COUNT ||
+    reports.length !== SUBSCRIBE_ONERROR_EXPECTED_COUNT ||
+    JSON.stringify(results) !==
+      JSON.stringify(SUBSCRIBE_ONERROR_EXPECTED_RESULTS) ||
+    reports.some((r) => r.message !== SUBSCRIBE_ONERROR_MESSAGE) ||
+    reports[0].ctx.event !== SUBSCRIBE_ONERROR_FIRST.event ||
+    reports[0].ctx.from !== SUBSCRIBE_ONERROR_FIRST.from ||
+    reports[0].ctx.to !== SUBSCRIBE_ONERROR_FIRST.to
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): a subscribed
+// throwing lifecycle routes exactly the hand-written report count,
+// with the first report's context pinned in full.
+{
+  const { task, reports, results } = runSubscribedOnErrorLifecycle();
+  checkSubscribeOnError(task, reports, results, "subscribe onError fixture");
+}
+// One-time throwing-onError validation (outside the timed loop): an
+// `onError` hook that itself throws is swallowed too — both probe
+// dispatches return normally and the audit history holds both
+// entries (hand-written expectations from
+// test/subscribeOnError.test.ts).
+{
+  const task = new TaskLifecycle("BENCH-SUB-ONERR-002");
+  task.subscribe(
+    () => {
+      throw new Error("bench probe listener failure");
+    },
+    {
+      onError: () => {
+        throw new Error("bench probe onError failure");
+      },
+    },
+  );
+  const first = task.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: new Date(BASE_MS).toISOString(),
+  });
+  const second = task.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 1000).toISOString(),
+  });
+  if (
+    first !== "OPEN" ||
+    second !== "ACCEPTED" ||
+    task.state !== "ACCEPTED" ||
+    task.history.length !== 2
+  ) {
+    throw new Error("benchmark self-check failed: subscribe onError probe");
+  }
+}
+// One-time invalid-onError validation (outside the timed loop): a
+// non-function `onError` is rejected at subscribe time with exactly
+// `invalid subscribe: onError must be a function, got string`
+// (the wording test/subscribeOnError.test.ts pins), and nothing is
+// registered by the failed attempt.
+{
+  const task = new TaskLifecycle("BENCH-SUB-ONERR-003");
+  let caught: unknown;
+  try {
+    task.subscribe(() => {}, {
+      onError: "nope",
+    } as unknown as SubscribeOptions);
+  } catch (err) {
+    caught = err;
+  }
+  if (
+    !(caught instanceof Error) ||
+    caught.message !==
+      "invalid subscribe: onError must be a function, got string" ||
+    task.listenerCount !== 0
+  ) {
+    throw new Error(
+      "benchmark self-check failed: subscribe onError rejection",
+    );
+  }
+}
+
 // Snapshot round-trip fixture: the module-scope `paidTask` above
 // (the same fixed full lifecycle as group 1: BENCH-001 driven
 // DRAFT -> PAID by the LIFECYCLE table — same events, actors,
@@ -3246,6 +3436,20 @@ function benchSubscribe(): number {
   }, ITERATIONS);
 }
 
+function benchSubscribeOnError(): number {
+  return measure(() => {
+    // Fresh task per iteration: dispatch mutates the task, so no
+    // subscribed lifecycle can be reused across calls. The
+    // fixture rebuild cost is inside the timed region.
+    // Per-iteration self-check: every dispatch succeeded, the
+    // history count and the routed report count both equal the
+    // dispatch count, and the first report matches the
+    // hand-written expectations (see the fixture above).
+    const { task, reports, results } = runSubscribedOnErrorLifecycle();
+    checkSubscribeOnError(task, reports, results, "subscribe onError");
+  }, ITERATIONS);
+}
+
 function benchSnapshotRoundTrip(): number {
   return measure(() => {
     // Per-iteration self-check: the restored task's state, full
@@ -3323,7 +3527,7 @@ console.log("dataquest-task-lifecycle benchmark");
 console.log(`Node: ${process.version} on ${process.platform}/${process.arch}`);
 console.log(`CPU: ${cpus()[0]?.model ?? "unknown"}`);
 console.log(
-  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout webhook single-target delivery (deliverPayoutWebhook to 1 fixed endpoint through an injected fake fetch — immediate 200, no network, backoffMs 0 with an injected no-op sleep — checked for result {ok: true, attempts: 1, status: 200}, exactly one captured call, and a captured body byte-identical to the signed body whose X-Hub-Signature-256 equals the buildPayoutWebhook signature and verifies over the captured body on every iteration, with the persistent-500 reported exhaustion shape {ok: false, attempts: 3, status: 500, error: \"server responded with status 500\"} pinned once outside the timed loop); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop; single-step transition dispatch (benchTransition restoring the fixed OPEN snapshot \u2014 1 PUBLISH entry at the base instant \u2014 and dispatching one ACCEPT step pinned at BASE + 1s with quotedAmount 125, checked on every iteration for the one-step state advance OPEN -> ACCEPTED, exactly one appended entry, and a gap-free seq continuation, with an exhaustive pure-transition check over all 13 states x 15 events \u2014 19 legal edges returning their hand-pinned targets, every other pair throwing the exact invalid-transition message, including the illegal PAYOUT_COMPLETE dispatch from OPEN \u2014 asserted once outside the timed loop; transition-table pure object construction (transitionTable) with no arguments, checked on every iteration against the hand-pinned 19 edges written out in full in declaration order (every edge key order from, event, to; spot-checked against the transitionTableJson edge set via the shared pinned first, payout (index 14), and last edges), with the full edge set compared to the parsed JSON edge set edge for edge and a hand-pinned non-existent edge (DRAFT / PAYOUT_COMPLETE / PAID) confirmed absent from both once outside the timed loop",
+  "Fixture: one task, full DRAFT -> PAID lifecycle (8 hash-chained audit entries); payout webhook HMAC-SHA256 with fixed secret/timestamp/eventId; NDJSON text exported from the same 8-entry history; reconciliation screening and totalPaidOut summary over a fixed batch of 12 PAID tasks (4 exact+ref, 4 mismatched+ref, 2 exact without ref, 2 mismatched without ref); payout webhook fan-out to 4 endpoints through an injected fake fetch (immediate 200, no network); payout webhook single-target delivery (deliverPayoutWebhook to 1 fixed endpoint through an injected fake fetch — immediate 200, no network, backoffMs 0 with an injected no-op sleep — checked for result {ok: true, attempts: 1, status: 200}, exactly one captured call, and a captured body byte-identical to the signed body whose X-Hub-Signature-256 equals the buildPayoutWebhook signature and verifies over the captured body on every iteration, with the persistent-500 reported exhaustion shape {ok: false, attempts: 3, status: 500, error: \"server responded with status 500\"} pinned once outside the timed loop); payout event dedupe duplicate hits cycling over 1,000 pre-recorded eventIds under a fixed injected clock; payout event dedupe restore from a 1,000-entry JSON-round-tripped snapshot under the same fixed clock (all entries live at load, default TTL and capacity, observability counters restarting at zero); batch payout webhook building over a fixed batch of 12 PAID tasks (settled as quoted, each with a payoutRef) under one shared timestamp with deterministic per-task eventIds from an injected factory; watchdog screening (expiredTasks / staleTasks) over a fixed batch of 12 mixed-state tasks (4 hand-counted expired, 4 hand-counted stale) under one injected fixed now with per-state dwell budgets; watchdog execution (expireOverdueTasks / actOnStaleTasks with the default ABANDON action) over the same batch, rebuilt fresh on every iteration because the executors mutate their inputs (3 of 4 expire, 1 of 4 stale actions succeed, the rest fail in isolation); payout Retry-After parsing (parsePayoutRetryAfter) over a fixed 11-value corpus (delay-seconds, future/past HTTP-dates, signed and garbage values, and absent values) under an injected fixed nowMs; payout mismatch judgement (payoutMismatch) over a fixed set of 5 tasks (settled exactly as quoted, settled for a different amount, missing quote, missing settled amount, and one non-PAID task) with fixed dispatch timestamps; allowed-events query (allowedEvents) over all 13 states with hand-written per-state expectations (terminal states PAID / ABANDONED / EXPIRED returning an empty list); standalone history parsing (parseHistory) over the same fixed 8-entry chained history (full validation — unknown-field fail-closed, gapless seq, from/to chain and hash-chain re-verification — without per-line JSON parsing, with a detached tampered copy rejected outside the timed loop); terminal-state judgement (isTerminal) over all 13 states with hand-written per-state truth values (only PAID / ABANDONED / EXPIRED returning true); transition-table JSON export (transitionTableJson) with no arguments, serialized as canonical JSON in declaration order, parsed back on every iteration to exactly the 19 snapshot-pinned edges with the first, payout, and last edges in place; state diagram generation (stateDiagram) with no arguments, rendered as a Mermaid stateDiagram-v2 block on every iteration to exactly the 24 hand-pinned lines with all 13 states present and the 19 snapshot-pinned edges in place; README diagram sync check (readmeDiagramInSync) with no arguments, reading only this repo's README.md on every iteration and returning true, the in-sync state pinned by the test suite; SLA overdue judgement (isOverdue) over a fixed corpus of 4 ACCEPTED tasks (already overdue, exactly at the deadline, not yet overdue, and no SLA deadline) under one injected fixed now, with hand-written per-task expectations pinning the inclusive deadline boundary; dispatch subscription notification (subscribe) with 1 fixed collecting listener over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration against the hand-written (event, from, to) sequence and the task's own history entry for entry, with unsubscribe and throwing-listener isolation checks outside the timed loop; JSON snapshot round-trip (toJSON + TaskLifecycle.fromJSON) over the same task's fixed 8-entry snapshot envelope (v 1, empty SLA deadlines, unlimited budgets so no budget fields in the envelope), self-checked per iteration against the hand-written expectations (restored state and history entry for entry, hashes included, history-derived used RESUBMIT / DISPUTE counts at 0 on both sides, re-export fixed point at the same serialized byte length), with a JSON text (stringify / parse) round-trip check outside the timed loop and two detached tampered copies (v rewritten to 2, one extra top-level field) rejected with their hand-pinned envelope errors outside the timed loop; event-sourced rebuild (TaskLifecycle.fromHistory) over the same fixed 8-entry history, self-checked per iteration for the rebuilt id and state and the full history entry for entry (hashes included, compared field-wise and through the canonical NDJSON serializer, because rehydration normalizes entry key order), with a detached tampered copy (PAYOUT_COMPLETE payoutAmount altered from 125 to 126) rejected with the hash-chain error outside the timed loop; hash-chain verification (verifyHistoryChain) over the same fixed 8-entry history, self-checked per iteration for the genesis link (the first entry's prevHash is GENESIS_PREV_HASH) and every successor link (each entry's prevHash equals its predecessor's hash), with a detached tampered copy (the middle SUBMIT entry gaining a payoutAmount of 999) returning false outside the timed loop; SLA deadline read (getSlaDeadline) over all 13 states on one fixed ACCEPTED task carrying deadlines for exactly two states (OPEN 2026-02-01T09:00:00.000Z and ACCEPTED 2026-03-01T09:00:00.000Z, the other eleven states returning undefined, and the no-argument form returning the current ACCEPTED state's deadline), self-checked per iteration against the hand-written per-state expectations, with an overwrite readback check on a separate probe task outside the timed loop; dispatch note length guard (MAX_NOTE_LENGTH) over a fixed 2-case corpus (a note of exactly 32768 characters accepted on a fresh task — OPEN with 1 history entry whose stored note length is 32768 — and a note of 32769 characters rejected with the hand-pinned length error, leaving a fresh task in DRAFT with 0 history entries), self-checked per iteration against the hand-written expectations cross-checked against the actor/note hardening tests, with the notes presented only by length and never printed; SLA deadline write (setSlaDeadline + clearSlaDeadline) as one write cycle on a shared fixed OPEN task (set the current state's deadline from a Date, overwrite it from an ISO string, then clear it — the clear restores the fixture's initial no-deadline state so the same task serves every iteration), self-checked per iteration against the hand-written read-backs (the set and overwritten deadlines read back exactly, the cleared state reads back undefined, and the task stays in OPEN with its single PUBLISH entry throughout), with per-state / clear-all, normalized-storage, unparseable-rejection, and terminal-state checks on separate probe tasks outside the timed loop; single-step transition dispatch (benchTransition restoring the fixed OPEN snapshot \u2014 1 PUBLISH entry at the base instant \u2014 and dispatching one ACCEPT step pinned at BASE + 1s with quotedAmount 125, checked on every iteration for the one-step state advance OPEN -> ACCEPTED, exactly one appended entry, and a gap-free seq continuation, with an exhaustive pure-transition check over all 13 states x 15 events \u2014 19 legal edges returning their hand-pinned targets, every other pair throwing the exact invalid-transition message, including the illegal PAYOUT_COMPLETE dispatch from OPEN \u2014 asserted once outside the timed loop; transition-table pure object construction (transitionTable) with no arguments, checked on every iteration against the hand-pinned 19 edges written out in full in declaration order (every edge key order from, event, to; spot-checked against the transitionTableJson edge set via the shared pinned first, payout (index 14), and last edges), with the full edge set compared to the parsed JSON edge set edge for edge and a hand-pinned non-existent edge (DRAFT / PAYOUT_COMPLETE / PAID) confirmed absent from both once outside the timed loop; subscribe onError error routing (subscribe with 1 fixed throwing listener and a collecting onError hook) over the same full 8-dispatch lifecycle on a fresh task per iteration, self-checked per iteration that every dispatch succeeded, the history count and the onError report count both equal the dispatch count (8), every report carries the pinned listener message, and the first report's context is the hand-pinned PUBLISH DRAFT -> OPEN, with a throwing-onError swallowing probe and the exact non-function onError rejection (invalid subscribe: onError must be a function, got string, registering nothing) asserted once outside the timed loop",
 );
 console.log(`Iterations per op: ${ITERATIONS} (after ${WARMUP} warmup)`);
 console.log("");
@@ -3360,6 +3564,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "readmeDiagramInSync (README file read)", ops: benchReadmeDiagramInSync() },
   { path: "isOverdue (4-task corpus)", ops: benchIsOverdue() },
   { path: "subscribe (full lifecycle, 1 collecting listener)", ops: benchSubscribe() },
+  { path: "subscribe onError (full lifecycle, 1 throwing listener)", ops: benchSubscribeOnError() },
   { path: "toJSON + fromJSON snapshot round-trip (8 entries)", ops: benchSnapshotRoundTrip() },
   { path: "getSlaDeadline (13 states, 2 set)", ops: benchGetSlaDeadline() },
   { path: "MAX_NOTE_LENGTH note guard (2-case corpus)", ops: benchMaxNoteLength() },

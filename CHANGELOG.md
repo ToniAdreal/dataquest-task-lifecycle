@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A subscribe `onError` error routing benchmark path:
+  `npm run bench` now also times `subscribe` with one
+  fixed throwing listener and a collecting `onError`
+  hook over the full `DRAFT -> PAID` lifecycle on a
+  fresh task per iteration — the failure-visibility
+  side of the collecting-listener subscribe row,
+  previously unmeasured (the bench's subscribe paths
+  never routed a listener error). Its per-iteration
+  self-check pins that every dispatch succeeded, the
+  history count and the routed report count both equal
+  the dispatch count (8), every report carries the
+  pinned listener message, and the first report's
+  context is the hand-pinned PUBLISH DRAFT -> OPEN;
+  outside the timed loop, a probe pins that a throwing
+  `onError` hook is swallowed too and the non-function
+  `onError` rejection is pinned to its exact message
+  (`invalid subscribe: onError must be a function, got
+  string`, registering nothing). The README Benchmarks
+  table is refreshed from one real run and gains the
+  new row (`subscribe onError (full lifecycle, 1
+  throwing listener)` at ~925.4 ops/sec on that run,
+  against ~6,392 ops/sec for the collecting-listener
+  subscribe pass). No network, no randomness, and no
+  wall clock. Benchmark only; no library behavior
+  change.
+
 - A subscribe `onError` error routing segment closing
   the CLI demo: a dedicated task (DEMO-022) carries a
   listener that throws `Error("demo listener failure")`
