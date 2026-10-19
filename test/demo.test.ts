@@ -409,11 +409,17 @@ Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake 
   endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
   delivery: ok attempts=2 status=200 (the first attempt answered 500 and the retry succeeded; a 429 Retry-After hint would have set that retry's delay, clamped to maxRetryDelayMs — the 500 fell back to exponential backoff, here backoffMs 0 with a no-op sleep, so nothing really waited)
   wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it)
-  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`;
+  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)
+
+Subscribe onError error routing (a throwing listener routed to onError):
+  listener: DEMO-022 carries 1 listener that throws Error("demo listener failure") on every notification, subscribed with a collecting onError hook
+  routed errors: onError received 3 report(s); first report: event=PUBLISH from=DRAFT to=OPEN error="demo listener failure" (the dispatch context handed to the hook)
+  dispatch unaffected: all 3 dispatches returned normally (OPEN, ACCEPTED, CAPTURING) and the audit history holds all 3 entries — a failing listener is isolated, never breaking dispatch
+  final state: CAPTURING (terminal: false)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 350);
+  assert.equal(lines.length, 356);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1858,7 +1864,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 350);
+  assert.equal(out.trimEnd().split("\n").length, 356);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2957,9 +2963,9 @@ test("demo shows the single-target payout webhook delivery segment in-process: s
     verifyPayoutWebhook(replayCalls[0].body, replayCalls[0].signature, DEMO_WEBHOOK_SECRET),
     true,
   );
-  // The segment closes the demo: it follows the SLA deadline
-  // clearing segment, prints its lines verbatim, and its
-  // signature-check line is the demo's last line.
+  // The segment follows the SLA deadline clearing segment
+  // and prints its lines verbatim (the subscribe onError
+  // segment now closes the demo after it).
   const deliveryAt = text.indexOf(
     "Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):",
   );
@@ -2975,9 +2981,11 @@ test("demo shows the single-target payout webhook delivery segment in-process: s
   ]) {
     assert.ok(text.includes(line), `missing single-target delivery line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  assert.ok(
+    text.indexOf(
+      "Subscribe onError error routing (a throwing listener routed to onError):",
+    ) > deliveryAt,
+    "subscribe onError segment must follow the single-target delivery segment",
   );
 });
 
@@ -2985,6 +2993,7 @@ test("demo single-target delivery segment is deterministic in outcome: two runs 
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):"),
+      ls.indexOf("Subscribe onError error routing (a throwing listener routed to onError):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3004,4 +3013,128 @@ test("demo single-target delivery segment is deterministic in outcome: two runs 
   assert.equal(b.singleDeliveryCalls[0].body, b.singleDeliveryCalls[1].body);
   assert.equal(a.singleDeliveryBodyVerifies, true);
   assert.equal(b.singleDeliveryBodyVerifies, true);
+});
+
+test("demo shows the subscribe onError segment in-process: throwing listener routed to onError, dispatch and history intact, throwing onError probe swallowed", async () => {
+  const { onErrorTask, onErrorReports, onErrorProbeTask, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // subscribe source and the subscribeOnError tests, never
+  // derived by calling the routing itself.
+  assert.equal(onErrorTask.id, "DEMO-022");
+  assert.equal(onErrorTask.state, "CAPTURING");
+  assert.equal(onErrorTask.isTerminal, false);
+  assert.equal(onErrorTask.listenerCount, 1);
+  assert.deepEqual(
+    onErrorTask.history.map((h) => [h.event, h.from, h.to, h.actor, h.at]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN", "researcher", "2026-03-23T09:00:00.000Z"],
+      ["ACCEPT", "OPEN", "ACCEPTED", "contributor", "2026-03-23T09:05:00.000Z"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING", "contributor", "2026-03-23T09:10:00.000Z"],
+    ],
+  );
+  assert.deepEqual(onErrorReports, [
+    { message: "demo listener failure", event: "PUBLISH", from: "DRAFT", to: "OPEN" },
+    { message: "demo listener failure", event: "ACCEPT", from: "OPEN", to: "ACCEPTED" },
+    { message: "demo listener failure", event: "START_CAPTURE", from: "ACCEPTED", to: "CAPTURING" },
+  ]);
+  // The probe task: its onError hook itself throws, and both
+  // dispatches still landed with both audit entries intact.
+  assert.equal(onErrorProbeTask.id, "DEMO-023");
+  assert.equal(onErrorProbeTask.state, "ACCEPTED");
+  assert.equal(onErrorProbeTask.history.length, 2);
+  assert.deepEqual(
+    onErrorProbeTask.history.map((h) => [h.event, h.from, h.to]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN"],
+      ["ACCEPT", "OPEN", "ACCEPTED"],
+    ],
+  );
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: fresh tasks reproduce the routing and
+  // the throwing-hook swallow with their own listener and hook.
+  const independent = new TaskLifecycle("t-demo-onerror-independent");
+  const seen: Array<{ message: string; event: string; from: string; to: string }> = [];
+  const boom = new Error("independent boom");
+  independent.subscribe(
+    () => {
+      throw boom;
+    },
+    {
+      onError: (err, ctx) => {
+        seen.push({
+          message: (err as Error).message,
+          event: ctx.event,
+          from: ctx.from,
+          to: ctx.to,
+        });
+      },
+    },
+  );
+  assert.equal(independent.dispatch("PUBLISH"), "OPEN");
+  assert.deepEqual(seen, [
+    { message: "independent boom", event: "PUBLISH", from: "DRAFT", to: "OPEN" },
+  ]);
+  const probe = new TaskLifecycle("t-demo-onerror-probe");
+  probe.subscribe(
+    () => {
+      throw new Error("probe listener boom");
+    },
+    {
+      onError: () => {
+        throw new Error("probe onError boom");
+      },
+    },
+  );
+  assert.equal(probe.dispatch("PUBLISH"), "OPEN");
+  assert.equal(probe.history.length, 1);
+  // The segment closes the demo: it follows the single-target
+  // delivery segment, prints its lines verbatim, and its
+  // final-state line is the demo's last line.
+  const onErrorAt = text.indexOf(
+    "Subscribe onError error routing (a throwing listener routed to onError):",
+  );
+  assert.ok(
+    onErrorAt >
+      text.indexOf(
+        "Single-target payout webhook delivery (deliverPayoutWebhook to 1 endpoint, fake fetch — no real network):",
+      ),
+    "subscribe onError segment must follow the single-target delivery segment",
+  );
+  for (const line of [
+    '  listener: DEMO-022 carries 1 listener that throws Error("demo listener failure") on every notification, subscribed with a collecting onError hook',
+    '  routed errors: onError received 3 report(s); first report: event=PUBLISH from=DRAFT to=OPEN error="demo listener failure" (the dispatch context handed to the hook)',
+    "  dispatch unaffected: all 3 dispatches returned normally (OPEN, ACCEPTED, CAPTURING) and the audit history holds all 3 entries — a failing listener is isolated, never breaking dispatch",
+    "  final state: CAPTURING (terminal: false)",
+  ]) {
+    assert.ok(text.includes(line), `missing subscribe onError line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  final state: CAPTURING (terminal: false)",
+  );
+});
+
+test("demo subscribe onError segment is deterministic: two runs print byte-identical routing lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Subscribe onError error routing (a throwing listener routed to onError):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + listener / routed-errors / dispatch-unaffected /
+  // final-state lines; every value in the segment is a fixed
+  // literal (fixed timestamps inside the tasks, fixed error
+  // message, fixed chain), so no normalization is needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.onErrorReports, b.onErrorReports);
+  assert.equal(a.onErrorTask.state, "CAPTURING");
+  assert.equal(b.onErrorTask.state, "CAPTURING");
+  assert.equal(a.onErrorProbeTask.state, "ACCEPTED");
+  assert.equal(b.onErrorProbeTask.state, "ACCEPTED");
+  assert.equal(a.onErrorProbeTask.history.length, 2);
 });

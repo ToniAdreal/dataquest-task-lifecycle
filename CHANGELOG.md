@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A subscribe `onError` error routing segment closing
+  the CLI demo: a dedicated task (DEMO-022) carries a
+  listener that throws `Error("demo listener failure")`
+  on every notification, subscribed with a collecting
+  `onError` hook; a short fixed-timestamp chain
+  (PUBLISH / ACCEPT / START_CAPTURE) is dispatched and
+  the demo prints the routed count (3) and the first
+  report's dispatch context (PUBLISH DRAFT -> OPEN),
+  asserting outside the printed lines that all
+  dispatches returned normally, the audit history is
+  complete, every routed context matches the
+  hand-pinned chain, and — on a probe task (DEMO-023)
+  — that a throwing `onError` hook is swallowed too.
+  The demo tests pin the segment against hand-written
+  expectations, including independent in-test routing
+  and probe tasks. Demo and tests only; no library
+  behavior change.
+
 - A single-target payout webhook delivery benchmark path:
   `npm run bench` now also times `deliverPayoutWebhook`
   delivering the bench's signed webhook to one fixed

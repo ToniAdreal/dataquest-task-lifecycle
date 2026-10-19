@@ -181,7 +181,7 @@
  * the remaining states' deadlines — the renegotiated /
  * cancelled deadline a reader would otherwise never see
  * revoked, shown instead of only asserted by the SLA tests
- * — and finally a single-target payout webhook delivery
+ * — and a single-target payout webhook delivery
  * segment: the main task's signed webhook (built above) is
  * delivered with `deliverPayoutWebhook` to one fixed endpoint
  * through an injected fake fetch scripted to answer 500 then
@@ -191,7 +191,19 @@
  * lines that both captured wire calls carry the byte-identical
  * signed body and that the captured signature verifies over
  * that body — the single-endpoint delivery path a reader has
- * only seen fanned out so far.
+ * only seen fanned out so far — and finally a subscribe
+ * onError error routing segment: a dedicated task carries a
+ * listener that throws on every notification, subscribed
+ * with a collecting `onError` hook; the demo runs a short
+ * fixed-timestamp dispatch chain, prints how many errors
+ * `onError` received and the first report's dispatch context
+ * (event / from / to), and asserts outside the printed lines
+ * that every dispatch still succeeded, the audit history is
+ * complete, every routed context matches the hand-pinned
+ * chain, and — on a separate probe task — that an `onError`
+ * hook that itself throws is swallowed too — the
+ * listener-failure observability path a reader has only
+ * seen with a collecting listener so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -232,7 +244,9 @@
  * and its before / after overdue verdicts and read-backs,
  * the single-target delivery segment's endpoint, result,
  * captured wire calls and wire-body verification verdict,
- * plus the exact `lines` the CLI prints — so tests assert on structured values
+ * the subscribe onError segment's dedicated task with its
+ * collected error reports and its throwing-onError probe
+ * task, plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
@@ -336,6 +350,14 @@ export interface FanoutCall {
   signature: string;
 }
 
+/** One listener error routed to the demo's collecting `onError` hook. */
+export interface ListenerErrorReport {
+  message: string;
+  event: TaskEvent;
+  from: TaskState;
+  to: TaskState;
+}
+
 /** One notification collected by the demo's subscription listener. */
 export interface SubscriptionNotification {
   event: TaskEvent;
@@ -372,6 +394,12 @@ export interface DemoResult {
   singleDeliveryCalls: FanoutCall[];
   /** Whether the captured wire body verifies under the demo secret. */
   singleDeliveryBodyVerifies: boolean;
+  /** Dedicated task for the closing subscribe onError segment (DEMO-022). */
+  onErrorTask: TaskLifecycle;
+  /** Errors the closing segment's collecting `onError` hook received. */
+  onErrorReports: ListenerErrorReport[];
+  /** Probe task whose own `onError` hook throws (DEMO-023). */
+  onErrorProbeTask: TaskLifecycle;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -2420,7 +2448,114 @@ export async function runDemo(): Promise<DemoResult> {
     `  signature check: verifyPayoutWebhook over the captured wire body: ${singleDeliveryBodyVerifies} (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Subscribe onError error routing segment (closing): the
+  // subscription branch near the middle showed a collecting
+  // listener that never fails; a listener that DOES throw is
+  // isolated by subscribe() — the error is swallowed so dispatch
+  // and the audit trail are unaffected — but without an
+  // `onError` hook that failure is silent. Here a dedicated task
+  // carries a listener that throws a fixed error on every
+  // notification, subscribed with a collecting `onError` hook,
+  // and runs a short chain under fixed literals (2026-03-23; no
+  // network, no randomness, no wall clock). Hand-written
+  // expectations — written out here from the subscribe source
+  // and the subscribeOnError tests, never derived by calling
+  // the routing itself:
+  //   - all 3 dispatches return normally (OPEN, ACCEPTED,
+  //     CAPTURING) and the task lands in CAPTURING with all 3
+  //     audit entries intact, in chain order;
+  //   - `onError` receives exactly 3 reports, each carrying the
+  //     thrown error's message ("demo listener failure") and
+  //     the dispatch context (event / from / to) of the chain
+  //     step that was being notified;
+  //   - on a separate probe task (DEMO-023, verified here and
+  //     not printed), an `onError` hook that itself throws is
+  //     swallowed too: both its dispatches return normally and
+  //     its history holds both entries.
+  // The segment asserts all of this here, outside the printed
+  // lines: a routing semantic that drifted would fail the demo
+  // itself, not just a test.
+  const onErrorTask = new TaskLifecycle("DEMO-022");
+  const onErrorReports: ListenerErrorReport[] = [];
+  onErrorTask.subscribe(
+    () => {
+      throw new Error("demo listener failure");
+    },
+    {
+      onError: (err, ctx) => {
+        onErrorReports.push({
+          message: err instanceof Error ? err.message : String(err),
+          event: ctx.event,
+          from: ctx.from,
+          to: ctx.to,
+        });
+      },
+    },
+  );
+  const onErrorDispatchResults: TaskState[] = [];
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-23T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-23T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-23T09:10:00.000Z"],
+  ] as const) {
+    onErrorDispatchResults.push(onErrorTask.dispatch(event, { actor, at }));
+  }
+  const onErrorProbeTask = new TaskLifecycle("DEMO-023");
+  onErrorProbeTask.subscribe(
+    () => {
+      throw new Error("demo probe listener failure");
+    },
+    {
+      onError: () => {
+        throw new Error("demo probe onError failure");
+      },
+    },
+  );
+  const onErrorProbeResults: TaskState[] = [
+    onErrorProbeTask.dispatch("PUBLISH", {
+      actor: "researcher",
+      at: "2026-03-23T10:00:00.000Z",
+    }),
+    onErrorProbeTask.dispatch("ACCEPT", {
+      actor: "contributor",
+      at: "2026-03-23T10:05:00.000Z",
+    }),
+  ];
+  const ONERROR_EXPECTED: ListenerErrorReport[] = [
+    { message: "demo listener failure", event: "PUBLISH", from: "DRAFT", to: "OPEN" },
+    { message: "demo listener failure", event: "ACCEPT", from: "OPEN", to: "ACCEPTED" },
+    { message: "demo listener failure", event: "START_CAPTURE", from: "ACCEPTED", to: "CAPTURING" },
+  ];
+  if (
+    JSON.stringify(onErrorReports) !== JSON.stringify(ONERROR_EXPECTED) ||
+    JSON.stringify(onErrorDispatchResults) !==
+      JSON.stringify(["OPEN", "ACCEPTED", "CAPTURING"]) ||
+    onErrorTask.state !== "CAPTURING" ||
+    onErrorTask.history.length !== 3 ||
+    onErrorTask.history.some(
+      (h, i) =>
+        h.event !== ONERROR_EXPECTED[i].event ||
+        h.from !== ONERROR_EXPECTED[i].from ||
+        h.to !== ONERROR_EXPECTED[i].to,
+    ) ||
+    JSON.stringify(onErrorProbeResults) !== JSON.stringify(["OPEN", "ACCEPTED"]) ||
+    onErrorProbeTask.state !== "ACCEPTED" ||
+    onErrorProbeTask.history.length !== 2
+  ) {
+    throw new Error(
+      "demo fixture broken: subscribe onError routing does not match the hand-pinned contract (a throwing listener must route one report per dispatch with the dispatch context, every dispatch must return normally with the audit history intact, and a throwing onError hook on the probe task must be swallowed too)",
+    );
+  }
+  lines.push(
+    "",
+    "Subscribe onError error routing (a throwing listener routed to onError):",
+    `  listener: ${onErrorTask.id} carries 1 listener that throws Error("demo listener failure") on every notification, subscribed with a collecting onError hook`,
+    `  routed errors: onError received ${onErrorReports.length} report(s); first report: event=${onErrorReports[0].event} from=${onErrorReports[0].from} to=${onErrorReports[0].to} error="${onErrorReports[0].message}" (the dispatch context handed to the hook)`,
+    `  dispatch unaffected: all ${onErrorDispatchResults.length} dispatches returned normally (${onErrorDispatchResults.join(", ")}) and the audit history holds all ${onErrorTask.history.length} entries — a failing listener is isolated, never breaking dispatch`,
+    `  final state: ${onErrorTask.state} (terminal: ${onErrorTask.isTerminal})`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {
