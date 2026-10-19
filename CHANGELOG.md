@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A single-target payout webhook delivery benchmark path:
+  `npm run bench` now also times `deliverPayoutWebhook`
+  delivering the bench's signed webhook to one fixed
+  endpoint through an injected fake `fetchImpl` that
+  answers 200 immediately, with `backoffMs` 0 and an
+  injected no-op `sleepImpl` — the steady-state cost of
+  one signed POST, previously visible only inside the
+  4-endpoint fan-out row's numbers. Its per-iteration
+  self-check pins the reported result (`{ ok: true,
+  attempts: 1, status: 200 }`), exactly one captured
+  call to the pinned URL, and a captured body
+  byte-identical to the signed body whose
+  `X-Hub-Signature-256` equals the `buildPayoutWebhook`
+  product's signature and verifies over the captured
+  body; outside the timed loop, a persistent-500 script
+  is pinned to the reported (never thrown)
+  retry-exhaustion shape (`{ ok: false, attempts: 3,
+  status: 500, error: "server responded with status
+  500" }` after exactly 3 calls under the default
+  `maxAttempts`). The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`deliverPayoutWebhook (single endpoint)` at ~53,958
+  ops/sec on that run, against ~3,913 ops/sec for one
+  4-endpoint fan-out pass). No network, no randomness,
+  and no real waiting. Benchmark only; no library
+  behavior change.
+
 - A single-target payout webhook delivery segment closing
   the CLI demo: the main task's signed webhook is delivered
   with `deliverPayoutWebhook` to one fixed endpoint
