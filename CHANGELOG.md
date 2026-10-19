@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout dedupe clear reset segment closing the CLI
+  demo: a fresh `PayoutEventDedupe` under an injected
+  fixed clock records one fixed payout `eventId` (new on
+  first sight, a duplicate on immediate redelivery, stats
+  pinned at `{ size: 1, hits: 1, misses: 1, evictions: 0 }`),
+  then `clear()` drops every recorded id and resets the
+  counters — size and stats print back at all zero — and
+  the same `eventId` is recorded again as a new event,
+  with the counters re-accumulating from zero
+  (`{ size: 1, hits: 0, misses: 1, evictions: 0 }`): the
+  explicit reset a receiver uses on key rotation, for
+  test isolation, or to reset a dedupe window, instead of
+  waiting for TTL expiry. The demo tests pin the segment
+  against hand-written expectations, including an
+  independent in-test clear script. Demo and tests only;
+  no library behavior change.
+
 - A payout event dedupe snapshot export benchmark path:
   `npm run bench` now also times
   `PayoutEventDedupe.exportSnapshot()` on a fixed dedupe

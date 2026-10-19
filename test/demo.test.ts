@@ -429,11 +429,16 @@ Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pin
   eventId evt_demo_stats_001 — checkAndRecord: false (new event) -> stats size 1, hits 0, misses 1, evictions 0; again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0
   eventId evt_demo_stats_002 — checkAndRecord: false (new event) -> stats size 2, hits 1, misses 2, evictions 0; eventId evt_demo_stats_003 — checkAndRecord: false (new event) -> stats size 3, hits 1, misses 3, evictions 0 (store full)
   eventId evt_demo_stats_004 — checkAndRecord: false (new event, evicts least recently seen evt_demo_stats_001) -> stats size 3, hits 1, misses 4, evictions 1
-  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view`;
+  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view
+
+Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):
+  dedupe (fixed clock <timestamp>, TTL 60000 ms): eventId evt_demo_clear_001 — checkAndRecord: false (new event); again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0
+  clear(): size 0, stats size 0, hits 0, misses 0, evictions 0 — every recorded id dropped and every counter reset in one call (the explicit reset for key rotation, test isolation, or a deliberate window reset)
+  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 370);
+  assert.equal(lines.length, 375);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1878,7 +1883,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 370);
+  assert.equal(out.trimEnd().split("\n").length, 375);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3356,9 +3361,9 @@ test("demo shows the payout dedupe stats observability segment in-process: pinne
   const detached = independent.stats();
   detached.hits = 999;
   assert.equal(independent.stats().hits, 1);
-  // The segment closes the demo: it follows the payout dedupe
-  // snapshot segment, prints its lines verbatim, and its
-  // detached-copy line is the demo's last line.
+  // The segment follows the payout dedupe snapshot segment
+  // and prints its lines verbatim (the payout dedupe clear
+  // segment now closes the demo after it).
   const statsAt = text.indexOf(
     "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
   );
@@ -3378,9 +3383,11 @@ test("demo shows the payout dedupe stats observability segment in-process: pinne
   ]) {
     assert.ok(text.includes(line), `missing payout dedupe stats line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at size 3, hits 1, misses 4, evictions 1 — the snapshot is a copy, not a live view",
+  assert.ok(
+    text.indexOf(
+      "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
+    ) > statsAt,
+    "payout dedupe clear segment must follow the payout dedupe stats segment",
   );
 });
 
@@ -3388,6 +3395,7 @@ test("demo payout dedupe stats segment is deterministic: two runs print byte-ide
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):"),
+      ls.indexOf("Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3401,4 +3409,115 @@ test("demo payout dedupe stats segment is deterministic: two runs print byte-ide
   assert.deepEqual(a.dedupeStatsOutcomes, b.dedupeStatsOutcomes);
   assert.deepEqual(a.dedupeStatsSnapshots, b.dedupeStatsSnapshots);
   assert.deepEqual(a.dedupeStatsAfterMutation, b.dedupeStatsAfterMutation);
+});
+
+test("demo shows the payout dedupe clear reset segment in-process: pinned id forgotten by clear(), counters zeroed, same id new again", async () => {
+  const {
+    dedupeClearDedupe,
+    dedupeClearEventId,
+    dedupeClearOutcomes,
+    dedupeClearStatsBefore,
+    dedupeClearStatsAfterClear,
+    dedupeClearStatsAfterReRecord,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // clear() docs in src/settlementWebhook.ts and the
+  // payoutEventDedupe clear test, never derived by calling
+  // clear() itself.
+  assert.equal(dedupeClearEventId, "evt_demo_clear_001");
+  assert.deepEqual(dedupeClearOutcomes, [false, true, false]);
+  assert.deepEqual(dedupeClearStatsBefore, {
+    size: 1,
+    hits: 1,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeClearStatsAfterClear, {
+    size: 0,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeClearStatsAfterReRecord, {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.equal(dedupeClearDedupe.size, 1);
+  assert.deepEqual(dedupeClearDedupe.stats(), {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh dedupe reproduces the
+  // clear semantics on its own (the script from the dedupe
+  // clear test).
+  const START_MS = Date.parse("2026-03-26T09:00:00.000Z");
+  const independent = new PayoutEventDedupe({
+    ttlMs: 60_000,
+    now: () => START_MS,
+  });
+  assert.equal(independent.checkAndRecord("evt-1"), false);
+  assert.equal(independent.checkAndRecord("evt-1"), true);
+  independent.clear();
+  assert.equal(independent.size, 0);
+  assert.deepEqual(independent.stats(), {
+    size: 0,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.equal(independent.checkAndRecord("evt-1"), false); // forgotten
+  // The segment closes the demo: it follows the payout dedupe
+  // stats segment, prints its lines verbatim, and its
+  // re-record line is the demo's last line.
+  const clearAt = text.indexOf(
+    "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
+  );
+  assert.ok(
+    clearAt >
+      text.indexOf(
+        "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+      ),
+    "payout dedupe clear segment must follow the payout dedupe stats segment",
+  );
+  for (const line of [
+    "  dedupe (fixed clock 2026-03-26T09:00:00.000Z, TTL 60000 ms): eventId evt_demo_clear_001 — checkAndRecord: false (new event); again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0",
+    "  clear(): size 0, stats size 0, hits 0, misses 0, evictions 0 — every recorded id dropped and every counter reset in one call (the explicit reset for key rotation, test isolation, or a deliberate window reset)",
+    "  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)",
+  ]) {
+    assert.ok(text.includes(line), `missing payout dedupe clear line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)",
+  );
+});
+
+test("demo payout dedupe clear segment is deterministic: two runs print byte-identical reset lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + dedupe / clear / re-record lines; every value
+  // in the segment is a fixed literal (fixed clock, fixed
+  // eventId, fixed TTL), so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.dedupeClearOutcomes, b.dedupeClearOutcomes);
+  assert.deepEqual(a.dedupeClearStatsBefore, b.dedupeClearStatsBefore);
+  assert.deepEqual(a.dedupeClearStatsAfterClear, b.dedupeClearStatsAfterClear);
+  assert.deepEqual(
+    a.dedupeClearStatsAfterReRecord,
+    b.dedupeClearStatsAfterReRecord,
+  );
 });

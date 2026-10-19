@@ -218,7 +218,7 @@
  * to 2 is rejected with the exact invalid-snapshot error —
  * the receiver-restart persistence path a reader has only
  * seen asserted by the dedupe snapshot tests so far —
- * and finally a payout dedupe stats observability segment:
+ * a payout dedupe stats observability segment:
  * a fresh `PayoutEventDedupe` under an injected fixed clock
  * with a small `maxEntries` runs a pinned script (a new
  * `eventId`, its immediate redelivery, two more new ids that
@@ -229,7 +229,18 @@
  * snapshot is a detached copy that leaves the store's own
  * counters unchanged — the receiver-operations
  * observability surface a reader has only seen asserted by
- * the dedupe stats tests so far.
+ * the dedupe stats tests so far —
+ * and finally a payout dedupe clear reset segment: a fresh
+ * `PayoutEventDedupe` under an injected fixed clock records
+ * one fixed payout `eventId` (new on first sight, a duplicate
+ * on immediate redelivery, its stats pinned), then calls
+ * `clear()` — printing size and stats back at all zero — and
+ * records the same `eventId` again, which reads as a new
+ * event (`false`) with the counters re-accumulating from
+ * zero — the explicit reset surface (key rotation, test
+ * isolation, window reset) a reader has only seen asserted
+ * by the dedupe clear test so far, and could otherwise
+ * mistake for something only TTL expiry can do.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -281,7 +292,11 @@
  * with its pinned-script outcomes, its per-step stats
  * snapshots (the initial reading plus one after each
  * scripted call), and the stats read back after a detached
- * copy is mutated,
+ * copy is mutated, the payout dedupe clear reset segment's
+ * dedupe with its pinned outcomes (new / duplicate / new
+ * again after the clear), its stats before the clear, its
+ * all-zero size and stats right after the clear, and its
+ * stats after the same id is re-recorded,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -464,6 +479,18 @@ export interface DemoResult {
   dedupeStatsSnapshots: PayoutEventDedupeStats[];
   /** Stats read back after a detached copy was mutated (unchanged). */
   dedupeStatsAfterMutation: PayoutEventDedupeStats;
+  /** Dedupe for the closing clear reset segment. */
+  dedupeClearDedupe: PayoutEventDedupe;
+  /** The segment's single pinned `eventId`. */
+  dedupeClearEventId: string;
+  /** Outcomes: first sight, redelivery, same id after `clear()` (3). */
+  dedupeClearOutcomes: boolean[];
+  /** Stats pinned before the clear ({ size: 1, hits: 1, misses: 1, evictions: 0 }). */
+  dedupeClearStatsBefore: PayoutEventDedupeStats;
+  /** Stats right after `clear()` — every counter back at zero. */
+  dedupeClearStatsAfterClear: PayoutEventDedupeStats;
+  /** Stats after the cleared id is recorded again as a new event. */
+  dedupeClearStatsAfterReRecord: PayoutEventDedupeStats;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -2851,7 +2878,85 @@ export async function runDemo(): Promise<DemoResult> {
     `  detached copy: mutating a returned stats() object (hits set to 999) leaves the store's stats unchanged at ${fmtDedupeStats(dedupeStatsAfterMutation)} — the snapshot is a copy, not a live view`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout dedupe clear reset segment (closing): the dedupe
+  // segments above showed duplicates judged, ids surviving a
+  // restart, and the counters watched live — but never the
+  // one explicit way to forget everything at once: clear()
+  // drops every tracked id and resets hits / misses /
+  // evictions to zero. A receiver reaches for it on key
+  // rotation, for test isolation, or to reset a dedupe
+  // window deliberately; without it a reader could think the
+  // recorded set only ever shrinks by TTL expiry. Here a
+  // FRESH dedupe under an injected fixed clock
+  // (2026-03-26T09:00:00.000Z, the same 60_000 ms demo TTL
+  // policy) records one pinned eventId twice — new, then a
+  // duplicate — is cleared, and then records the SAME id
+  // again: it reads as a brand-new event and the counters
+  // re-accumulate from zero. Hand-written expectations —
+  // written out here from the clear() docs in
+  // src/settlementWebhook.ts and the payoutEventDedupe
+  // clear test, never derived by calling clear() itself:
+  //   - the outcomes are exactly [false, true, false]
+  //     (new, duplicate, new again after the clear);
+  //   - the stats before the clear are exactly
+  //     { size: 1, hits: 1, misses: 1, evictions: 0 };
+  //   - right after clear() the size is 0 and the stats are
+  //     exactly { size: 0, hits: 0, misses: 0, evictions: 0 };
+  //   - after the same id is re-recorded the stats are
+  //     exactly { size: 1, hits: 0, misses: 1, evictions: 0 }
+  //     and the dedupe size is 1.
+  // The clock never advances, so zero network, zero
+  // randomness, and no wall clock enter the segment. The
+  // segment asserts all of this here, outside the printed
+  // lines: a clear() that left an id behind or a counter
+  // un-reset would fail the demo itself, not just a test.
+  const DEDUPE_CLEAR_START_MS = Date.parse("2026-03-26T09:00:00.000Z");
+  const DEDUPE_CLEAR_TTL_MS = 60_000;
+  const dedupeClearEventId = "evt_demo_clear_001";
+  const dedupeClearDedupe = new PayoutEventDedupe({
+    ttlMs: DEDUPE_CLEAR_TTL_MS,
+    now: () => DEDUPE_CLEAR_START_MS,
+  });
+  const dedupeClearOutcomes: boolean[] = [];
+  dedupeClearOutcomes.push(
+    dedupeClearDedupe.checkAndRecord(dedupeClearEventId),
+  );
+  dedupeClearOutcomes.push(
+    dedupeClearDedupe.checkAndRecord(dedupeClearEventId),
+  );
+  const dedupeClearStatsBefore = dedupeClearDedupe.stats();
+  dedupeClearDedupe.clear();
+  const dedupeClearSizeAfterClear = dedupeClearDedupe.size;
+  const dedupeClearStatsAfterClear = dedupeClearDedupe.stats();
+  dedupeClearOutcomes.push(
+    dedupeClearDedupe.checkAndRecord(dedupeClearEventId),
+  );
+  const dedupeClearStatsAfterReRecord = dedupeClearDedupe.stats();
+  if (
+    JSON.stringify(dedupeClearOutcomes) !==
+      JSON.stringify([false, true, false]) ||
+    JSON.stringify(dedupeClearStatsBefore) !==
+      JSON.stringify({ size: 1, hits: 1, misses: 1, evictions: 0 }) ||
+    dedupeClearSizeAfterClear !== 0 ||
+    JSON.stringify(dedupeClearStatsAfterClear) !==
+      JSON.stringify({ size: 0, hits: 0, misses: 0, evictions: 0 }) ||
+    JSON.stringify(dedupeClearStatsAfterReRecord) !==
+      JSON.stringify({ size: 1, hits: 0, misses: 1, evictions: 0 }) ||
+    dedupeClearDedupe.size !== 1
+  ) {
+    throw new Error(
+      "demo fixture broken: PayoutEventDedupe clear reset does not match the hand-pinned contract (pinned outcomes new/duplicate/new-again, stats before {1,1,1,0}, size and stats all zero right after clear(), and stats {1,0,1,0} after the same id is re-recorded)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
+    `  dedupe (fixed clock ${new Date(DEDUPE_CLEAR_START_MS).toISOString()}, TTL ${DEDUPE_CLEAR_TTL_MS} ms): eventId ${dedupeClearEventId} — checkAndRecord: ${dedupeClearOutcomes[0]} (new event); again: ${dedupeClearOutcomes[1]} (duplicate) -> stats ${fmtDedupeStats(dedupeClearStatsBefore)}`,
+    `  clear(): size ${dedupeClearSizeAfterClear}, stats ${fmtDedupeStats(dedupeClearStatsAfterClear)} — every recorded id dropped and every counter reset in one call (the explicit reset for key rotation, test isolation, or a deliberate window reset)`,
+    `  same eventId after clear — checkAndRecord: ${dedupeClearOutcomes[2]} (new event again — the clear forgot it, no TTL wait needed) -> stats ${fmtDedupeStats(dedupeClearStatsAfterReRecord)} (counters re-accumulate from zero)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

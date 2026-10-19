@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 554 tests, all local
+npm test   # 556 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -277,7 +277,7 @@ read as duplicates and an unseen id reads as new, and a
 detached copy of the snapshot with its version rewritten
 to 2 is rejected with the exact invalid-snapshot error —
 the receiver-restart persistence path, shown instead of
-only asserted by the dedupe snapshot tests. — and a closing payout dedupe stats
+only asserted by the dedupe snapshot tests. — and a payout dedupe stats
 observability segment that runs a fresh
 `PayoutEventDedupe` under an injected fixed clock with a
 small `maxEntries` (3) through a pinned script — a new
@@ -291,7 +291,18 @@ set to 999) to show the store's own counters stay at
 `{ size: 3, hits: 1, misses: 4, evictions: 1 }` — the
 snapshot is a detached copy, not a live view — the
 receiver-operations observability surface, shown instead
-of only asserted by the dedupe stats tests.
+of only asserted by the dedupe stats tests. — and a closing payout dedupe clear
+reset segment that records one fixed payout `eventId` on
+a fresh `PayoutEventDedupe` under an injected fixed clock
+(new on first sight, a duplicate on immediate redelivery,
+stats pinned at `{ size: 1, hits: 1, misses: 1, evictions: 0 }`),
+then calls `clear()` — printing size and stats back at
+all zero — and records the same `eventId` again, which
+reads as a new event with the counters re-accumulating
+from zero (`{ size: 1, hits: 0, misses: 1, evictions: 0 }`) —
+the explicit reset surface for key rotation, test
+isolation, or a deliberate window reset, shown instead of
+only asserted by the dedupe clear test.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1316,7 +1327,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 554 tests covering the happy path, reject→resubmit
+`npm test` runs 556 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
