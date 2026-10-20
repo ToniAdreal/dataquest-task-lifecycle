@@ -279,7 +279,7 @@
  * `maxFutureSkewMs` allows also fails closed — the
  * replay bound a reader has only seen asserted by the
  * payout webhook freshness and future-skew tests so far —
- * and finally a payout reference enforcement segment:
+ * and a payout reference enforcement segment:
  * a dedicated task constructed with
  * `requirePayoutRef: true` is driven to PAYOUT_PENDING
  * under fixed timestamps and its `PAYOUT_COMPLETE`
@@ -291,7 +291,23 @@
  * dedicated task under the default (the option unset)
  * completes without a reference — the fail-fast
  * settlement gate a reader has only seen asserted by
- * the requirePayoutRef tests so far.
+ * the requirePayoutRef tests so far —
+ * and finally a dispatch idempotency key segment:
+ * a dedicated task dispatches under fixed timestamps
+ * with pinned `idempotencyKey`s — the same key sent
+ * twice for the same event appends a single history
+ * entry and notifies its listener once; after the task
+ * moves on, retries under the old key still dedupe,
+ * both for a different (would-be legal) event and for
+ * the stale original event, returning the current
+ * state without throwing `invalid transition`; a
+ * second dedicated task first fails a dispatch under
+ * a pinned key (an illegal transition), which consumes
+ * nothing, so the corrected dispatch under the same
+ * key then succeeds, and a final dispatch with no key
+ * at all appends normally — the retry-safety valve a
+ * reader has only seen asserted by the idempotency
+ * key tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -367,6 +383,13 @@
  * task with its rejection error and its post-rejection
  * state and history length, its pinned accepted
  * `payoutRef`, and its default (unenforced) task,
+ * the dispatch idempotency key segment's main task with
+ * its pinned publish key, its duplicate return and
+ * post-duplicate history length, its notified event
+ * list, its cross-event and stale retry returns and
+ * its post-retry history length, and its retry task
+ * with its failed-dispatch error and its pinned
+ * retry key,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -634,6 +657,28 @@ export interface DemoResult {
   requirePayoutRefPayoutRef: string;
   /** Default task of the closing requirePayoutRef segment (DEMO-025). */
   requirePayoutRefDefaultTask: TaskLifecycle;
+  /** Main task of the closing dispatch idempotency segment (DEMO-026). */
+  idempotencyTask: TaskLifecycle;
+  /** Pinned key DEMO-026's PUBLISH consumes ("demo-idem-publish"). */
+  idempotencyPublishKey: string;
+  /** Return of DEMO-026's same-key duplicate PUBLISH (OPEN). */
+  idempotencyDuplicateReturn: TaskState;
+  /** DEMO-026's history length right after the duplicate (1). */
+  idempotencyHistoryLengthAfterDuplicate: number;
+  /** Events DEMO-026's listener was notified of ([PUBLISH, ACCEPT]). */
+  idempotencyNotificationEvents: TaskEvent[];
+  /** Return of the cross-event retry under the old key (ACCEPTED). */
+  idempotencyCrossEventReturn: TaskState;
+  /** Return of the stale-event retry under the old key (ACCEPTED). */
+  idempotencyStaleReturn: TaskState;
+  /** DEMO-026's history length after both old-key retries (2). */
+  idempotencyHistoryLengthAfterRetries: number;
+  /** Retry task of the closing dispatch idempotency segment (DEMO-027). */
+  idempotencyRetryTask: TaskLifecycle;
+  /** Error from DEMO-027's failed first dispatch ("" if it succeeded). */
+  idempotencyFailedError: string;
+  /** Pinned key DEMO-027 fails under, then succeeds under. */
+  idempotencyRetryKey: string;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -784,7 +829,12 @@ export interface DemoResult {
  * verdicts, the payout reference enforcement segment's
  * enforced and default tasks with its rejection error,
  * post-rejection state and history length, and pinned
- * accepted reference, and the exact lines
+ * accepted reference, the dispatch idempotency key
+ * segment's main and retry tasks with its pinned keys,
+ * its duplicate / cross-event / stale retry returns,
+ * its post-duplicate and post-retry history lengths,
+ * its notified event list, and its failed-dispatch
+ * error, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -3670,7 +3720,151 @@ export async function runDemo(): Promise<DemoResult> {
     `  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> ${requirePayoutRefDefaultTask.state}; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Dispatch idempotency key segment (closing): the payout
+  // flows above are exactly the flows whose callers retry —
+  // a webhook redelivery, a client timeout, a queue replay.
+  // `dispatch(event, { idempotencyKey })` (taskLifecycle,
+  // unit-tested since the idempotency key tests landed) is
+  // the retry-safety valve: the task remembers every key it
+  // has successfully consumed, and a dispatch repeating a
+  // known key returns the current state as a complete
+  // no-op — no audit entry appended, no listener notified,
+  // and the transition not even validated, so a retry that
+  // arrives after the task already moved on cannot throw
+  // `invalid transition`. Keys are global to the task, not
+  // per-event. A dispatch that fails any check consumes
+  // nothing, so fixing a bad call and retrying under the
+  // same key still executes. Two dedicated tasks are
+  // driven under fixed literal timestamps — no network,
+  // no randomness, no wall clock:
+  //   - DEMO-026 carries a collecting listener. Its
+  //     PUBLISH at 2026-04-02T09:00 under the pinned key
+  //     "demo-idem-publish" lands OPEN with 1 history
+  //     entry; the same event under the same key at
+  //     09:01 returns OPEN and appends nothing (history
+  //     stays 1, the listener is not notified again);
+  //     its ACCEPT at 09:05 under a second pinned key
+  //     moves it to ACCEPTED with 2 entries; a
+  //     START_CAPTURE at 09:06 under the OLD publish key
+  //     (a different, would-be legal event) still
+  //     dedupes — it returns ACCEPTED and appends
+  //     nothing; and the stale PUBLISH at 09:07 under
+  //     that same old key (now an illegal transition)
+  //     also returns ACCEPTED without throwing. The
+  //     listener ends with exactly [PUBLISH, ACCEPT].
+  //   - DEMO-027 first attempts ACCEPT from DRAFT at
+  //     2026-04-03T09:00 under the pinned key
+  //     "demo-idem-retry": the illegal transition throws
+  //     the pinned `invalid transition: ACCEPT from
+  //     DRAFT` error, appends nothing, and consumes no
+  //     key; the corrected PUBLISH at 09:05 under the
+  //     SAME key then succeeds into OPEN, and a final
+  //     ACCEPT at 09:10 with no key at all appends
+  //     normally into ACCEPTED — the keyless path keeps
+  //     its exact pre-idempotency behavior.
+  // Hand-written expectations — written out here from the
+  // DispatchOptions docs and the idempotency key tests,
+  // never derived from the dedupe itself. The segment
+  // asserts all of this here, outside the printed lines:
+  // a dedupe verdict that drifted would fail the demo
+  // itself, not just a test.
+  const idempotencyTask = new TaskLifecycle("DEMO-026");
+  const idempotencyNotificationEvents: TaskEvent[] = [];
+  idempotencyTask.subscribe((event) => {
+    idempotencyNotificationEvents.push(event);
+  });
+  const idempotencyPublishKey = "demo-idem-publish";
+  idempotencyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-02T09:00:00.000Z",
+    idempotencyKey: idempotencyPublishKey,
+  });
+  const idempotencyDuplicateReturn = idempotencyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-02T09:01:00.000Z",
+    idempotencyKey: idempotencyPublishKey,
+  });
+  const idempotencyHistoryLengthAfterDuplicate =
+    idempotencyTask.history.length;
+  idempotencyTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-02T09:05:00.000Z",
+    idempotencyKey: "demo-idem-accept",
+  });
+  const idempotencyCrossEventReturn = idempotencyTask.dispatch(
+    "START_CAPTURE",
+    {
+      actor: "contributor",
+      at: "2026-04-02T09:06:00.000Z",
+      idempotencyKey: idempotencyPublishKey,
+    },
+  );
+  const idempotencyStaleReturn = idempotencyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-02T09:07:00.000Z",
+    idempotencyKey: idempotencyPublishKey,
+  });
+  const idempotencyHistoryLengthAfterRetries = idempotencyTask.history.length;
+  const idempotencyRetryTask = new TaskLifecycle("DEMO-027");
+  const idempotencyRetryKey = "demo-idem-retry";
+  let idempotencyFailedError = "";
+  try {
+    idempotencyRetryTask.dispatch("ACCEPT", {
+      actor: "contributor",
+      at: "2026-04-03T09:00:00.000Z",
+      idempotencyKey: idempotencyRetryKey,
+    });
+  } catch (err) {
+    idempotencyFailedError = err instanceof Error ? err.message : String(err);
+  }
+  const idempotencyRetryHistoryLengthAfterFailure =
+    idempotencyRetryTask.history.length;
+  idempotencyRetryTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-03T09:05:00.000Z",
+    idempotencyKey: idempotencyRetryKey,
+  });
+  idempotencyRetryTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-03T09:10:00.000Z",
+  });
+  if (
+    idempotencyDuplicateReturn !== "OPEN" ||
+    idempotencyHistoryLengthAfterDuplicate !== 1 ||
+    idempotencyCrossEventReturn !== "ACCEPTED" ||
+    idempotencyStaleReturn !== "ACCEPTED" ||
+    idempotencyHistoryLengthAfterRetries !== 2 ||
+    idempotencyTask.state !== "ACCEPTED" ||
+    idempotencyTask.history.length !== 2 ||
+    idempotencyTask.history[0].event !== "PUBLISH" ||
+    idempotencyTask.history[0].at !== "2026-04-02T09:00:00.000Z" ||
+    idempotencyTask.history[1].event !== "ACCEPT" ||
+    idempotencyTask.history[1].at !== "2026-04-02T09:05:00.000Z" ||
+    idempotencyNotificationEvents.length !== 2 ||
+    idempotencyNotificationEvents[0] !== "PUBLISH" ||
+    idempotencyNotificationEvents[1] !== "ACCEPT" ||
+    idempotencyFailedError !== "invalid transition: ACCEPT from DRAFT" ||
+    idempotencyRetryHistoryLengthAfterFailure !== 0 ||
+    idempotencyRetryTask.state !== "ACCEPTED" ||
+    idempotencyRetryTask.history.length !== 2 ||
+    idempotencyRetryTask.history[0].event !== "PUBLISH" ||
+    idempotencyRetryTask.history[0].at !== "2026-04-03T09:05:00.000Z" ||
+    idempotencyRetryTask.history[1].event !== "ACCEPT"
+  ) {
+    throw new Error(
+      "demo fixture broken: dispatch idempotency keys do not match the hand-pinned contract (a repeated key must return the current state with no history append and no listener notification, keys must dedupe globally across events and past task progress without validating the transition, a failed dispatch must consume no key so the corrected retry under the same key succeeds, and a keyless dispatch must append normally)",
+    );
+  }
+  lines.push(
+    "",
+    "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+    `  same key, same event (DEMO-026): PUBLISH with idempotencyKey "${idempotencyPublishKey}" at 2026-04-02T09:00:00.000Z -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns ${idempotencyDuplicateReturn}, history entries: ${idempotencyHistoryLengthAfterDuplicate} (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)`,
+    `  keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "${idempotencyPublishKey}" (a different, would-be legal event) -> returns ${idempotencyCrossEventReturn}, history entries: ${idempotencyHistoryLengthAfterRetries}; the stale PUBLISH under that same old key (now an illegal transition) -> returns ${idempotencyStaleReturn} without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [${idempotencyNotificationEvents.join(", ")}] (only the two real dispatches ever notified)`,
+    `  a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey "${idempotencyRetryKey}" -> rejected: "${idempotencyFailedError}"; history entries after the failure: ${idempotencyRetryHistoryLengthAfterFailure}; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)`,
+    `  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ${idempotencyRetryTask.state}; history entries: ${idempotencyRetryTask.history.length} (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch idempotency key segment closing the CLI
+  demo: a dedicated task (DEMO-026) dispatches under
+  fixed timestamps with pinned `idempotencyKey`s — its
+  `PUBLISH` under `demo-idem-publish` lands OPEN with
+  one history entry, and the same event under the same
+  key returns OPEN and appends nothing (its listener
+  is not notified again); after an `ACCEPT` under a
+  second key moves it to ACCEPTED, a `START_CAPTURE`
+  under the old publish key (a different, would-be
+  legal event) and the stale `PUBLISH` under that same
+  old key both return ACCEPTED without throwing, and
+  the listener ends with exactly `[PUBLISH, ACCEPT]`.
+  A second dedicated task (DEMO-027) first fails an
+  `ACCEPT` from DRAFT under `demo-idem-retry` with the
+  pinned error `invalid transition: ACCEPT from DRAFT`,
+  which consumes no key, so the corrected `PUBLISH`
+  under the same key succeeds, and a final keyless
+  `ACCEPT` appends normally. All forms are asserted
+  outside the printed lines against hand-written
+  expectations. Fixed timestamps only: no network, no
+  randomness. Demo and tests only; no library behavior
+  change.
+
 - A payout reference enforcement segment closing the
   CLI demo: a dedicated task constructed with
   `requirePayoutRef: true` (DEMO-024) is driven to

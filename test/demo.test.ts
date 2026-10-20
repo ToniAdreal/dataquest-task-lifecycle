@@ -468,11 +468,17 @@ Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a
 Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):
   enforced task DEMO-024 (constructed with requirePayoutRef: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutRef -> rejected: "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
   enforced task with the reference: PAYOUT_COMPLETE with payoutRef "xfer-demo-require-ref" at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutRef=xfer-demo-require-ref (the audit trail now names the transfer the settlement claims)
-  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)`;
+  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)
+
+Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):
+  same key, same event (DEMO-026): PUBLISH with idempotencyKey "demo-idem-publish" at <timestamp> -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)
+  keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
+  a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey "demo-idem-retry" -> rejected: "invalid transition: ACCEPT from DRAFT"; history entries after the failure: 0; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)
+  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 403);
+  assert.equal(lines.length, 409);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1917,7 +1923,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 403);
+  assert.equal(out.trimEnd().split("\n").length, 409);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -4115,8 +4121,9 @@ test("demo shows the payout webhook freshness window segment in-process: inside 
   );
   // The segment follows the payout webhook AbortSignal
   // segment and prints its lines verbatim (the payout
-  // reference enforcement segment now closes the demo
-  // after it).
+  // reference enforcement segment follows it, and the
+  // dispatch idempotency key segment now closes the demo
+  // after that).
   const freshnessAt = text.indexOf(
     "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
   );
@@ -4271,10 +4278,10 @@ test("demo shows the payout reference enforcement segment in-process: ref-less c
       .payoutRef,
     undefined,
   );
-  // The segment closes the demo: it follows the payout
-  // webhook freshness window segment, prints its lines
-  // verbatim, and its default-task line is the demo's
-  // last line.
+  // The segment follows the payout webhook freshness
+  // window segment and prints its lines verbatim (the
+  // dispatch idempotency key segment now closes the demo
+  // after it).
   const enforcementAt = text.indexOf(
     "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
   );
@@ -4292,9 +4299,11 @@ test("demo shows the payout reference enforcement segment in-process: ref-less c
   ]) {
     assert.ok(text.includes(line), `missing enforcement line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)",
+  assert.ok(
+    text.indexOf(
+      "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+    ) > enforcementAt,
+    "dispatch idempotency key segment must follow the payout reference enforcement segment",
   );
 });
 
@@ -4302,6 +4311,7 @@ test("demo payout reference enforcement segment is deterministic: two runs print
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):"),
+      ls.indexOf("Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4332,4 +4342,177 @@ test("demo payout reference enforcement segment is deterministic: two runs print
     a.requirePayoutRefDefaultTask.history,
     b.requirePayoutRefDefaultTask.history,
   );
+});
+
+test("demo shows the dispatch idempotency key segment in-process: same-key duplicate no-ops, old key dedupes across events and past progress, failed dispatch consumes no key", async () => {
+  const {
+    idempotencyTask,
+    idempotencyPublishKey,
+    idempotencyDuplicateReturn,
+    idempotencyHistoryLengthAfterDuplicate,
+    idempotencyNotificationEvents,
+    idempotencyCrossEventReturn,
+    idempotencyStaleReturn,
+    idempotencyHistoryLengthAfterRetries,
+    idempotencyRetryTask,
+    idempotencyFailedError,
+    idempotencyRetryKey,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // DispatchOptions docs in src/taskLifecycle.ts and
+  // test/idempotencyKey.test.ts, never derived from the
+  // dedupe itself.
+  assert.equal(idempotencyTask.id, "DEMO-026");
+  assert.equal(idempotencyTask.state, "ACCEPTED");
+  assert.equal(idempotencyTask.history.length, 2);
+  assert.equal(idempotencyPublishKey, "demo-idem-publish");
+  assert.equal(idempotencyDuplicateReturn, "OPEN");
+  assert.equal(idempotencyHistoryLengthAfterDuplicate, 1);
+  assert.deepEqual(idempotencyNotificationEvents, ["PUBLISH", "ACCEPT"]);
+  assert.equal(idempotencyCrossEventReturn, "ACCEPTED");
+  assert.equal(idempotencyStaleReturn, "ACCEPTED");
+  assert.equal(idempotencyHistoryLengthAfterRetries, 2);
+  assert.equal(idempotencyTask.history[0].event, "PUBLISH");
+  assert.equal(idempotencyTask.history[0].at, "2026-04-02T09:00:00.000Z");
+  assert.equal(idempotencyTask.history[1].event, "ACCEPT");
+  assert.equal(idempotencyTask.history[1].at, "2026-04-02T09:05:00.000Z");
+  assert.deepEqual(idempotencyTask.toJSON().idempotencyKeys, [
+    "demo-idem-publish",
+    "demo-idem-accept",
+  ]);
+  assert.equal(idempotencyRetryTask.id, "DEMO-027");
+  assert.equal(idempotencyRetryTask.state, "ACCEPTED");
+  assert.equal(idempotencyRetryTask.history.length, 2);
+  assert.equal(idempotencyFailedError, "invalid transition: ACCEPT from DRAFT");
+  assert.equal(idempotencyRetryKey, "demo-idem-retry");
+  assert.equal(idempotencyRetryTask.history[0].event, "PUBLISH");
+  assert.equal(idempotencyRetryTask.history[0].at, "2026-04-03T09:05:00.000Z");
+  assert.equal(idempotencyRetryTask.history[1].event, "ACCEPT");
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here under
+  // fixed timestamps reproduce every verdict on their own
+  // (the script from the idempotency key tests).
+  const independent = new TaskLifecycle("test-idem-main");
+  const seen: string[] = [];
+  independent.subscribe((event) => {
+    seen.push(event);
+  });
+  independent.dispatch("PUBLISH", {
+    at: "2026-04-05T09:00:00.000Z",
+    idempotencyKey: "test-key-1",
+  });
+  assert.equal(
+    independent.dispatch("PUBLISH", {
+      at: "2026-04-05T09:01:00.000Z",
+      idempotencyKey: "test-key-1",
+    }),
+    "OPEN",
+  );
+  assert.equal(independent.history.length, 1);
+  independent.dispatch("ACCEPT", {
+    at: "2026-04-05T09:05:00.000Z",
+    idempotencyKey: "test-key-2",
+  });
+  assert.equal(
+    independent.dispatch("START_CAPTURE", {
+      at: "2026-04-05T09:06:00.000Z",
+      idempotencyKey: "test-key-1",
+    }),
+    "ACCEPTED",
+    "a known key dedupes even for a different event",
+  );
+  assert.equal(
+    independent.dispatch("PUBLISH", {
+      at: "2026-04-05T09:07:00.000Z",
+      idempotencyKey: "test-key-1",
+    }),
+    "ACCEPTED",
+    "a known key returns the current state without validating the transition",
+  );
+  assert.equal(independent.history.length, 2);
+  assert.deepEqual(seen, ["PUBLISH", "ACCEPT"]);
+  const independentRetry = new TaskLifecycle("test-idem-retry");
+  assert.throws(
+    () =>
+      independentRetry.dispatch("ACCEPT", {
+        at: "2026-04-05T09:00:00.000Z",
+        idempotencyKey: "test-retry",
+      }),
+    /invalid transition: ACCEPT from DRAFT/,
+  );
+  assert.equal(independentRetry.history.length, 0);
+  independentRetry.dispatch("PUBLISH", {
+    at: "2026-04-05T09:05:00.000Z",
+    idempotencyKey: "test-retry",
+  });
+  assert.equal(independentRetry.state, "OPEN");
+  independentRetry.dispatch("ACCEPT", { at: "2026-04-05T09:10:00.000Z" });
+  assert.equal(independentRetry.state, "ACCEPTED");
+  assert.equal(independentRetry.history.length, 2);
+  // The segment closes the demo: it follows the payout
+  // reference enforcement segment, prints its lines
+  // verbatim, and its no-key line is the demo's last line.
+  const idempotencyAt = text.indexOf(
+    "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+  );
+  assert.ok(
+    idempotencyAt >
+      text.indexOf(
+        "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+      ),
+    "dispatch idempotency key segment must follow the payout reference enforcement segment",
+  );
+  for (const line of [
+    "  same key, same event (DEMO-026): PUBLISH with idempotencyKey \"demo-idem-publish\" at 2026-04-02T09:00:00.000Z -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)",
+    "  keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key \"demo-idem-publish\" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)",
+    "  a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey \"demo-idem-retry\" -> rejected: \"invalid transition: ACCEPT from DRAFT\"; history entries after the failure: 0; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)",
+    "  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)",
+  ]) {
+    assert.ok(text.includes(line), `missing idempotency line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)",
+  );
+});
+
+test("demo dispatch idempotency key segment is deterministic: two runs print byte-identical idempotency lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + same-key / global-keys / failed-dispatch /
+  // no-key lines; every value in the segment is a fixed
+  // literal (fixed timestamps, pinned keys, a pinned
+  // error), so no normalization is needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.idempotencyTask.state, b.idempotencyTask.state);
+  assert.deepEqual(a.idempotencyTask.history, b.idempotencyTask.history);
+  assert.equal(a.idempotencyPublishKey, b.idempotencyPublishKey);
+  assert.equal(a.idempotencyDuplicateReturn, b.idempotencyDuplicateReturn);
+  assert.equal(
+    a.idempotencyHistoryLengthAfterDuplicate,
+    b.idempotencyHistoryLengthAfterDuplicate,
+  );
+  assert.deepEqual(
+    a.idempotencyNotificationEvents,
+    b.idempotencyNotificationEvents,
+  );
+  assert.equal(a.idempotencyCrossEventReturn, b.idempotencyCrossEventReturn);
+  assert.equal(a.idempotencyStaleReturn, b.idempotencyStaleReturn);
+  assert.equal(
+    a.idempotencyHistoryLengthAfterRetries,
+    b.idempotencyHistoryLengthAfterRetries,
+  );
+  assert.equal(a.idempotencyRetryTask.state, b.idempotencyRetryTask.state);
+  assert.deepEqual(a.idempotencyRetryTask.history, b.idempotencyRetryTask.history);
+  assert.equal(a.idempotencyFailedError, b.idempotencyFailedError);
+  assert.equal(a.idempotencyRetryKey, b.idempotencyRetryKey);
 });
