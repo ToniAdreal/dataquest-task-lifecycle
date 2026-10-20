@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout event dedupe checkAndRecord miss/evict
+  benchmark path: `npm run bench` now also times
+  `PayoutEventDedupe.checkAndRecord()` in its
+  first-sighting direction on a fresh dedupe rebuilt on
+  every iteration (a capacity of 100 under an injected
+  fixed clock, recording a deterministic sequence of 250
+  brand-new ids on every pass, so every call is a miss
+  and the 150 records beyond capacity force LRU
+  evictions of the oldest surviving ids) — the cost a
+  receiver pays for every genuinely new payout event,
+  previously invisible inside the steady-state duplicate
+  hit row. Its per-iteration self-check pins the stats
+  to the hand-written expectation
+  (`{ size: 100, hits: 0, misses: 250, evictions: 150 }`
+  — size pinned at capacity); outside the timed loop, a
+  probe pins that the oldest surviving id still records
+  as a duplicate hit and an already-evicted id records
+  as a new event again. The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`PayoutEventDedupe checkAndRecord (miss/evict, 250
+  new ids, capacity 100)` at ~1,995 ops/sec on that
+  run). No network, no randomness, and no wall clock.
+  Benchmark only; no library behavior change.
+
 - A payout webhook 429 Retry-After delivery segment
   closing the CLI demo: the main task's signed webhook is
   delivered with `deliverPayoutWebhook` to one fixed
