@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 556 tests, all local
+npm test   # 558 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -291,7 +291,7 @@ set to 999) to show the store's own counters stay at
 `{ size: 3, hits: 1, misses: 4, evictions: 1 }` — the
 snapshot is a detached copy, not a live view — the
 receiver-operations observability surface, shown instead
-of only asserted by the dedupe stats tests. — and a closing payout dedupe clear
+of only asserted by the dedupe stats tests. — and a payout dedupe clear
 reset segment that records one fixed payout `eventId` on
 a fresh `PayoutEventDedupe` under an injected fixed clock
 (new on first sight, a duplicate on immediate redelivery,
@@ -302,7 +302,20 @@ reads as a new event with the counters re-accumulating
 from zero (`{ size: 1, hits: 0, misses: 1, evictions: 0 }`) —
 the explicit reset surface for key rotation, test
 isolation, or a deliberate window reset, shown instead of
-only asserted by the dedupe clear test.
+only asserted by the dedupe clear test. — and a closing payout webhook 429
+Retry-After delivery segment that delivers the main
+task's signed webhook with `deliverPayoutWebhook` to one
+fixed endpoint through an injected fake fetch scripted to
+answer 429 with a pinned `Retry-After: 30` header on the
+first attempt and 200 on the retry, with a recording fake
+sleep in place of a real wait: the recorded sleep is
+exactly `[5000]` — the parsed hint (30 s = 30000 ms)
+clamped to the segment's `maxRetryDelayMs` (5000), never
+the exponential backoff (`backoffMs` 100) — and both wire
+calls carry the byte-identical signed body, whose
+signature verifies under the demo secret — the actual
+end-to-end wait, shown instead of only parsed in
+isolation or asserted by the delivery tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1327,7 +1340,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 556 tests covering the happy path, reject→resubmit
+`npm test` runs 558 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

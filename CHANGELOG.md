@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook 429 Retry-After delivery segment
+  closing the CLI demo: the main task's signed webhook is
+  delivered with `deliverPayoutWebhook` to one fixed
+  endpoint through an injected fake fetch scripted to
+  answer 429 with a pinned `Retry-After: 30` header on the
+  first attempt and 200 on the retry, with a recording
+  fake sleep in place of a real wait. The recorded sleep
+  is exactly `[5000]` — the parsed hint (30 s = 30000 ms)
+  clamped to the segment's `maxRetryDelayMs` (5000),
+  never the exponential backoff (`backoffMs` 100) — and
+  the demo asserts outside the printed lines that the
+  delivery reports `{ ok: true, attempts: 2, status: 200 }`,
+  both wire calls carry the byte-identical signed body,
+  and the captured wire body verifies under the demo
+  secret. The demo tests pin the segment against
+  hand-written expectations, including an independent
+  in-test 429 delivery. Demo and tests only; no library
+  behavior change.
+
 - A payout event dedupe stats benchmark path:
   `npm run bench` now also times
   `PayoutEventDedupe.stats()` on a fixed dedupe (7 ids

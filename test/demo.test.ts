@@ -434,11 +434,17 @@ Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pin
 Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):
   dedupe (fixed clock <timestamp>, TTL 60000 ms): eventId evt_demo_clear_001 — checkAndRecord: false (new event); again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0
   clear(): size 0, stats size 0, hits 0, misses 0, evictions 0 — every recorded id dropped and every counter reset in one call (the explicit reset for key rotation, test isolation, or a deliberate window reset)
-  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)`;
+  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)
+
+Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):
+  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
+  first answer: 429 with Retry-After: 30 (parsed hint 30000 ms, clamped to maxRetryDelayMs 5000) -> recorded sleep: [5000] ms (the recording sleepImpl received exactly the clamped hint — exponential backoff, here backoffMs 100, never ran, and nothing really waited)
+  delivery: ok attempts=2 status=200 (the retry after the clamped wait succeeded)
+  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 375);
+  assert.equal(lines.length, 381);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1883,7 +1889,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 375);
+  assert.equal(out.trimEnd().split("\n").length, 381);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3474,9 +3480,9 @@ test("demo shows the payout dedupe clear reset segment in-process: pinned id for
     evictions: 0,
   });
   assert.equal(independent.checkAndRecord("evt-1"), false); // forgotten
-  // The segment closes the demo: it follows the payout dedupe
-  // stats segment, prints its lines verbatim, and its
-  // re-record line is the demo's last line.
+  // The segment follows the payout dedupe stats segment
+  // and prints its lines verbatim (the payout webhook 429
+  // Retry-After delivery segment now closes the demo after it).
   const clearAt = text.indexOf(
     "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
   );
@@ -3494,9 +3500,11 @@ test("demo shows the payout dedupe clear reset segment in-process: pinned id for
   ]) {
     assert.ok(text.includes(line), `missing payout dedupe clear line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  same eventId after clear — checkAndRecord: false (new event again — the clear forgot it, no TTL wait needed) -> stats size 1, hits 0, misses 1, evictions 0 (counters re-accumulate from zero)",
+  assert.ok(
+    text.indexOf(
+      "Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):",
+    ) > clearAt,
+    "payout webhook 429 Retry-After segment must follow the payout dedupe clear segment",
   );
 });
 
@@ -3504,6 +3512,7 @@ test("demo payout dedupe clear segment is deterministic: two runs print byte-ide
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):"),
+      ls.indexOf("Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3519,5 +3528,142 @@ test("demo payout dedupe clear segment is deterministic: two runs print byte-ide
   assert.deepEqual(
     a.dedupeClearStatsAfterReRecord,
     b.dedupeClearStatsAfterReRecord,
+  );
+});
+
+test("demo shows the payout webhook 429 Retry-After delivery segment in-process: clamped hint is the recorded sleep, retry succeeds, wire body verifies", async () => {
+  const {
+    webhook,
+    retryAfterDeliveryEndpoint,
+    retryAfterDeliveryResult,
+    retryAfterDeliveryCalls,
+    retryAfterDeliverySleeps,
+    retryAfterDeliveryBodyVerifies,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // retryDelayMs docs in src/settlementWebhook.ts and the
+  // payoutWebhookDelivery tests, never derived by calling
+  // deliverPayoutWebhook itself.
+  assert.equal(
+    retryAfterDeliveryEndpoint,
+    "https://payouts.example.com/hooks/payout",
+  );
+  assert.deepEqual(retryAfterDeliveryResult, {
+    ok: true,
+    attempts: 2,
+    status: 200,
+  });
+  // The pinned hint "30" parses to 30000 ms and the segment's
+  // maxRetryDelayMs of 5000 clamps it: exactly one recorded
+  // sleep of 5000, never the backoffMs 100 fallback.
+  assert.equal(parsePayoutRetryAfter("30"), 30_000);
+  assert.deepEqual(retryAfterDeliverySleeps, [5_000]);
+  assert.equal(retryAfterDeliveryCalls.length, 2);
+  for (const call of retryAfterDeliveryCalls) {
+    assert.equal(call.url, retryAfterDeliveryEndpoint);
+    assert.equal(call.body, JSON.stringify(webhook.payload));
+    assert.equal(call.signature, webhook.signature);
+  }
+  assert.equal(
+    retryAfterDeliveryCalls[0].body,
+    retryAfterDeliveryCalls[1].body,
+  );
+  assert.equal(retryAfterDeliveryBodyVerifies, true);
+  assert.ok(
+    verifyPayoutWebhook(
+      retryAfterDeliveryCalls[0].body,
+      retryAfterDeliveryCalls[0].signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+  );
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh delivery of the demo
+  // webhook through the test's own scripted fetch/sleep
+  // reproduces the clamped wait on its own (the script from
+  // the delivery tests, with the segment's pinned values).
+  const independentCalls: Array<{ body: string; signature: string }> = [];
+  const independentSleeps: number[] = [];
+  let independentAttempt = 0;
+  const independentResult = await deliverPayoutWebhook(
+    retryAfterDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async (_url, init) => {
+        independentCalls.push({
+          body: String(init.body ?? ""),
+          signature: String(
+            new Headers(init.headers).get("x-hub-signature-256") ?? "",
+          ),
+        });
+        independentAttempt += 1;
+        return independentAttempt === 1
+          ? new Response("{}", {
+              status: 429,
+              headers: { "retry-after": "30" },
+            })
+          : new Response("{}", { status: 200 });
+      },
+      sleepImpl: async (ms: number) => {
+        independentSleeps.push(ms);
+      },
+      backoffMs: 100,
+      maxRetryDelayMs: 5_000,
+    },
+  );
+  assert.deepEqual(independentResult, { ok: true, attempts: 2, status: 200 });
+  assert.deepEqual(independentSleeps, [5_000]);
+  assert.equal(independentCalls.length, 2);
+  assert.equal(independentCalls[0].body, independentCalls[1].body);
+  // The segment closes the demo: it follows the payout
+  // dedupe clear segment, prints its lines verbatim, and
+  // its wire-check line is the demo's last line.
+  const retryAt = text.indexOf(
+    "Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):",
+  );
+  assert.ok(
+    retryAt >
+      text.indexOf(
+        "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
+      ),
+    "payout webhook 429 Retry-After segment must follow the payout dedupe clear segment",
+  );
+  for (const line of [
+    "  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)",
+    "  first answer: 429 with Retry-After: 30 (parsed hint 30000 ms, clamped to maxRetryDelayMs 5000) -> recorded sleep: [5000] ms (the recording sleepImpl received exactly the clamped hint — exponential backoff, here backoffMs 100, never ran, and nothing really waited)",
+    "  delivery: ok attempts=2 status=200 (the retry after the clamped wait succeeded)",
+    "  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  ]) {
+    assert.ok(text.includes(line), `missing 429 Retry-After line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  );
+});
+
+test("demo payout webhook 429 Retry-After segment is deterministic: two runs print byte-identical wait lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + endpoint / first-answer / delivery / wire
+  // lines; every value in the segment is a fixed literal
+  // (pinned hint, pinned cap, scripted answers), so no
+  // normalization is needed — the wire bodies themselves
+  // carry the main task's wall-clock timestamps and are
+  // asserted in-process above, not printed here.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.retryAfterDeliveryResult, b.retryAfterDeliveryResult);
+  assert.deepEqual(a.retryAfterDeliverySleeps, b.retryAfterDeliverySleeps);
+  assert.equal(
+    a.retryAfterDeliveryBodyVerifies,
+    b.retryAfterDeliveryBodyVerifies,
   );
 });
