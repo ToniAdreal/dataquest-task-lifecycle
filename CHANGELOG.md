@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout event dedupe stats benchmark path:
+  `npm run bench` now also times
+  `PayoutEventDedupe.stats()` on a fixed dedupe (7 ids
+  recorded under an injectable clock that advances only
+  while the fixture is built, with a 60-second TTL and a
+  capacity of 6 — one id LRU-evicted during construction,
+  one id expired at the stats instant but still sitting in
+  the map, and 5 live ids) — the observability snapshot a
+  receiver's monitoring polls on every tick, previously
+  read only as an incidental fixture self-check inside the
+  other dedupe paths. Its per-iteration self-check pins
+  the snapshot to the hand-written expectation
+  (`{ size: 5, hits: 1, misses: 7, evictions: 1 }` — size
+  counts only the live ids, so the expired id still
+  sitting in the map is excluded); outside the timed loop, a
+  mutated detached snapshot is pinned to leave a re-read
+  unchanged and an empty dedupe is pinned to report
+  all-zero stats. The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`PayoutEventDedupe.stats (5 live entries, 1 expired)`
+  at ~2,814,391 ops/sec on that run). No network, no
+  randomness, and no wall clock. Benchmark only; no
+  library behavior change.
+
 - A payout event dedupe clear benchmark path:
   `npm run bench` now also times
   `PayoutEventDedupe.clear()` on a fresh dedupe rebuilt
