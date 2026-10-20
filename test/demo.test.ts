@@ -457,11 +457,17 @@ Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] }
 Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):
   endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
   pre-aborted signal: delivery ok=false attempts=0 error="payout webhook delivery aborted"; fetch calls: 0 (the caller asked to stop before the delivery started, so no request was made and the abort is reported, not thrown)
-  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error="payout webhook delivery aborted"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)`;
+  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error="payout webhook delivery aborted"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)
+
+Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):
+  notification (main task DEMO-001, fixed signing time <timestamp>): eventId evt_demo_freshness signed with the demo secret; freshness window maxAgeMs 3600000 ms (1 hour) — the secret itself is never printed
+  inside the window: receiver now <timestamp> (30 minutes after signing) with maxAgeMs 3600000 -> verifies: true; boundary: receiver now <timestamp> (exactly maxAgeMs after signing) -> verifies: true (the boundary is inclusive — only now - at > maxAgeMs fails)
+  stale replay fails closed: receiver now <timestamp> (2 hours after signing, same body and signature) -> verifies: false (the signature alone still verifies: true — only the freshness gate rejects it, bounding replays of a legitimately signed old notification)
+  future skew fails closed: receiver now <timestamp> (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 392);
+  assert.equal(lines.length, 398);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1906,7 +1912,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 392);
+  assert.equal(out.trimEnd().split("\n").length, 398);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3805,8 +3811,8 @@ test("demo shows the payout webhook secret rotation segment in-process: both sec
   );
   // The segment follows the payout webhook 429
   // Retry-After delivery segment and prints its lines
-  // verbatim (the payout webhook AbortSignal segment now
-  // closes the demo after it).
+  // verbatim (the payout webhook AbortSignal segment
+  // follows it).
   const rotationAt = text.indexOf(
     "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
   );
@@ -3955,10 +3961,10 @@ test("demo shows the payout webhook AbortSignal segment in-process: pre-abort ma
   });
   assert.equal(independentWaitCalls, 1);
   assert.deepEqual(independentWaitSleeps, [30_000]);
-  // The segment closes the demo: it follows the payout
-  // webhook secret rotation segment, prints its lines
-  // verbatim, and its backoff-abort line is the demo's
-  // last line.
+  // The segment follows the payout webhook secret
+  // rotation segment and prints its lines verbatim (the
+  // payout webhook freshness window segment now closes
+  // the demo after it).
   const abortAt = text.indexOf(
     "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
   );
@@ -3976,9 +3982,11 @@ test("demo shows the payout webhook AbortSignal segment in-process: pre-abort ma
   ]) {
     assert.ok(text.includes(line), `missing AbortSignal line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error=\"payout webhook delivery aborted\"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)",
+  assert.ok(
+    text.indexOf(
+      "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
+    ) > abortAt,
+    "payout webhook freshness window segment must follow the payout webhook AbortSignal segment",
   );
 });
 
@@ -3986,6 +3994,7 @@ test("demo payout webhook AbortSignal segment is deterministic: two runs print b
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):"),
+      ls.indexOf("Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4004,4 +4013,154 @@ test("demo payout webhook AbortSignal segment is deterministic: two runs print b
   assert.deepEqual(a.abortWaitResult, b.abortWaitResult);
   assert.equal(a.abortWaitFetchCalls, b.abortWaitFetchCalls);
   assert.deepEqual(a.abortWaitSleeps, b.abortWaitSleeps);
+});
+
+test("demo shows the payout webhook freshness window segment in-process: inside and at the boundary pass, stale and future-skewed fail closed", async () => {
+  const {
+    task,
+    freshnessWebhook,
+    freshnessMaxAgeMs,
+    freshnessMaxFutureSkewMs,
+    freshnessWithinWindow,
+    freshnessAtBoundary,
+    freshnessBeyondWindow,
+    freshnessBeyondWindowSignatureOnly,
+    freshnessFutureBeyondSkew,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // VerifyPayoutWebhookOptions docs in
+  // src/settlementWebhook.ts and
+  // test/payoutWebhookFreshness.test.ts /
+  // test/payoutWebhookFutureSkew.test.ts, never derived by
+  // calling verifyPayoutWebhook itself.
+  assert.equal(freshnessWebhook.payload.taskId, "DEMO-001");
+  assert.equal(freshnessWebhook.payload.event, "PAYOUT_COMPLETE");
+  assert.equal(freshnessWebhook.payload.eventId, "evt_demo_freshness");
+  assert.equal(freshnessWebhook.payload.at, "2026-03-28T09:00:00.000Z");
+  assert.equal(freshnessWebhook.payload.payoutRef, "xfer-88f2");
+  assert.equal(freshnessWebhook.payload.payoutAmount, 10098.5);
+  assert.equal(freshnessMaxAgeMs, 3_600_000);
+  assert.equal(freshnessMaxFutureSkewMs, 3_600_000);
+  assert.equal(freshnessWithinWindow, true);
+  assert.equal(freshnessAtBoundary, true);
+  assert.equal(freshnessBeyondWindow, false);
+  assert.equal(freshnessBeyondWindowSignatureOnly, true);
+  assert.equal(freshnessFutureBeyondSkew, false);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh notification built here
+  // from the demo's PAID task under the same pinned time and
+  // a fresh eventId reproduces every verdict on its own (the
+  // scripts from the freshness / future-skew tests).
+  const independent = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET, {
+    eventId: "evt-test-freshness",
+    now: new Date("2026-03-28T09:00:00.000Z"),
+  });
+  const independentBody = JSON.stringify(independent.payload);
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxAgeMs: 3_600_000,
+      now: new Date("2026-03-28T09:30:00.000Z"),
+    }),
+    true,
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxAgeMs: 3_600_000,
+      now: new Date("2026-03-28T10:00:00.000Z"),
+    }),
+    true,
+    "age exactly maxAgeMs is inclusive",
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxAgeMs: 3_600_000,
+      now: new Date("2026-03-28T10:00:00.001Z"),
+    }),
+    false,
+    "one millisecond past the boundary fails",
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxAgeMs: 3_600_000,
+      now: new Date("2026-03-28T11:00:00.000Z"),
+    }),
+    false,
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET),
+    true,
+    "without a window the same stale signature still verifies",
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxFutureSkewMs: 3_600_000,
+      now: new Date("2026-03-28T07:00:00.000Z"),
+    }),
+    false,
+  );
+  assert.equal(
+    verifyPayoutWebhook(independentBody, independent.signature, DEMO_WEBHOOK_SECRET, {
+      maxAgeMs: 3_600_000,
+      now: new Date("2026-03-28T07:00:00.000Z"),
+    }),
+    true,
+    "maxAgeMs alone never bounds the future direction",
+  );
+  // The segment closes the demo: it follows the payout
+  // webhook AbortSignal segment, prints its lines verbatim,
+  // and its future-skew line is the demo's last line.
+  const freshnessAt = text.indexOf(
+    "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
+  );
+  assert.ok(
+    freshnessAt >
+      text.indexOf(
+        "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
+      ),
+    "payout webhook freshness window segment must follow the payout webhook AbortSignal segment",
+  );
+  for (const line of [
+    "  notification (main task DEMO-001, fixed signing time 2026-03-28T09:00:00.000Z): eventId evt_demo_freshness signed with the demo secret; freshness window maxAgeMs 3600000 ms (1 hour) — the secret itself is never printed",
+    "  inside the window: receiver now 2026-03-28T09:30:00.000Z (30 minutes after signing) with maxAgeMs 3600000 -> verifies: true; boundary: receiver now 2026-03-28T10:00:00.000Z (exactly maxAgeMs after signing) -> verifies: true (the boundary is inclusive — only now - at > maxAgeMs fails)",
+    "  stale replay fails closed: receiver now 2026-03-28T11:00:00.000Z (2 hours after signing, same body and signature) -> verifies: false (the signature alone still verifies: true — only the freshness gate rejects it, bounding replays of a legitimately signed old notification)",
+    "  future skew fails closed: receiver now 2026-03-28T07:00:00.000Z (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)",
+  ]) {
+    assert.ok(text.includes(line), `missing freshness window line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  future skew fails closed: receiver now 2026-03-28T07:00:00.000Z (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)",
+  );
+});
+
+test("demo payout webhook freshness window segment is deterministic: two runs print byte-identical freshness lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + notification / inside-boundary / stale /
+  // future-skew lines; every value in the segment is a
+  // fixed literal (fixed signing time, injected receiver
+  // clocks, pinned windows), so no normalization is
+  // needed — the signature itself is asserted in-process
+  // above, not printed here.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.freshnessWebhook, b.freshnessWebhook);
+  assert.equal(a.freshnessMaxAgeMs, b.freshnessMaxAgeMs);
+  assert.equal(a.freshnessMaxFutureSkewMs, b.freshnessMaxFutureSkewMs);
+  assert.equal(a.freshnessWithinWindow, b.freshnessWithinWindow);
+  assert.equal(a.freshnessAtBoundary, b.freshnessAtBoundary);
+  assert.equal(a.freshnessBeyondWindow, b.freshnessBeyondWindow);
+  assert.equal(
+    a.freshnessBeyondWindowSignatureOnly,
+    b.freshnessBeyondWindowSignatureOnly,
+  );
+  assert.equal(a.freshnessFutureBeyondSkew, b.freshnessFutureBeyondSkew);
 });

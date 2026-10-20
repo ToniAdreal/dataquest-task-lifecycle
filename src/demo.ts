@@ -265,7 +265,20 @@
  * reports the one attempt actually made, with its 500
  * status and the same pinned error) — the caller
  * cancellation path a reader has only seen asserted by
- * the payout webhook abort-signal tests so far.
+ * the payout webhook abort-signal tests so far —
+ * and finally a payout webhook freshness window segment:
+ * a fixed notification built from the main task at a
+ * pinned signing time is verified with
+ * `verifyPayoutWebhook`'s opt-in freshness window under
+ * injected receiver clocks — inside the `maxAgeMs`
+ * window it verifies, exactly at the window boundary it
+ * still verifies (only `now - at > maxAgeMs` fails), the
+ * same body and signature past the window fail closed
+ * even though the signature alone still verifies, and a
+ * payload lying further ahead of the receiver than
+ * `maxFutureSkewMs` allows also fails closed — the
+ * replay bound a reader has only seen asserted by the
+ * payout webhook freshness and future-skew tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -331,7 +344,12 @@
  * webhook AbortSignal segment's endpoint, its pre-aborted
  * result with its zero fetch-call count, and its
  * backoff-abort result with its fetch-call count and the
- * recorded sleep delays it entered,
+ * recorded sleep delays it entered, the payout webhook
+ * freshness window segment's fixed notification, its
+ * pinned `maxAgeMs` / `maxFutureSkewMs` windows, and its
+ * four verdicts (inside the window, at the boundary,
+ * past the window, and beyond the future-skew bound)
+ * with the stale notification's signature-only verdict,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -571,6 +589,22 @@ export interface DemoResult {
   abortWaitFetchCalls: number;
   /** Delays the backoff-abort form's hanging sleep entered ([30000]). */
   abortWaitSleeps: number[];
+  /** Fixed notification of the closing freshness window segment. */
+  freshnessWebhook: PayoutWebhook;
+  /** The segment's pinned `maxAgeMs` window (3600000). */
+  freshnessMaxAgeMs: number;
+  /** The segment's pinned `maxFutureSkewMs` bound (3600000). */
+  freshnessMaxFutureSkewMs: number;
+  /** Verdict 30 minutes after signing, inside the window (true). */
+  freshnessWithinWindow: boolean;
+  /** Verdict exactly `maxAgeMs` after signing (true, inclusive). */
+  freshnessAtBoundary: boolean;
+  /** Verdict 2 hours after signing, past the window (false). */
+  freshnessBeyondWindow: boolean;
+  /** The stale verdict's signature-only counterpart (true). */
+  freshnessBeyondWindowSignatureOnly: boolean;
+  /** Verdict when the payload lies 2 hours ahead of the receiver (false). */
+  freshnessFutureBeyondSkew: boolean;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -715,7 +749,10 @@ export interface DemoResult {
  * to afterwards, the payout webhook secret rotation
  * segment's two fixed webhooks with its rotation-window
  * and fail-closed edge verdicts and its mutual-exclusion
- * configuration error, and the exact lines
+ * configuration error, the payout webhook freshness
+ * window segment's fixed notification with its pinned
+ * windows and its inside / boundary / stale / future-skew
+ * verdicts, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -3378,7 +3415,115 @@ export async function runDemo(): Promise<DemoResult> {
     `  abort during the backoff wait: first answer 500 -> backoff sleep [${abortWaitSleeps.join(", ")}] ms entered, signal aborted inside the sleep; delivery ok=${abortWaitResult.ok} attempts=${abortWaitResult.attempts} status=${abortWaitResult.status} error="${abortWaitResult.error}"; fetch calls: ${abortWaitFetchCalls} (no second attempt was started — the pending wait was cut short, nothing really waited)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout webhook freshness window segment (closing): every
+  // webhook segment above verifies a signature — and a
+  // signature has no expiry of its own, so a captured,
+  // legitimately signed notification would verify forever.
+  // The opt-in freshness window of `verifyPayoutWebhook`
+  // (`{ maxAgeMs, maxFutureSkewMs, now }`, settlementWebhook,
+  // unit-tested since the freshness and future-skew tests
+  // landed) is the receiver's replay bound — never shown in
+  // the demo until here. One notification is built from the
+  // main PAID task under a fixed signing time and a fixed
+  // eventId and signed with the shared demo secret, then the
+  // SAME body and signature are verified under injected
+  // receiver clocks, so the whole segment is byte-identical
+  // on every run: fixed timestamp, injected clocks, zero
+  // network, zero randomness. Hand-written expectations —
+  // written out here from the VerifyPayoutWebhookOptions
+  // docs and the freshness / future-skew tests, never
+  // derived by calling verifyPayoutWebhook itself:
+  //   - inside the window: receiver now 30 minutes after
+  //     signing with maxAgeMs 3600000 (1 hour) verifies true;
+  //   - boundary: receiver now exactly maxAgeMs after
+  //     signing still verifies true — the boundary is
+  //     inclusive, only `now - at > maxAgeMs` fails;
+  //   - stale: receiver now 2 hours after signing returns
+  //     false even though the same body and signature still
+  //     verify true with no window configured — only the
+  //     freshness gate rejects the stale replay;
+  //   - future skew: a receiver now 2 hours BEFORE signing
+  //     (the payload `at` lies 2 hours ahead of the
+  //     receiver) with maxFutureSkewMs 3600000 returns
+  //     false — a sender clock set too far ahead gains no
+  //     unbounded replay window, and maxAgeMs alone never
+  //     bounds that future direction.
+  // The segment asserts all of this here, outside the
+  // printed lines: a freshness verdict that drifted would
+  // fail the demo itself, not just a test.
+  const FRESHNESS_FIXED_AT = new Date("2026-03-28T09:00:00.000Z");
+  const freshnessMaxAgeMs = 3_600_000;
+  const freshnessMaxFutureSkewMs = 3_600_000;
+  const freshnessWebhook = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET, {
+    eventId: "evt_demo_freshness",
+    now: FRESHNESS_FIXED_AT,
+  });
+  const freshnessBody = JSON.stringify(freshnessWebhook.payload);
+  const freshnessWithinNow = new Date(
+    FRESHNESS_FIXED_AT.getTime() + 30 * 60_000,
+  );
+  const freshnessBoundaryNow = new Date(
+    FRESHNESS_FIXED_AT.getTime() + freshnessMaxAgeMs,
+  );
+  const freshnessBeyondNow = new Date(
+    FRESHNESS_FIXED_AT.getTime() + 2 * freshnessMaxAgeMs,
+  );
+  const freshnessFutureNow = new Date(
+    FRESHNESS_FIXED_AT.getTime() - 2 * freshnessMaxFutureSkewMs,
+  );
+  const freshnessWithinWindow = verifyPayoutWebhook(
+    freshnessBody,
+    freshnessWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+    { maxAgeMs: freshnessMaxAgeMs, now: freshnessWithinNow },
+  );
+  const freshnessAtBoundary = verifyPayoutWebhook(
+    freshnessBody,
+    freshnessWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+    { maxAgeMs: freshnessMaxAgeMs, now: freshnessBoundaryNow },
+  );
+  const freshnessBeyondWindow = verifyPayoutWebhook(
+    freshnessBody,
+    freshnessWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+    { maxAgeMs: freshnessMaxAgeMs, now: freshnessBeyondNow },
+  );
+  const freshnessBeyondWindowSignatureOnly = verifyPayoutWebhook(
+    freshnessBody,
+    freshnessWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+  );
+  const freshnessFutureBeyondSkew = verifyPayoutWebhook(
+    freshnessBody,
+    freshnessWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+    { maxFutureSkewMs: freshnessMaxFutureSkewMs, now: freshnessFutureNow },
+  );
+  if (
+    freshnessWebhook.payload.taskId !== "DEMO-001" ||
+    freshnessWebhook.payload.eventId !== "evt_demo_freshness" ||
+    freshnessWebhook.payload.at !== "2026-03-28T09:00:00.000Z" ||
+    freshnessWithinWindow !== true ||
+    freshnessAtBoundary !== true ||
+    freshnessBeyondWindow !== false ||
+    freshnessBeyondWindowSignatureOnly !== true ||
+    freshnessFutureBeyondSkew !== false
+  ) {
+    throw new Error(
+      "demo fixture broken: verifyPayoutWebhook freshness window does not match the hand-pinned contract (the fixed notification must verify inside the maxAgeMs window and exactly at its inclusive boundary, must fail closed past the window even though its signature alone still verifies, and must fail closed when its at lies beyond maxFutureSkewMs ahead of the receiver)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
+    `  notification (main task DEMO-001, fixed signing time ${freshnessWebhook.payload.at}): eventId ${freshnessWebhook.payload.eventId} signed with the demo secret; freshness window maxAgeMs ${freshnessMaxAgeMs} ms (1 hour) — the secret itself is never printed`,
+    `  inside the window: receiver now ${freshnessWithinNow.toISOString()} (30 minutes after signing) with maxAgeMs ${freshnessMaxAgeMs} -> verifies: ${freshnessWithinWindow}; boundary: receiver now ${freshnessBoundaryNow.toISOString()} (exactly maxAgeMs after signing) -> verifies: ${freshnessAtBoundary} (the boundary is inclusive — only now - at > maxAgeMs fails)`,
+    `  stale replay fails closed: receiver now ${freshnessBeyondNow.toISOString()} (2 hours after signing, same body and signature) -> verifies: ${freshnessBeyondWindow} (the signature alone still verifies: ${freshnessBeyondWindowSignatureOnly} — only the freshness gate rejects it, bounding replays of a legitimately signed old notification)`,
+    `  future skew fails closed: receiver now ${freshnessFutureNow.toISOString()} (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs ${freshnessMaxFutureSkewMs} -> verifies: ${freshnessFutureBeyondSkew} (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

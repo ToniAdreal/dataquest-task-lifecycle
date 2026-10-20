@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook freshness window segment closing
+  the CLI demo: one fixed notification is built from
+  the main task at a pinned signing time
+  (`2026-03-28T09:00:00.000Z`, eventId
+  `evt_demo_freshness`) and the same body and signature
+  are verified with `verifyPayoutWebhook` under
+  injected receiver clocks. Inside the `maxAgeMs`
+  window (3600000 ms, receiver 30 minutes after
+  signing) it verifies; exactly at the window boundary
+  it still verifies — the boundary is inclusive, only
+  `now - at > maxAgeMs` fails; two hours after signing
+  it fails closed even though the signature alone still
+  verifies; and with the receiver two hours behind the
+  payload, a `maxFutureSkewMs` of 3600000 ms also fails
+  it closed. All four verdicts are asserted outside the
+  printed lines against hand-written expectations.
+  Fixed timestamp, injected clocks only: no network,
+  no randomness. Demo and tests only; no library
+  behavior change.
+
 - A payout webhook AbortSignal segment closing the
   CLI demo: the main task's signed webhook is delivered
   with `deliverPayoutWebhook` under an external
