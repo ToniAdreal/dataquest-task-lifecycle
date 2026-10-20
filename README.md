@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 564 tests, all local
+npm test   # 566 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -337,7 +337,7 @@ short, no second attempt is started, and the result
 reports the one attempt actually made, with its 500
 status and the same pinned error) — the caller
 cancellation path, shown instead of only asserted by
-the payout webhook abort-signal tests. — and a closing payout webhook freshness
+the payout webhook abort-signal tests. — and a payout webhook freshness
 window segment that builds one fixed notification from
 the main task at a pinned signing time and verifies the
 same body and signature with `verifyPayoutWebhook`
@@ -350,7 +350,19 @@ verifies, and a payload lying further ahead of the
 receiver than `maxFutureSkewMs` (3600000 ms) allows
 also fails closed — the replay bound, shown instead of
 only asserted by the payout webhook freshness and
-future-skew tests.
+future-skew tests. — and a closing payout reference enforcement
+segment that drives a dedicated task constructed with
+`requirePayoutRef: true` to PAYOUT_PENDING under fixed
+timestamps: its `PAYOUT_COMPLETE` without a `payoutRef`
+is rejected with the pinned `payout reference required: …`
+error and leaves state and history untouched, the same
+dispatch with the pinned `payoutRef`
+`xfer-demo-require-ref` then settles it and the
+history's last entry carries that reference verbatim,
+and a second dedicated task under the default (the
+option unset) still settles without a reference — the
+fail-fast settlement gate, shown instead of only
+asserted by the requirePayoutRef tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1375,7 +1387,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 564 tests covering the happy path, reject→resubmit
+`npm test` runs 566 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

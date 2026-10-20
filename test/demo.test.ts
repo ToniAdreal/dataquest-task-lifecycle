@@ -463,11 +463,16 @@ Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a
   notification (main task DEMO-001, fixed signing time <timestamp>): eventId evt_demo_freshness signed with the demo secret; freshness window maxAgeMs 3600000 ms (1 hour) — the secret itself is never printed
   inside the window: receiver now <timestamp> (30 minutes after signing) with maxAgeMs 3600000 -> verifies: true; boundary: receiver now <timestamp> (exactly maxAgeMs after signing) -> verifies: true (the boundary is inclusive — only now - at > maxAgeMs fails)
   stale replay fails closed: receiver now <timestamp> (2 hours after signing, same body and signature) -> verifies: false (the signature alone still verifies: true — only the freshness gate rejects it, bounding replays of a legitimately signed old notification)
-  future skew fails closed: receiver now <timestamp> (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)`;
+  future skew fails closed: receiver now <timestamp> (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)
+
+Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):
+  enforced task DEMO-024 (constructed with requirePayoutRef: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutRef -> rejected: "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
+  enforced task with the reference: PAYOUT_COMPLETE with payoutRef "xfer-demo-require-ref" at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutRef=xfer-demo-require-ref (the audit trail now names the transfer the settlement claims)
+  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 398);
+  assert.equal(lines.length, 403);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1912,7 +1917,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 398);
+  assert.equal(out.trimEnd().split("\n").length, 403);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3963,8 +3968,7 @@ test("demo shows the payout webhook AbortSignal segment in-process: pre-abort ma
   assert.deepEqual(independentWaitSleeps, [30_000]);
   // The segment follows the payout webhook secret
   // rotation segment and prints its lines verbatim (the
-  // payout webhook freshness window segment now closes
-  // the demo after it).
+  // payout webhook freshness window segment follows it).
   const abortAt = text.indexOf(
     "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
   );
@@ -4109,9 +4113,10 @@ test("demo shows the payout webhook freshness window segment in-process: inside 
     true,
     "maxAgeMs alone never bounds the future direction",
   );
-  // The segment closes the demo: it follows the payout
-  // webhook AbortSignal segment, prints its lines verbatim,
-  // and its future-skew line is the demo's last line.
+  // The segment follows the payout webhook AbortSignal
+  // segment and prints its lines verbatim (the payout
+  // reference enforcement segment now closes the demo
+  // after it).
   const freshnessAt = text.indexOf(
     "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
   );
@@ -4130,9 +4135,11 @@ test("demo shows the payout webhook freshness window segment in-process: inside 
   ]) {
     assert.ok(text.includes(line), `missing freshness window line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  future skew fails closed: receiver now 2026-03-28T07:00:00.000Z (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)",
+  assert.ok(
+    text.indexOf(
+      "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+    ) > freshnessAt,
+    "payout reference enforcement segment must follow the payout webhook freshness window segment",
   );
 });
 
@@ -4140,6 +4147,7 @@ test("demo payout webhook freshness window segment is deterministic: two runs pr
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):"),
+      ls.indexOf("Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4163,4 +4171,165 @@ test("demo payout webhook freshness window segment is deterministic: two runs pr
     b.freshnessBeyondWindowSignatureOnly,
   );
   assert.equal(a.freshnessFutureBeyondSkew, b.freshnessFutureBeyondSkew);
+});
+
+test("demo shows the payout reference enforcement segment in-process: ref-less completion rejected, referenced completion settles, default stays advisory", async () => {
+  const {
+    requirePayoutRefTask,
+    requirePayoutRefError,
+    requirePayoutRefStateAfterReject,
+    requirePayoutRefHistoryLengthAfterReject,
+    requirePayoutRefPayoutRef,
+    requirePayoutRefDefaultTask,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/requirePayoutRef.test.ts, never derived from the
+  // gate itself.
+  assert.equal(requirePayoutRefTask.id, "DEMO-024");
+  assert.equal(requirePayoutRefTask.state, "PAID");
+  assert.equal(requirePayoutRefTask.history.length, 8);
+  assert.equal(
+    requirePayoutRefError,
+    "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled",
+  );
+  assert.equal(requirePayoutRefStateAfterReject, "PAYOUT_PENDING");
+  assert.equal(requirePayoutRefHistoryLengthAfterReject, 7);
+  assert.equal(requirePayoutRefPayoutRef, "xfer-demo-require-ref");
+  const enforcedLast =
+    requirePayoutRefTask.history[requirePayoutRefTask.history.length - 1];
+  assert.equal(enforcedLast.event, "PAYOUT_COMPLETE");
+  assert.equal(enforcedLast.seq, 8);
+  assert.equal(enforcedLast.payoutRef, "xfer-demo-require-ref");
+  assert.equal(enforcedLast.at, "2026-03-29T09:40:00.000Z");
+  assert.equal(requirePayoutRefDefaultTask.id, "DEMO-025");
+  assert.equal(requirePayoutRefDefaultTask.state, "PAID");
+  assert.equal(requirePayoutRefDefaultTask.history.length, 8);
+  const defaultLast =
+    requirePayoutRefDefaultTask.history[
+      requirePayoutRefDefaultTask.history.length - 1
+    ];
+  assert.equal(defaultLast.event, "PAYOUT_COMPLETE");
+  assert.equal(defaultLast.payoutRef, undefined);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here under
+  // the same fixed timestamps reproduce every verdict on
+  // their own (the script from the requirePayoutRef tests).
+  const driveToPayoutPending = (
+    id: string,
+    opts?: { requirePayoutRef: boolean },
+  ): TaskLifecycle => {
+    const t = new TaskLifecycle(id, opts);
+    for (const [event, actor, at] of [
+      ["PUBLISH", "researcher", "2026-04-01T09:00:00.000Z"],
+      ["ACCEPT", "contributor", "2026-04-01T09:05:00.000Z"],
+      ["START_CAPTURE", "contributor", "2026-04-01T09:10:00.000Z"],
+      ["SUBMIT", "contributor", "2026-04-01T09:15:00.000Z"],
+      ["BEGIN_REVIEW", "reviewer", "2026-04-01T09:20:00.000Z"],
+      ["APPROVE", "reviewer", "2026-04-01T09:25:00.000Z"],
+      ["REQUEST_PAYOUT", "contributor", "2026-04-01T09:30:00.000Z"],
+    ] as const) {
+      t.dispatch(event, { actor, at });
+    }
+    return t;
+  };
+  const independentEnforced = driveToPayoutPending("test-rpr-enforced", {
+    requirePayoutRef: true,
+  });
+  assert.throws(
+    () =>
+      independentEnforced.dispatch("PAYOUT_COMPLETE", {
+        actor: "system",
+        at: "2026-04-01T09:35:00.000Z",
+      }),
+    /payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled/,
+  );
+  assert.equal(independentEnforced.state, "PAYOUT_PENDING");
+  assert.equal(independentEnforced.history.length, 7);
+  independentEnforced.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-04-01T09:40:00.000Z",
+    payoutRef: "xfer-test-rpr",
+  });
+  assert.equal(independentEnforced.state, "PAID");
+  assert.equal(
+    independentEnforced.history[independentEnforced.history.length - 1]
+      .payoutRef,
+    "xfer-test-rpr",
+  );
+  const independentDefault = driveToPayoutPending("test-rpr-default");
+  independentDefault.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-04-01T09:35:00.000Z",
+  });
+  assert.equal(independentDefault.state, "PAID");
+  assert.equal(
+    independentDefault.history[independentDefault.history.length - 1]
+      .payoutRef,
+    undefined,
+  );
+  // The segment closes the demo: it follows the payout
+  // webhook freshness window segment, prints its lines
+  // verbatim, and its default-task line is the demo's
+  // last line.
+  const enforcementAt = text.indexOf(
+    "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+  );
+  assert.ok(
+    enforcementAt >
+      text.indexOf(
+        "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
+      ),
+    "payout reference enforcement segment must follow the payout webhook freshness window segment",
+  );
+  for (const line of [
+    "  enforced task DEMO-024 (constructed with requirePayoutRef: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutRef -> rejected: \"payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled\"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)",
+    "  enforced task with the reference: PAYOUT_COMPLETE with payoutRef \"xfer-demo-require-ref\" at 2026-03-29T09:40:00.000Z -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutRef=xfer-demo-require-ref (the audit trail now names the transfer the settlement claims)",
+    "  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)",
+  ]) {
+    assert.ok(text.includes(line), `missing enforcement line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)",
+  );
+});
+
+test("demo payout reference enforcement segment is deterministic: two runs print byte-identical enforcement lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + enforced-rejection / enforced-acceptance /
+  // default lines; every value in the segment is a fixed
+  // literal (fixed timestamps, a pinned error, a pinned
+  // payoutRef), so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.requirePayoutRefTask.state, b.requirePayoutRefTask.state);
+  assert.deepEqual(a.requirePayoutRefTask.history, b.requirePayoutRefTask.history);
+  assert.equal(a.requirePayoutRefError, b.requirePayoutRefError);
+  assert.equal(
+    a.requirePayoutRefStateAfterReject,
+    b.requirePayoutRefStateAfterReject,
+  );
+  assert.equal(
+    a.requirePayoutRefHistoryLengthAfterReject,
+    b.requirePayoutRefHistoryLengthAfterReject,
+  );
+  assert.equal(a.requirePayoutRefPayoutRef, b.requirePayoutRefPayoutRef);
+  assert.equal(
+    a.requirePayoutRefDefaultTask.state,
+    b.requirePayoutRefDefaultTask.state,
+  );
+  assert.deepEqual(
+    a.requirePayoutRefDefaultTask.history,
+    b.requirePayoutRefDefaultTask.history,
+  );
 });

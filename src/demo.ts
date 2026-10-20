@@ -266,7 +266,7 @@
  * status and the same pinned error) — the caller
  * cancellation path a reader has only seen asserted by
  * the payout webhook abort-signal tests so far —
- * and finally a payout webhook freshness window segment:
+ * and a payout webhook freshness window segment:
  * a fixed notification built from the main task at a
  * pinned signing time is verified with
  * `verifyPayoutWebhook`'s opt-in freshness window under
@@ -278,7 +278,20 @@
  * payload lying further ahead of the receiver than
  * `maxFutureSkewMs` allows also fails closed — the
  * replay bound a reader has only seen asserted by the
- * payout webhook freshness and future-skew tests so far.
+ * payout webhook freshness and future-skew tests so far —
+ * and finally a payout reference enforcement segment:
+ * a dedicated task constructed with
+ * `requirePayoutRef: true` is driven to PAYOUT_PENDING
+ * under fixed timestamps and its `PAYOUT_COMPLETE`
+ * without a `payoutRef` is rejected with the pinned
+ * `payout reference required: …` error, leaving its
+ * state and history untouched; the same dispatch with
+ * a pinned `payoutRef` then succeeds and the history's
+ * last entry carries that reference verbatim; a second
+ * dedicated task under the default (the option unset)
+ * completes without a reference — the fail-fast
+ * settlement gate a reader has only seen asserted by
+ * the requirePayoutRef tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -350,6 +363,10 @@
  * four verdicts (inside the window, at the boundary,
  * past the window, and beyond the future-skew bound)
  * with the stale notification's signature-only verdict,
+ * the payout reference enforcement segment's enforced
+ * task with its rejection error and its post-rejection
+ * state and history length, its pinned accepted
+ * `payoutRef`, and its default (unenforced) task,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -605,6 +622,18 @@ export interface DemoResult {
   freshnessBeyondWindowSignatureOnly: boolean;
   /** Verdict when the payload lies 2 hours ahead of the receiver (false). */
   freshnessFutureBeyondSkew: boolean;
+  /** Enforced task of the closing requirePayoutRef segment (DEMO-024). */
+  requirePayoutRefTask: TaskLifecycle;
+  /** Error from DEMO-024's ref-less PAYOUT_COMPLETE ("" if accepted). */
+  requirePayoutRefError: string;
+  /** DEMO-024's state right after the rejection (PAYOUT_PENDING). */
+  requirePayoutRefStateAfterReject: TaskState;
+  /** DEMO-024's history length right after the rejection (7). */
+  requirePayoutRefHistoryLengthAfterReject: number;
+  /** Pinned `payoutRef` DEMO-024 then settled under (xfer-demo-require-ref). */
+  requirePayoutRefPayoutRef: string;
+  /** Default task of the closing requirePayoutRef segment (DEMO-025). */
+  requirePayoutRefDefaultTask: TaskLifecycle;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -752,7 +781,10 @@ export interface DemoResult {
  * configuration error, the payout webhook freshness
  * window segment's fixed notification with its pinned
  * windows and its inside / boundary / stale / future-skew
- * verdicts, and the exact lines
+ * verdicts, the payout reference enforcement segment's
+ * enforced and default tasks with its rejection error,
+ * post-rejection state and history length, and pinned
+ * accepted reference, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -3523,7 +3555,122 @@ export async function runDemo(): Promise<DemoResult> {
     `  future skew fails closed: receiver now ${freshnessFutureNow.toISOString()} (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs ${freshnessMaxFutureSkewMs} -> verifies: ${freshnessFutureBeyondSkew} (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout reference enforcement segment (closing): the
+  // reconciliation branches above only ever FIND a settled
+  // task whose PAYOUT_COMPLETE entry carries no payoutRef
+  // after the fact (`unreconciledPayouts`). The opt-in
+  // constructor switch `requirePayoutRef: true`
+  // (taskLifecycle, unit-tested since the requirePayoutRef
+  // tests landed) moves that check to dispatch time: a
+  // PAYOUT_COMPLETE without a payoutRef throws
+  // `payout reference required: …` and appends nothing, so
+  // a settlement can never enter the audit trail without
+  // naming the transfer it claims. Two dedicated tasks are
+  // driven to PAYOUT_PENDING under fixed literal
+  // timestamps — no network, no randomness, no wall clock:
+  //   - DEMO-024 is constructed with
+  //     `requirePayoutRef: true`; its ref-less
+  //     PAYOUT_COMPLETE at 2026-03-29T09:35:00.000Z is
+  //     rejected with the pinned error, its state stays
+  //     PAYOUT_PENDING and its history stays at 7 entries;
+  //     the same dispatch at 09:40 with the pinned
+  //     payoutRef "xfer-demo-require-ref" then succeeds,
+  //     and the history's last entry (seq 8) carries that
+  //     reference verbatim;
+  //   - DEMO-025 is constructed with the option unset
+  //     (the advisory default); its ref-less
+  //     PAYOUT_COMPLETE succeeds into PAID and its last
+  //     entry carries no payoutRef — enforcement is
+  //     opt-in and the default stays backward compatible.
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs and the requirePayoutRef
+  // tests, never derived from the gate itself. The
+  // segment asserts all of this here, outside the printed
+  // lines: an enforcement verdict that drifted would fail
+  // the demo itself, not just a test.
+  const requirePayoutRefTask = new TaskLifecycle("DEMO-024", {
+    requirePayoutRef: true,
+  });
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-29T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-29T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-29T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-29T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-29T09:20:00.000Z"],
+    ["APPROVE", "reviewer", "2026-03-29T09:25:00.000Z"],
+    ["REQUEST_PAYOUT", "contributor", "2026-03-29T09:30:00.000Z"],
+  ] as const) {
+    requirePayoutRefTask.dispatch(event, { actor, at });
+  }
+  let requirePayoutRefError = "";
+  try {
+    requirePayoutRefTask.dispatch("PAYOUT_COMPLETE", {
+      actor: "system",
+      at: "2026-03-29T09:35:00.000Z",
+    });
+  } catch (err) {
+    requirePayoutRefError = err instanceof Error ? err.message : String(err);
+  }
+  const requirePayoutRefStateAfterReject = requirePayoutRefTask.state;
+  const requirePayoutRefHistoryLengthAfterReject =
+    requirePayoutRefTask.history.length;
+  const requirePayoutRefPayoutRef = "xfer-demo-require-ref";
+  requirePayoutRefTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-29T09:40:00.000Z",
+    payoutRef: requirePayoutRefPayoutRef,
+  });
+  const requirePayoutRefDefaultTask = new TaskLifecycle("DEMO-025");
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-31T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-31T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-31T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-31T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-31T09:20:00.000Z"],
+    ["APPROVE", "reviewer", "2026-03-31T09:25:00.000Z"],
+    ["REQUEST_PAYOUT", "contributor", "2026-03-31T09:30:00.000Z"],
+  ] as const) {
+    requirePayoutRefDefaultTask.dispatch(event, { actor, at });
+  }
+  requirePayoutRefDefaultTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-31T09:35:00.000Z",
+  });
+  const requirePayoutRefLastEntry =
+    requirePayoutRefTask.history[requirePayoutRefTask.history.length - 1];
+  const requirePayoutRefDefaultLastEntry =
+    requirePayoutRefDefaultTask.history[
+      requirePayoutRefDefaultTask.history.length - 1
+    ];
+  if (
+    requirePayoutRefError !==
+      "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled" ||
+    requirePayoutRefStateAfterReject !== "PAYOUT_PENDING" ||
+    requirePayoutRefHistoryLengthAfterReject !== 7 ||
+    requirePayoutRefTask.state !== "PAID" ||
+    requirePayoutRefTask.history.length !== 8 ||
+    requirePayoutRefLastEntry.event !== "PAYOUT_COMPLETE" ||
+    requirePayoutRefLastEntry.seq !== 8 ||
+    requirePayoutRefLastEntry.payoutRef !== "xfer-demo-require-ref" ||
+    requirePayoutRefLastEntry.at !== "2026-03-29T09:40:00.000Z" ||
+    requirePayoutRefDefaultTask.state !== "PAID" ||
+    requirePayoutRefDefaultTask.history.length !== 8 ||
+    requirePayoutRefDefaultLastEntry.event !== "PAYOUT_COMPLETE" ||
+    requirePayoutRefDefaultLastEntry.payoutRef !== undefined
+  ) {
+    throw new Error(
+      "demo fixture broken: requirePayoutRef enforcement does not match the hand-pinned contract (the enforced task must reject a ref-less PAYOUT_COMPLETE with the pinned error and leave state and history untouched, must then settle under the pinned payoutRef carried verbatim on its last history entry, and the default task must still settle without a reference)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+    `  enforced task DEMO-024 (constructed with requirePayoutRef: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutRef -> rejected: "${requirePayoutRefError}"; state after rejection: ${requirePayoutRefStateAfterReject}, history entries: ${requirePayoutRefHistoryLengthAfterReject} (nothing was appended — the gate is fail-fast, checked before the audit entry is written)`,
+    `  enforced task with the reference: PAYOUT_COMPLETE with payoutRef "${requirePayoutRefPayoutRef}" at 2026-03-29T09:40:00.000Z -> ${requirePayoutRefTask.state}; history last entry: seq ${requirePayoutRefLastEntry.seq} PAYOUT_COMPLETE payoutRef=${requirePayoutRefLastEntry.payoutRef} (the audit trail now names the transfer the settlement claims)`,
+    `  default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> ${requirePayoutRefDefaultTask.state}; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

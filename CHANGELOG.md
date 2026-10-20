@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout reference enforcement segment closing the
+  CLI demo: a dedicated task constructed with
+  `requirePayoutRef: true` (DEMO-024) is driven to
+  PAYOUT_PENDING under fixed timestamps and its
+  `PAYOUT_COMPLETE` without a `payoutRef` is rejected
+  with the pinned error
+  `payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled`,
+  leaving its state at PAYOUT_PENDING and its history
+  at 7 entries; the same dispatch with the pinned
+  `payoutRef` `xfer-demo-require-ref` then settles it
+  to PAID and the history's last entry (seq 8) carries
+  that reference verbatim. A second dedicated task
+  under the default (DEMO-025, the option unset) still
+  settles without a reference. All three forms are
+  asserted outside the printed lines against
+  hand-written expectations. Fixed timestamps only: no
+  network, no randomness. Demo and tests only; no
+  library behavior change.
+
 - A payout webhook freshness window segment closing
   the CLI demo: one fixed notification is built from
   the main task at a pinned signing time
