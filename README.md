@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 560 tests, all local
+npm test   # 562 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -315,7 +315,7 @@ the exponential backoff (`backoffMs` 100) — and both wire
 calls carry the byte-identical signed body, whose
 signature verifies under the demo secret — the actual
 end-to-end wait, shown instead of only parsed in
-isolation or asserted by the delivery tests. — and a closing payout webhook secret
+isolation or asserted by the delivery tests. — and a payout webhook secret
 rotation segment that builds two fixed notifications
 from the main task — one signed with a new secret, one
 with the old, both under a fixed signing time — and
@@ -325,7 +325,19 @@ notification under the old secret alone, and both under
 an unrelated secret list) and the configuration error
 thrown when the positional secret and `secrets` are
 passed together — the rotation window, shown instead of
-only asserted by the secret rotation tests.
+only asserted by the secret rotation tests. — and a closing payout webhook AbortSignal
+segment that delivers the main task's signed webhook
+with `deliverPayoutWebhook` under an external
+`AbortSignal` in two pinned forms: a signal aborted
+before the call (zero fetch calls, the abort reported
+as `{ ok: false, attempts: 0, error: "payout webhook delivery aborted" }`)
+and a signal aborted inside the backoff sleep after a
+first 500 answer (the pending 30000 ms wait is cut
+short, no second attempt is started, and the result
+reports the one attempt actually made, with its 500
+status and the same pinned error) — the caller
+cancellation path, shown instead of only asserted by
+the payout webhook abort-signal tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1350,7 +1362,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 560 tests covering the happy path, reject→resubmit
+`npm test` runs 562 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

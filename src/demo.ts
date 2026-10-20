@@ -241,7 +241,7 @@
  * isolation, window reset) a reader has only seen asserted
  * by the dedupe clear test so far, and could otherwise
  * mistake for something only TTL expiry can do —
- * and finally a payout webhook 429 Retry-After delivery
+ * and a payout webhook 429 Retry-After delivery
  * segment: the main task's signed webhook is delivered
  * with `deliverPayoutWebhook` to one fixed endpoint
  * through an injected fake fetch scripted to answer 429
@@ -252,7 +252,20 @@
  * the segment's `maxRetryDelayMs` (5000), never the
  * exponential backoff — the actual end-to-end wait a
  * reader has only seen parsed in isolation and asserted
- * by the delivery tests so far.
+ * by the delivery tests so far —
+ * and finally a payout webhook AbortSignal segment:
+ * the main task's signed webhook is delivered with
+ * `deliverPayoutWebhook` under an external `AbortSignal`
+ * in two pinned forms — a signal aborted before the call
+ * (zero fetch calls, the result reports
+ * `{ ok: false, attempts: 0, error: "payout webhook delivery aborted" }`)
+ * and a signal aborted inside the backoff sleep after a
+ * first 500 answer (the pending 30000 ms wait is cut
+ * short, no second attempt is started, and the result
+ * reports the one attempt actually made, with its 500
+ * status and the same pinned error) — the caller
+ * cancellation path a reader has only seen asserted by
+ * the payout webhook abort-signal tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -314,7 +327,11 @@
  * and wire-body verification verdict, the payout
  * webhook secret rotation segment's two fixed webhooks,
  * its rotation-window and fail-closed edge verdicts, and
- * its mutual-exclusion configuration error,
+ * its mutual-exclusion configuration error, the payout
+ * webhook AbortSignal segment's endpoint, its pre-aborted
+ * result with its zero fetch-call count, and its
+ * backoff-abort result with its fetch-call count and the
+ * recorded sleep delays it entered,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -542,6 +559,18 @@ export interface DemoResult {
   rotationUnderUnrelatedList: boolean[];
   /** Error from passing positional secret + `secrets` ("" if none). */
   rotationBothError: string;
+  /** Fixed endpoint of the closing AbortSignal delivery segment. */
+  abortDeliveryEndpoint: string;
+  /** `deliverPayoutWebhook` result for the pre-aborted form. */
+  abortPreResult: DeliverWebhookResult;
+  /** Fetch calls the pre-aborted form made (0). */
+  abortPreFetchCalls: number;
+  /** `deliverPayoutWebhook` result for the backoff-abort form. */
+  abortWaitResult: DeliverWebhookResult;
+  /** Fetch calls the backoff-abort form made (1). */
+  abortWaitFetchCalls: number;
+  /** Delays the backoff-abort form's hanging sleep entered ([30000]). */
+  abortWaitSleeps: number[];
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -3242,7 +3271,114 @@ export async function runDemo(): Promise<DemoResult> {
     `  configuration guard: passing the positional secret together with { secrets: [...] } throws "${rotationBothError}" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+
+  // Payout webhook AbortSignal segment (closing): every
+  // delivery segment above runs to a settled outcome — a
+  // success, an exhausted retry budget, a clamped wait.
+  // None of them shows the caller cancelling a delivery
+  // through the external `signal` option of
+  // `deliverPayoutWebhook` (settlementWebhook, unit-tested
+  // since the abort-signal tests landed): the delivery the
+  // caller no longer wants must stop — before it starts if
+  // the signal is already aborted, and mid-wait if the
+  // abort lands while a retry is pending — and, per this
+  // module's report-don't-throw convention, the abort is
+  // reported in the result, never thrown. Here the main
+  // task's signed webhook (built and verified above) is
+  // delivered to one fixed endpoint in two pinned forms,
+  // both through counting fake fetches, so the whole
+  // segment is deterministic: zero network, zero real
+  // wait, no wall-clock trigger (the second form aborts
+  // from inside the injected sleep itself — being invoked
+  // at all proves the backoff wait has been entered, the
+  // same deterministic trigger the abort-signal tests use).
+  // Hand-written expectations — written out here from the
+  // DeliverPayoutWebhookOptions signal docs and the
+  // abort-signal tests, never derived by calling
+  // deliverPayoutWebhook itself:
+  //   - pre-aborted: the result is exactly
+  //     { ok: false, attempts: 0,
+  //       error: "payout webhook delivery aborted" }
+  //     with no status, and the counting fetch is never
+  //     called (0 calls) — the caller asked to stop before
+  //     the delivery started;
+  //   - abort during the backoff wait: the fake fetch
+  //     answers 500 on its only call, the delivery enters
+  //     the exponential backoff sleep (backoffMs 30000 x
+  //     2^0 = 30000 ms, a wait that must never really run),
+  //     the hanging sleep records the delay and aborts the
+  //     signal from inside itself, and the result is
+  //     exactly { ok: false, attempts: 1, status: 500,
+  //     error: "payout webhook delivery aborted" } — the
+  //     one attempt actually made stands with its status,
+  //     and no second fetch is ever started.
+  // The segment asserts all of this here, outside the
+  // printed lines: an abort verdict that drifted would
+  // fail the demo itself, not just a test.
+  const abortDeliveryEndpoint =
+    "https://payouts.example.com/hooks/payout";
+  const abortPreController = new AbortController();
+  abortPreController.abort();
+  let abortPreFetchCalls = 0;
+  const abortPreResult = await deliverPayoutWebhook(
+    abortDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        abortPreFetchCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      sleepImpl: async () => {},
+      signal: abortPreController.signal,
+    },
+  );
+  const abortWaitController = new AbortController();
+  let abortWaitFetchCalls = 0;
+  const abortWaitSleeps: number[] = [];
+  const abortWaitResult = await deliverPayoutWebhook(
+    abortDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        abortWaitFetchCalls += 1;
+        return new Response("{}", { status: 500 });
+      },
+      sleepImpl: (ms: number) => {
+        abortWaitSleeps.push(ms);
+        abortWaitController.abort();
+        return new Promise<void>(() => {});
+      },
+      backoffMs: 30_000,
+      maxAttempts: 3,
+      signal: abortWaitController.signal,
+    },
+  );
+  if (
+    abortPreResult.ok !== false ||
+    abortPreResult.attempts !== 0 ||
+    abortPreResult.status !== undefined ||
+    abortPreResult.error !== "payout webhook delivery aborted" ||
+    abortPreFetchCalls !== 0 ||
+    abortWaitResult.ok !== false ||
+    abortWaitResult.attempts !== 1 ||
+    abortWaitResult.status !== 500 ||
+    abortWaitResult.error !== "payout webhook delivery aborted" ||
+    abortWaitFetchCalls !== 1 ||
+    JSON.stringify(abortWaitSleeps) !== JSON.stringify([30_000])
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook AbortSignal abort does not match the hand-pinned contract (a pre-aborted signal must report { ok: false, attempts: 0, error: \"payout webhook delivery aborted\" } with zero fetch calls, and an abort inside the backoff sleep after a first 500 must report { ok: false, attempts: 1, status: 500, error: \"payout webhook delivery aborted\" } with exactly one fetch call and the entered sleep [30000])",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
+    `  endpoint: ${abortDeliveryEndpoint} (the main task's signed payout webhook, delivered on its own — no fan-out)`,
+    `  pre-aborted signal: delivery ok=${abortPreResult.ok} attempts=${abortPreResult.attempts} error="${abortPreResult.error}"; fetch calls: ${abortPreFetchCalls} (the caller asked to stop before the delivery started, so no request was made and the abort is reported, not thrown)`,
+    `  abort during the backoff wait: first answer 500 -> backoff sleep [${abortWaitSleeps.join(", ")}] ms entered, signal aborted inside the sleep; delivery ok=${abortWaitResult.ok} attempts=${abortWaitResult.attempts} status=${abortWaitResult.status} error="${abortWaitResult.error}"; fetch calls: ${abortWaitFetchCalls} (no second attempt was started — the pending wait was cut short, nothing really waited)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

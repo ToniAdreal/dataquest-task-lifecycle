@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook AbortSignal segment closing the
+  CLI demo: the main task's signed webhook is delivered
+  with `deliverPayoutWebhook` under an external
+  `AbortSignal` in two pinned forms. A signal aborted
+  before the call makes zero fetch calls and is
+  reported — never thrown — as
+  `{ ok: false, attempts: 0, error: "payout webhook delivery aborted" }`;
+  a signal aborted inside the backoff sleep after a
+  first 500 answer (the abort fired from inside the
+  injected hanging sleep itself, the deterministic
+  trigger that proves the wait was entered) cuts the
+  pending 30000 ms wait short, starts no second
+  attempt, and reports
+  `{ ok: false, attempts: 1, status: 500, error: "payout webhook delivery aborted" }`.
+  Both forms are asserted outside the printed lines
+  against hand-written expectations. Fake fetches and
+  a hanging fake sleep only: no network, no real wait,
+  no wall-clock trigger. Demo and tests only; no
+  library behavior change.
+
 - A payout webhook secret rotation segment closing
   the CLI demo: two fixed notifications are built from
   the main task under a fixed signing time — one signed

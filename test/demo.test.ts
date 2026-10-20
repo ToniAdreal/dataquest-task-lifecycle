@@ -452,11 +452,16 @@ Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] }
   notifications (main task DEMO-001, fixed signing time <timestamp>): eventId evt_demo_rotation_new signed with the new secret; eventId evt_demo_rotation_old signed with the old secret — the secrets themselves are never printed
   rotation window { secrets: [new, old] }: new-signed verifies: true; old-signed verifies: true (in-flight notifications signed before the rotation still pass, and new-signed ones pass as soon as the new secret is listed — any one matching secret authenticates)
   window edges fail closed: new-signed under the old secret alone: false (a receiver that has not adopted the new secret yet rejects it); both under an unrelated secret list: false, false (no listed secret matches, so verification fails closed as false — never a throw, never a pass)
-  configuration guard: passing the positional secret together with { secrets: [...] } throws "cannot verify payout webhook: pass either 'secret' or 'secrets', not both" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)`;
+  configuration guard: passing the positional secret together with { secrets: [...] } throws "cannot verify payout webhook: pass either 'secret' or 'secrets', not both" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)
+
+Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):
+  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
+  pre-aborted signal: delivery ok=false attempts=0 error="payout webhook delivery aborted"; fetch calls: 0 (the caller asked to stop before the delivery started, so no request was made and the abort is reported, not thrown)
+  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error="payout webhook delivery aborted"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 387);
+  assert.equal(lines.length, 392);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1901,7 +1906,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 387);
+  assert.equal(out.trimEnd().split("\n").length, 392);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3798,10 +3803,10 @@ test("demo shows the payout webhook secret rotation segment in-process: both sec
       ),
     /cannot verify payout webhook: pass either 'secret' or 'secrets', not both/,
   );
-  // The segment closes the demo: it follows the payout
-  // webhook 429 Retry-After delivery segment, prints its
-  // lines verbatim, and its configuration-guard line is the
-  // demo's last line.
+  // The segment follows the payout webhook 429
+  // Retry-After delivery segment and prints its lines
+  // verbatim (the payout webhook AbortSignal segment now
+  // closes the demo after it).
   const rotationAt = text.indexOf(
     "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
   );
@@ -3820,9 +3825,11 @@ test("demo shows the payout webhook secret rotation segment in-process: both sec
   ]) {
     assert.ok(text.includes(line), `missing secret rotation line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  configuration guard: passing the positional secret together with { secrets: [...] } throws \"cannot verify payout webhook: pass either 'secret' or 'secrets', not both\" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)",
+  assert.ok(
+    text.indexOf(
+      "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
+    ) > rotationAt,
+    "payout webhook AbortSignal segment must follow the payout webhook secret rotation segment",
   );
 });
 
@@ -3830,6 +3837,7 @@ test("demo payout webhook secret rotation segment is deterministic: two runs pri
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):"),
+      ls.indexOf("Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3851,4 +3859,149 @@ test("demo payout webhook secret rotation segment is deterministic: two runs pri
     b.rotationUnderUnrelatedList,
   );
   assert.equal(a.rotationBothError, b.rotationBothError);
+});
+
+test("demo shows the payout webhook AbortSignal segment in-process: pre-abort makes zero fetches, backoff abort starts no second attempt", async () => {
+  const {
+    webhook,
+    abortDeliveryEndpoint,
+    abortPreResult,
+    abortPreFetchCalls,
+    abortWaitResult,
+    abortWaitFetchCalls,
+    abortWaitSleeps,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // DeliverPayoutWebhookOptions signal docs in
+  // src/settlementWebhook.ts and
+  // test/payoutWebhookAbortSignal.test.ts, never derived
+  // by calling deliverPayoutWebhook itself.
+  assert.equal(
+    abortDeliveryEndpoint,
+    "https://payouts.example.com/hooks/payout",
+  );
+  assert.deepEqual(abortPreResult, {
+    ok: false,
+    attempts: 0,
+    error: "payout webhook delivery aborted",
+  });
+  assert.equal(abortPreFetchCalls, 0);
+  assert.deepEqual(abortWaitResult, {
+    ok: false,
+    attempts: 1,
+    status: 500,
+    error: "payout webhook delivery aborted",
+  });
+  assert.equal(abortWaitFetchCalls, 1);
+  assert.deepEqual(abortWaitSleeps, [30_000]);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh deliveries of the demo
+  // webhook through the test's own counting fetches
+  // reproduce both abort forms on their own (the scripts
+  // from the abort-signal tests, with the segment's pinned
+  // values; the backoff case aborts from inside the
+  // injected sleep, the deterministic trigger that proves
+  // the wait was entered).
+  let independentPreCalls = 0;
+  const preController = new AbortController();
+  preController.abort();
+  const independentPreResult = await deliverPayoutWebhook(
+    abortDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        independentPreCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      sleepImpl: async () => {},
+      signal: preController.signal,
+    },
+  );
+  assert.deepEqual(independentPreResult, {
+    ok: false,
+    attempts: 0,
+    error: "payout webhook delivery aborted",
+  });
+  assert.equal(independentPreCalls, 0);
+  let independentWaitCalls = 0;
+  const independentWaitSleeps: number[] = [];
+  const waitController = new AbortController();
+  const independentWaitResult = await deliverPayoutWebhook(
+    abortDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        independentWaitCalls += 1;
+        return new Response("{}", { status: 500 });
+      },
+      sleepImpl: (ms: number) => {
+        independentWaitSleeps.push(ms);
+        waitController.abort();
+        return new Promise<void>(() => {});
+      },
+      backoffMs: 30_000,
+      maxAttempts: 3,
+      signal: waitController.signal,
+    },
+  );
+  assert.deepEqual(independentWaitResult, {
+    ok: false,
+    attempts: 1,
+    status: 500,
+    error: "payout webhook delivery aborted",
+  });
+  assert.equal(independentWaitCalls, 1);
+  assert.deepEqual(independentWaitSleeps, [30_000]);
+  // The segment closes the demo: it follows the payout
+  // webhook secret rotation segment, prints its lines
+  // verbatim, and its backoff-abort line is the demo's
+  // last line.
+  const abortAt = text.indexOf(
+    "Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):",
+  );
+  assert.ok(
+    abortAt >
+      text.indexOf(
+        "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
+      ),
+    "payout webhook AbortSignal segment must follow the payout webhook secret rotation segment",
+  );
+  for (const line of [
+    "  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)",
+    "  pre-aborted signal: delivery ok=false attempts=0 error=\"payout webhook delivery aborted\"; fetch calls: 0 (the caller asked to stop before the delivery started, so no request was made and the abort is reported, not thrown)",
+    "  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error=\"payout webhook delivery aborted\"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)",
+  ]) {
+    assert.ok(text.includes(line), `missing AbortSignal line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  abort during the backoff wait: first answer 500 -> backoff sleep [30000] ms entered, signal aborted inside the sleep; delivery ok=false attempts=1 status=500 error=\"payout webhook delivery aborted\"; fetch calls: 1 (no second attempt was started — the pending wait was cut short, nothing really waited)",
+  );
+});
+
+test("demo payout webhook AbortSignal segment is deterministic: two runs print byte-identical abort lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook AbortSignal abort (deliverPayoutWebhook honours an external AbortSignal, fake fetch + hanging fake sleep — no real network, no real wait):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + endpoint / pre-aborted / backoff-abort lines;
+  // every value in the segment is a fixed literal (pinned
+  // backoff, scripted answers, deterministic in-sleep
+  // abort trigger), so no normalization is needed — the
+  // wire bodies themselves carry the main task's
+  // wall-clock timestamps and are not printed here.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.abortDeliveryEndpoint, b.abortDeliveryEndpoint);
+  assert.deepEqual(a.abortPreResult, b.abortPreResult);
+  assert.equal(a.abortPreFetchCalls, b.abortPreFetchCalls);
+  assert.deepEqual(a.abortWaitResult, b.abortWaitResult);
+  assert.equal(a.abortWaitFetchCalls, b.abortWaitFetchCalls);
+  assert.deepEqual(a.abortWaitSleeps, b.abortWaitSleeps);
 });
