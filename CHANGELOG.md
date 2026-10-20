@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout event dedupe clear benchmark path:
+  `npm run bench` now also times
+  `PayoutEventDedupe.clear()` on a fresh dedupe rebuilt
+  on every iteration (1,000 fixed ids recorded under an
+  injected fixed clock, plus one duplicate hit on the
+  first id, so the stats about to be zeroed read
+  `{ size: 1000, hits: 1, misses: 1000, evictions: 0 }`) —
+  the window-reset path a receiver pays on key rotation,
+  for test isolation, or for a deliberate dedupe-window
+  reset, previously measured only on the demo side. Its
+  per-iteration self-check pins the size and every
+  counter at zero right after the clear and pins that
+  the first id records as a new event again; outside the
+  timed loop, clearing an empty dedupe is pinned as a
+  harmless no-op. Because `clear()` mutates the store,
+  the reported numbers include the fixture-rebuild cost
+  (prefill plus clear). The README Benchmarks table is
+  refreshed from one real run and gains the new row
+  (`PayoutEventDedupe.clear (1,000 recorded ids, fresh
+  fixture)` at ~6,963 ops/sec on that run). No network,
+  no randomness, and no wall clock. Benchmark only; no
+  library behavior change.
+
 - A payout dedupe clear reset segment closing the CLI
   demo: a fresh `PayoutEventDedupe` under an injected
   fixed clock records one fixed payout `eventId` (new on
