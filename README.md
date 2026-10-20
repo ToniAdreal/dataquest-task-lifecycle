@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 558 tests, all local
+npm test   # 560 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -302,7 +302,7 @@ reads as a new event with the counters re-accumulating
 from zero (`{ size: 1, hits: 0, misses: 1, evictions: 0 }`) —
 the explicit reset surface for key rotation, test
 isolation, or a deliberate window reset, shown instead of
-only asserted by the dedupe clear test. — and a closing payout webhook 429
+only asserted by the dedupe clear test. — and a payout webhook 429
 Retry-After delivery segment that delivers the main
 task's signed webhook with `deliverPayoutWebhook` to one
 fixed endpoint through an injected fake fetch scripted to
@@ -315,7 +315,17 @@ the exponential backoff (`backoffMs` 100) — and both wire
 calls carry the byte-identical signed body, whose
 signature verifies under the demo secret — the actual
 end-to-end wait, shown instead of only parsed in
-isolation or asserted by the delivery tests.
+isolation or asserted by the delivery tests. — and a closing payout webhook secret
+rotation segment that builds two fixed notifications
+from the main task — one signed with a new secret, one
+with the old, both under a fixed signing time — and
+verifies both under `{ secrets: [new, old] }`, then
+shows the window's edges failing closed (the new-signed
+notification under the old secret alone, and both under
+an unrelated secret list) and the configuration error
+thrown when the positional secret and `secrets` are
+passed together — the rotation window, shown instead of
+only asserted by the secret rotation tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -1340,7 +1350,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 558 tests covering the happy path, reject→resubmit
+`npm test` runs 560 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

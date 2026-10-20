@@ -311,7 +311,10 @@
  * stats after the same id is re-recorded, the payout
  * webhook 429 Retry-After delivery segment's endpoint,
  * result, captured wire calls, recorded sleep delays,
- * and wire-body verification verdict,
+ * and wire-body verification verdict, the payout
+ * webhook secret rotation segment's two fixed webhooks,
+ * its rotation-window and fail-closed edge verdicts, and
+ * its mutual-exclusion configuration error,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -376,6 +379,15 @@ import { readmeDiagramInSync } from "./diagram.js";
  * secret from its own credential store and never commits it.
  */
 export const DEMO_WEBHOOK_SECRET = "demo-secret-do-not-use-in-production";
+
+/**
+ * Signing secrets for the demo's closing secret-rotation segment
+ * only — placeholders printed in the source, NOT real credentials.
+ * A real deployment loads its secrets from its own credential
+ * store and never commits them.
+ */
+export const DEMO_ROTATION_NEW_SECRET = "demo-payout-webhook-secret-new";
+export const DEMO_ROTATION_OLD_SECRET = "demo-payout-webhook-secret-old";
 
 const steps: Array<{
   event: TaskEvent;
@@ -516,6 +528,20 @@ export interface DemoResult {
   retryAfterDeliverySleeps: number[];
   /** Whether the captured wire body verifies under the demo secret. */
   retryAfterDeliveryBodyVerifies: boolean;
+  /** New-secret webhook of the closing secret rotation segment. */
+  rotationNewWebhook: PayoutWebhook;
+  /** Old-secret webhook of the closing secret rotation segment. */
+  rotationOldWebhook: PayoutWebhook;
+  /** New-signed verdict under `{ secrets: [new, old] }` (true). */
+  rotationNewUnderRotation: boolean;
+  /** Old-signed verdict under `{ secrets: [new, old] }` (true). */
+  rotationOldUnderRotation: boolean;
+  /** New-signed verdict under the old secret alone (false). */
+  rotationNewUnderOldOnly: boolean;
+  /** New-/old-signed verdicts under an unrelated list ([false, false]). */
+  rotationUnderUnrelatedList: boolean[];
+  /** Error from passing positional secret + `secrets` ("" if none). */
+  rotationBothError: string;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -657,7 +683,10 @@ export interface DemoResult {
  * exactly-settled task's undefined detail, the snapshot version
  * carried on the main snapshot with the future-version
  * rejection error and the state the original snapshot restores
- * to afterwards, and the exact lines
+ * to afterwards, the payout webhook secret rotation
+ * segment's two fixed webhooks with its rotation-window
+ * and fail-closed edge verdicts and its mutual-exclusion
+ * configuration error, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -3092,7 +3121,128 @@ export async function runDemo(): Promise<DemoResult> {
     `  wire check: ${retryAfterDeliveryCalls.length} POSTs captured with byte-identical bodies: ${retryAfterDeliveryCalls[0].body === retryAfterDeliveryCalls[1].body} (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: ${retryAfterDeliveryBodyVerifies} (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout webhook secret rotation segment (closing): every
+  // webhook segment above verifies with the single shared demo
+  // secret — the one-secret world. A real receiver rotates its
+  // signing secret without a flag day: for a window it must
+  // accept BOTH the new and the old secret, because senders
+  // migrate on their own schedule and notifications signed
+  // before the rotation are still in flight. That window is
+  // `verifyPayoutWebhook`'s `{ secrets: [new, old] }` shape
+  // (settlementWebhook, unit-tested since the rotation tests
+  // landed) — never shown in the demo until here. Two
+  // notifications are built from the main PAID task under a
+  // fixed signing time and fixed eventIds — one signed with
+  // the new secret, one with the old — so the whole segment is
+  // byte-identical on every run: fixed secrets, fixed
+  // timestamp, zero network, zero randomness (the secrets are
+  // demo placeholders printed in this source, never real
+  // credentials, and the secrets themselves are never printed
+  // in the lines). Hand-written expectations — written out
+  // here from the VerifyPayoutWebhookOptions docs and the
+  // secret-rotation tests, never derived by calling
+  // verifyPayoutWebhook itself:
+  //   - under `{ secrets: [new, old] }` BOTH notifications
+  //     verify: any one matching candidate authenticates, so
+  //     an in-flight old-signed notification still passes
+  //     inside the window and a new-signed one passes as soon
+  //     as the new secret is listed;
+  //   - the new-signed notification under the old secret alone
+  //     (the legacy positional shape) is false: a receiver
+  //     that has not adopted the new secret yet rejects it;
+  //   - both notifications under an unrelated secret list are
+  //     false: all-mismatch fails closed as `false`, never a
+  //     throw and never a pass;
+  //   - passing the positional secret AND `secrets` together
+  //     throws the pinned configuration error — the two shapes
+  //     are mutually exclusive, so a misconfigured receiver
+  //     fails loudly instead of silently picking one.
+  // The segment asserts all of this here, outside the printed
+  // lines: a rotation verdict that drifted would fail the demo
+  // itself, not just a test.
+  const ROTATION_FIXED_NOW = new Date("2026-03-27T09:00:00.000Z");
+  const rotationNewWebhook = buildPayoutWebhook(
+    task,
+    DEMO_ROTATION_NEW_SECRET,
+    { eventId: "evt_demo_rotation_new", now: ROTATION_FIXED_NOW },
+  );
+  const rotationOldWebhook = buildPayoutWebhook(
+    task,
+    DEMO_ROTATION_OLD_SECRET,
+    { eventId: "evt_demo_rotation_old", now: ROTATION_FIXED_NOW },
+  );
+  const rotationNewUnderRotation = verifyPayoutWebhook(
+    JSON.stringify(rotationNewWebhook.payload),
+    rotationNewWebhook.signature,
+    undefined,
+    { secrets: [DEMO_ROTATION_NEW_SECRET, DEMO_ROTATION_OLD_SECRET] },
+  );
+  const rotationOldUnderRotation = verifyPayoutWebhook(
+    JSON.stringify(rotationOldWebhook.payload),
+    rotationOldWebhook.signature,
+    undefined,
+    { secrets: [DEMO_ROTATION_NEW_SECRET, DEMO_ROTATION_OLD_SECRET] },
+  );
+  const rotationNewUnderOldOnly = verifyPayoutWebhook(
+    JSON.stringify(rotationNewWebhook.payload),
+    rotationNewWebhook.signature,
+    DEMO_ROTATION_OLD_SECRET,
+  );
+  const rotationUnderUnrelatedList = [
+    verifyPayoutWebhook(
+      JSON.stringify(rotationNewWebhook.payload),
+      rotationNewWebhook.signature,
+      undefined,
+      { secrets: ["demo-payout-webhook-secret-unrelated"] },
+    ),
+    verifyPayoutWebhook(
+      JSON.stringify(rotationOldWebhook.payload),
+      rotationOldWebhook.signature,
+      undefined,
+      { secrets: ["demo-payout-webhook-secret-unrelated"] },
+    ),
+  ];
+  let rotationBothError = "";
+  try {
+    verifyPayoutWebhook(
+      JSON.stringify(rotationNewWebhook.payload),
+      rotationNewWebhook.signature,
+      DEMO_ROTATION_NEW_SECRET,
+      { secrets: [DEMO_ROTATION_NEW_SECRET, DEMO_ROTATION_OLD_SECRET] },
+    );
+  } catch (err) {
+    rotationBothError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    rotationNewWebhook.payload.taskId !== "DEMO-001" ||
+    rotationNewWebhook.payload.eventId !== "evt_demo_rotation_new" ||
+    rotationNewWebhook.payload.at !== "2026-03-27T09:00:00.000Z" ||
+    rotationOldWebhook.payload.taskId !== "DEMO-001" ||
+    rotationOldWebhook.payload.eventId !== "evt_demo_rotation_old" ||
+    rotationOldWebhook.payload.at !== "2026-03-27T09:00:00.000Z" ||
+    rotationNewWebhook.signature === rotationOldWebhook.signature ||
+    rotationNewUnderRotation !== true ||
+    rotationOldUnderRotation !== true ||
+    rotationNewUnderOldOnly !== false ||
+    JSON.stringify(rotationUnderUnrelatedList) !==
+      JSON.stringify([false, false]) ||
+    rotationBothError !==
+      "cannot verify payout webhook: pass either 'secret' or 'secrets', not both"
+  ) {
+    throw new Error(
+      "demo fixture broken: verifyPayoutWebhook secret rotation does not match the hand-pinned contract (both fixed notifications must verify under { secrets: [new, old] }, the new-signed one must fail under the old secret alone, both must fail closed under an unrelated secret list, and passing the positional secret together with secrets must throw the pinned mutual-exclusion error)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
+    `  notifications (main task DEMO-001, fixed signing time ${rotationNewWebhook.payload.at}): eventId ${rotationNewWebhook.payload.eventId} signed with the new secret; eventId ${rotationOldWebhook.payload.eventId} signed with the old secret — the secrets themselves are never printed`,
+    `  rotation window { secrets: [new, old] }: new-signed verifies: ${rotationNewUnderRotation}; old-signed verifies: ${rotationOldUnderRotation} (in-flight notifications signed before the rotation still pass, and new-signed ones pass as soon as the new secret is listed — any one matching secret authenticates)`,
+    `  window edges fail closed: new-signed under the old secret alone: ${rotationNewUnderOldOnly} (a receiver that has not adopted the new secret yet rejects it); both under an unrelated secret list: ${rotationUnderUnrelatedList[0]}, ${rotationUnderUnrelatedList[1]} (no listed secret matches, so verification fails closed as false — never a throw, never a pass)`,
+    `  configuration guard: passing the positional secret together with { secrets: [...] } throws "${rotationBothError}" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

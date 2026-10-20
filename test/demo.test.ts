@@ -4,7 +4,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { runDemo, DEMO_WEBHOOK_SECRET } from "../src/demo.js";
+import {
+  runDemo,
+  DEMO_ROTATION_NEW_SECRET,
+  DEMO_ROTATION_OLD_SECRET,
+  DEMO_WEBHOOK_SECRET,
+} from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
 import {
   MAX_NOTE_LENGTH,
@@ -27,6 +32,7 @@ import {
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
+  buildPayoutWebhook,
   deliverPayoutWebhook,
   verifyPayoutWebhook,
   type TaskState,
@@ -440,11 +446,17 @@ Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped 
   endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
   first answer: 429 with Retry-After: 30 (parsed hint 30000 ms, clamped to maxRetryDelayMs 5000) -> recorded sleep: [5000] ms (the recording sleepImpl received exactly the clamped hint — exponential backoff, here backoffMs 100, never ran, and nothing really waited)
   delivery: ok attempts=2 status=200 (the retry after the clamped wait succeeded)
-  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)`;
+  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)
+
+Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):
+  notifications (main task DEMO-001, fixed signing time <timestamp>): eventId evt_demo_rotation_new signed with the new secret; eventId evt_demo_rotation_old signed with the old secret — the secrets themselves are never printed
+  rotation window { secrets: [new, old] }: new-signed verifies: true; old-signed verifies: true (in-flight notifications signed before the rotation still pass, and new-signed ones pass as soon as the new secret is listed — any one matching secret authenticates)
+  window edges fail closed: new-signed under the old secret alone: false (a receiver that has not adopted the new secret yet rejects it); both under an unrelated secret list: false, false (no listed secret matches, so verification fails closed as false — never a throw, never a pass)
+  configuration guard: passing the positional secret together with { secrets: [...] } throws "cannot verify payout webhook: pass either 'secret' or 'secrets', not both" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 381);
+  assert.equal(lines.length, 387);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1889,7 +1901,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 381);
+  assert.equal(out.trimEnd().split("\n").length, 387);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -3482,7 +3494,7 @@ test("demo shows the payout dedupe clear reset segment in-process: pinned id for
   assert.equal(independent.checkAndRecord("evt-1"), false); // forgotten
   // The segment follows the payout dedupe stats segment
   // and prints its lines verbatim (the payout webhook 429
-  // Retry-After delivery segment now closes the demo after it).
+  // Retry-After delivery segment follows it).
   const clearAt = text.indexOf(
     "Payout dedupe clear reset (PayoutEventDedupe.clear() drops every id and zeroes the counters):",
   );
@@ -3617,9 +3629,9 @@ test("demo shows the payout webhook 429 Retry-After delivery segment in-process:
   assert.deepEqual(independentSleeps, [5_000]);
   assert.equal(independentCalls.length, 2);
   assert.equal(independentCalls[0].body, independentCalls[1].body);
-  // The segment closes the demo: it follows the payout
-  // dedupe clear segment, prints its lines verbatim, and
-  // its wire-check line is the demo's last line.
+  // The segment follows the payout dedupe clear segment
+  // and prints its lines verbatim (the payout webhook
+  // secret rotation segment now closes the demo after it).
   const retryAt = text.indexOf(
     "Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):",
   );
@@ -3638,9 +3650,11 @@ test("demo shows the payout webhook 429 Retry-After delivery segment in-process:
   ]) {
     assert.ok(text.includes(line), `missing 429 Retry-After line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  wire check: 2 POSTs captured with byte-identical bodies: true (a retry re-POSTs the same signed body under the same eventId, so a receiver deduplicates it); signature check: verifyPayoutWebhook over the captured wire body: true (the X-Hub-Signature-256 header captured on the wire verifies under the demo secret)",
+  assert.ok(
+    text.indexOf(
+      "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
+    ) > retryAt,
+    "payout webhook secret rotation segment must follow the payout webhook 429 Retry-After segment",
   );
 });
 
@@ -3648,6 +3662,7 @@ test("demo payout webhook 429 Retry-After segment is deterministic: two runs pri
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):"),
+      ls.indexOf("Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3666,4 +3681,174 @@ test("demo payout webhook 429 Retry-After segment is deterministic: two runs pri
     a.retryAfterDeliveryBodyVerifies,
     b.retryAfterDeliveryBodyVerifies,
   );
+});
+
+test("demo shows the payout webhook secret rotation segment in-process: both secrets verify inside the window, edges fail closed, both-shapes call throws", async () => {
+  const {
+    task,
+    rotationNewWebhook,
+    rotationOldWebhook,
+    rotationNewUnderRotation,
+    rotationOldUnderRotation,
+    rotationNewUnderOldOnly,
+    rotationUnderUnrelatedList,
+    rotationBothError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // VerifyPayoutWebhookOptions docs in
+  // src/settlementWebhook.ts and
+  // test/payoutWebhookSecretRotation.test.ts, never derived
+  // by calling verifyPayoutWebhook itself.
+  assert.equal(DEMO_ROTATION_NEW_SECRET, "demo-payout-webhook-secret-new");
+  assert.equal(DEMO_ROTATION_OLD_SECRET, "demo-payout-webhook-secret-old");
+  assert.equal(rotationNewWebhook.payload.taskId, "DEMO-001");
+  assert.equal(rotationNewWebhook.payload.event, "PAYOUT_COMPLETE");
+  assert.equal(rotationNewWebhook.payload.eventId, "evt_demo_rotation_new");
+  assert.equal(rotationNewWebhook.payload.at, "2026-03-27T09:00:00.000Z");
+  assert.equal(rotationNewWebhook.payload.payoutRef, "xfer-88f2");
+  assert.equal(rotationNewWebhook.payload.payoutAmount, 10098.5);
+  assert.equal(rotationOldWebhook.payload.taskId, "DEMO-001");
+  assert.equal(rotationOldWebhook.payload.eventId, "evt_demo_rotation_old");
+  assert.equal(rotationOldWebhook.payload.at, "2026-03-27T09:00:00.000Z");
+  assert.notEqual(
+    rotationNewWebhook.signature,
+    rotationOldWebhook.signature,
+  );
+  assert.equal(rotationNewUnderRotation, true);
+  assert.equal(rotationOldUnderRotation, true);
+  assert.equal(rotationNewUnderOldOnly, false);
+  assert.deepEqual(rotationUnderUnrelatedList, [false, false]);
+  assert.equal(
+    rotationBothError,
+    "cannot verify payout webhook: pass either 'secret' or 'secrets', not both",
+  );
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh notifications built here
+  // from the demo's PAID task under the same pinned time and
+  // fresh eventIds reproduce every verdict on their own (the
+  // script from the secret-rotation tests).
+  const independentNew = buildPayoutWebhook(task, DEMO_ROTATION_NEW_SECRET, {
+    eventId: "evt-test-rotation-new",
+    now: new Date("2026-03-27T09:00:00.000Z"),
+  });
+  const independentOld = buildPayoutWebhook(task, DEMO_ROTATION_OLD_SECRET, {
+    eventId: "evt-test-rotation-old",
+    now: new Date("2026-03-27T09:00:00.000Z"),
+  });
+  const rotationOpts = {
+    secrets: [DEMO_ROTATION_NEW_SECRET, DEMO_ROTATION_OLD_SECRET],
+  };
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(independentNew.payload),
+      independentNew.signature,
+      undefined,
+      rotationOpts,
+    ),
+    true,
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(independentOld.payload),
+      independentOld.signature,
+      undefined,
+      rotationOpts,
+    ),
+    true,
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(independentOld.payload),
+      independentOld.signature,
+      undefined,
+      {
+        secrets: [DEMO_ROTATION_OLD_SECRET, DEMO_ROTATION_NEW_SECRET],
+      },
+    ),
+    true,
+    "candidate order is a performance preference only",
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(independentNew.payload),
+      independentNew.signature,
+      DEMO_ROTATION_OLD_SECRET,
+    ),
+    false,
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(independentOld.payload),
+      independentOld.signature,
+      undefined,
+      { secrets: ["demo-payout-webhook-secret-unrelated"] },
+    ),
+    false,
+  );
+  assert.throws(
+    () =>
+      verifyPayoutWebhook(
+        JSON.stringify(independentNew.payload),
+        independentNew.signature,
+        DEMO_ROTATION_NEW_SECRET,
+        rotationOpts,
+      ),
+    /cannot verify payout webhook: pass either 'secret' or 'secrets', not both/,
+  );
+  // The segment closes the demo: it follows the payout
+  // webhook 429 Retry-After delivery segment, prints its
+  // lines verbatim, and its configuration-guard line is the
+  // demo's last line.
+  const rotationAt = text.indexOf(
+    "Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):",
+  );
+  assert.ok(
+    rotationAt >
+      text.indexOf(
+        "Payout webhook 429 Retry-After delivery (deliverPayoutWebhook waits the clamped hint before retrying, fake fetch + recording fake sleep — no real network, no real wait):",
+      ),
+    "payout webhook secret rotation segment must follow the payout webhook 429 Retry-After segment",
+  );
+  for (const line of [
+    "  notifications (main task DEMO-001, fixed signing time 2026-03-27T09:00:00.000Z): eventId evt_demo_rotation_new signed with the new secret; eventId evt_demo_rotation_old signed with the old secret — the secrets themselves are never printed",
+    "  rotation window { secrets: [new, old] }: new-signed verifies: true; old-signed verifies: true (in-flight notifications signed before the rotation still pass, and new-signed ones pass as soon as the new secret is listed — any one matching secret authenticates)",
+    "  window edges fail closed: new-signed under the old secret alone: false (a receiver that has not adopted the new secret yet rejects it); both under an unrelated secret list: false, false (no listed secret matches, so verification fails closed as false — never a throw, never a pass)",
+    "  configuration guard: passing the positional secret together with { secrets: [...] } throws \"cannot verify payout webhook: pass either 'secret' or 'secrets', not both\" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)",
+  ]) {
+    assert.ok(text.includes(line), `missing secret rotation line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  configuration guard: passing the positional secret together with { secrets: [...] } throws \"cannot verify payout webhook: pass either 'secret' or 'secrets', not both\" (the two shapes are mutually exclusive, so a misconfigured receiver fails loudly instead of silently picking one)",
+  );
+});
+
+test("demo payout webhook secret rotation segment is deterministic: two runs print byte-identical rotation lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook secret rotation (verifyPayoutWebhook with { secrets: [new, old] } accepts either secret during the rotation window):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + notifications / window / edges / guard lines;
+  // every value in the segment is a fixed literal (fixed
+  // secrets, fixed signing time, fixed eventIds), so no
+  // normalization is needed — the signatures themselves are
+  // asserted in-process above, not printed here.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.rotationNewWebhook, b.rotationNewWebhook);
+  assert.deepEqual(a.rotationOldWebhook, b.rotationOldWebhook);
+  assert.equal(a.rotationNewUnderRotation, b.rotationNewUnderRotation);
+  assert.equal(a.rotationOldUnderRotation, b.rotationOldUnderRotation);
+  assert.equal(a.rotationNewUnderOldOnly, b.rotationNewUnderOldOnly);
+  assert.deepEqual(
+    a.rotationUnderUnrelatedList,
+    b.rotationUnderUnrelatedList,
+  );
+  assert.equal(a.rotationBothError, b.rotationBothError);
 });

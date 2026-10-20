@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook secret rotation segment closing
+  the CLI demo: two fixed notifications are built from
+  the main task under a fixed signing time — one signed
+  with a new secret, one with the old — and both verify
+  under `verifyPayoutWebhook`'s rotation shape
+  `{ secrets: [new, old] }`, so an in-flight old-signed
+  notification still passes inside the window and a
+  new-signed one passes as soon as the new secret is
+  listed. The segment also shows the window's edges
+  failing closed — the new-signed notification under
+  the old secret alone, and both under an unrelated
+  secret list — and the pinned configuration error
+  thrown when the positional secret and `secrets` are
+  passed together, all asserted outside the printed
+  lines against hand-written expectations. Fixed
+  secrets, fixed timestamp, no network, no randomness.
+  Demo and tests only; no library behavior change.
+
 - A payout event dedupe checkAndRecord miss/evict
   benchmark path: `npm run bench` now also times
   `PayoutEventDedupe.checkAndRecord()` in its
