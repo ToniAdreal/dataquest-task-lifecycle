@@ -11,6 +11,35 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `maxRetryDelayMs` Retry-After cap
+  benchmark path: `npm run bench` now also times
+  `deliverPayoutWebhook` delivering the fixed signed
+  webhook through an injected fake fetch that answers
+  429 with a pinned `Retry-After: 30` hint (30000 ms)
+  on the first attempt and 200 on the second, with
+  `backoffMs` 100, an injected recording sleep, and
+  `maxRetryDelayMs` 5000 — the runaway-hint guard
+  (`Math.min(hinted, maxRetryDelayMs)`) every hinted
+  retry pays, previously invisible inside the
+  single-target row, whose 200-immediately script
+  never retries at all. Its per-iteration self-check
+  pins the result to `{ ok: true, attempts: 2,
+  status: 200 }`, exactly two captured calls with
+  byte-identical signed bodies, and the recording
+  sleep receiving exactly the clamped 5000 ms;
+  outside the timed loop, a 429 without a hint is
+  pinned to fall back to the 100 ms exponential-
+  backoff base, a below-cap hint (`Retry-After: 2`)
+  is pinned to be honored exactly at 2000 ms, and a
+  500 carrying a `Retry-After` header is pinned to be
+  ignored as a hint (only 429 hints are read). The
+  README Benchmarks table is refreshed from one real
+  run and gains the new row
+  (`deliverPayoutWebhook maxRetryDelayMs cap` at
+  ~27,444 ops/sec on that run). No network, no
+  randomness, and no real waiting. Benchmark only;
+  no library behavior change.
+
 - A keyed audit hash-chain CLI demo segment:
   `npm run demo` now closes with a dedicated task
   (DEMO-028) constructed with a pinned `auditSecret`
