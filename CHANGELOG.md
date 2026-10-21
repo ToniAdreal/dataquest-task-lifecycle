@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A keyed hash-chain verification benchmark path:
+  `npm run bench` now also times
+  `verifyHistoryChain(history, { auditSecret })` over a
+  fixed 8-entry history chained under a pinned audit
+  secret (the same lifecycle steps and fixed timestamps
+  as the unkeyed fixture, with every link HMAC-SHA256
+  instead of plain SHA-256) — the keyed tamper-evidence
+  cost previously invisible inside the unkeyed
+  `verifyHistoryChain` row. Its per-iteration self-check
+  pins the verdict to exactly `true` with the genesis
+  and successor links pinned; outside the timed loop, a
+  wrong secret is pinned to return `false`, a detached
+  tampered copy is pinned to return `false`, and the
+  same keyed history verified without a secret is
+  pinned to return `false` (fail-closed). The README
+  Benchmarks table is refreshed from one real run and
+  gains the new row (`verifyHistoryChain auditSecret
+  (8 entries, keyed)` at ~14,765 ops/sec on that run).
+  No network, no randomness, and no wall clock.
+  Benchmark only; no library behavior change.
+
 - A dispatch idempotency key segment closing the CLI
   demo: a dedicated task (DEMO-026) dispatches under
   fixed timestamps with pinned `idempotencyKey`s — its
