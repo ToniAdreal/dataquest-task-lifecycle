@@ -11,6 +11,37 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `AbortSignal` pre-abort benchmark
+  path: `npm run bench` now also times
+  `deliverPayoutWebhook` delivering the fixed signed
+  webhook through an injected counting fake fetch
+  with an external `signal` aborted before the call —
+  the deterministic cancellation guard every
+  externally-signalled delivery pays before it starts
+  (a pre-aborted signal makes zero fetch calls and
+  the abort is reported, never thrown), previously
+  invisible inside the single-target delivery row,
+  whose script never carries a signal at all. Its
+  per-iteration self-check pins the reported result
+  to exactly
+  `{ ok: false, attempts: 0, error: "payout webhook delivery aborted" }`
+  with no status, and the counting fetch to exactly
+  zero calls; outside the timed loop, a
+  non-`AbortSignal` signal value is pinned to throw
+  the exact configuration error
+  (`cannot deliver payout webhook: signal must be an AbortSignal, got bench-not-a-signal`)
+  before any request, and a signal that never aborts
+  is pinned to leave the normal delivery unchanged
+  (`{ ok: true, attempts: 1, status: 200 }` after
+  exactly one fetch call). The README Benchmarks
+  table is refreshed from one real run and gains
+  the new row
+  (`deliverPayoutWebhook AbortSignal pre-abort` at
+  ~1,249,972 ops/sec on that run).
+  No network, no randomness, no real sleep, and no
+  wall clock. Benchmark only; no library behavior
+  change.
+
 - An event-level RBAC CLI demo segment:
   `npm run demo` now closes with a dedicated task
   (DEMO-029) constructed with a pinned `rolePolicy`
