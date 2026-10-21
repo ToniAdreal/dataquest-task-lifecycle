@@ -11,6 +11,38 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch payout-reference enforcement benchmark
+  path: `npm run bench` now also times
+  `dispatch("PAYOUT_COMPLETE", { payoutRef })` on a
+  fresh task constructed with
+  `{ requirePayoutRef: true }` and driven through the
+  pinned lifecycle steps to PAYOUT_PENDING under fixed
+  timestamps — the settlement-reconciliation guard
+  every enforced payout pays (a `PAYOUT_COMPLETE`
+  without a non-empty `payoutRef` is rejected at
+  dispatch time, before any audit entry is written),
+  previously invisible inside the plain dispatch row,
+  whose tasks never enable the option. Because the
+  dispatch settles its task, every iteration rebuilds
+  a fresh enforced task and the reported numbers
+  include that rebuild cost. Its per-iteration
+  self-check pins the dispatch return to PAID, the
+  history to exactly 8 entries, and the last entry to
+  the pinned settlement fields (seq 8,
+  `PAYOUT_COMPLETE`, at the pinned timestamp, carrying
+  the pinned payoutRef verbatim); outside the timed
+  loop, a ref-less dispatch on an enforced task is
+  pinned to throw the exact pinned
+  `payout reference required: …` error and leave state
+  and history untouched, and a default task (option
+  unset) is pinned to still settle without a
+  reference. The README Benchmarks table is refreshed
+  from one real run and gains the new row
+  (`dispatch requirePayoutRef (with payoutRef)` at
+  ~13,903 ops/sec on that run).
+  No network, no randomness, and no wall clock.
+  Benchmark only; no library behavior change.
+
 - A payout webhook `maxRetryDelayMs` Retry-After cap
   benchmark path: `npm run bench` now also times
   `deliverPayoutWebhook` delivering the fixed signed
