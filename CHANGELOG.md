@@ -11,6 +11,37 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `maxAgeMs` freshness-window
+  benchmark path: `npm run bench` now also times
+  `verifyPayoutWebhook` over the fixed signed webhook
+  with `{ maxAgeMs: 300000, now }` and the receiver
+  `now` injected 60 seconds after signing — the
+  opt-in replay bound every freshness-checking
+  receiver pays after the signature matches (a
+  legitimately-signed payload older than the window
+  fails closed even though its signature alone would
+  verify forever), previously invisible inside the
+  plain verify row, whose options never carry a
+  freshness window at all. Its per-iteration
+  self-check pins the verdict to exactly `true` (an
+  age of 60,000 ms inside the 5-minute window);
+  outside the timed loop, a payload aged 1 ms past
+  the window is pinned to return `false`, a payload
+  aged exactly `maxAgeMs` is pinned to still verify
+  (the boundary is inclusive — only
+  `now - at > maxAgeMs` fails), and an illegal
+  `maxAgeMs` of -1 is pinned to throw the exact
+  configuration error
+  (`cannot verify payout webhook: maxAgeMs must be a finite non-negative number, got -1`).
+  The README Benchmarks table is refreshed from one
+  real run and gains the new row
+  (`verifyPayoutWebhook maxAgeMs freshness window` at
+  ~100,078 ops/sec on that run).
+  No network, no randomness, and no wall clock —
+  the signing time and every receiver `now` are
+  injected fixed instants. Benchmark only; no
+  library behavior change.
+
 - A payout webhook `AbortSignal` pre-abort benchmark
   path: `npm run bench` now also times
   `deliverPayoutWebhook` delivering the fixed signed
