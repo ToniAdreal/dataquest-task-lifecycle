@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A keyed audit hash-chain CLI demo segment:
+  `npm run demo` now closes with a dedicated task
+  (DEMO-028) constructed with a pinned `auditSecret`
+  and driven PUBLISH -> SUBMIT under fixed timestamps,
+  so every audit link is HMAC-SHA256 keyed by that
+  secret instead of plain SHA-256. The segment prints
+  and asserts the four fail-closed verdicts of
+  `verifyHistoryChain(history, { auditSecret })`:
+  the correct secret verifies the 4-entry history,
+  a wrong secret returns `false`, a detached tampered
+  copy (the middle START_CAPTURE entry gaining a
+  `payoutAmount` of 999) returns `false` under the
+  correct secret while the original history still
+  verifies afterwards, and the same keyed history
+  verified with no secret at all returns `false`.
+  The secrets themselves are never printed. The demo
+  tests gain two cases for the segment (in-process
+  verdicts with independent reproduction, and
+  byte-identical determinism), for 570 tests in
+  total. No network, no randomness, and no wall
+  clock. Demo only; no library behavior change.
+
 - A payout webhook secret-rotation verification
   benchmark path: `npm run bench` now also times
   `verifyPayoutWebhook` with the rotation candidate

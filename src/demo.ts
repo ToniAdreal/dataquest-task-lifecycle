@@ -307,7 +307,22 @@
  * key then succeeds, and a final dispatch with no key
  * at all appends normally — the retry-safety valve a
  * reader has only seen asserted by the idempotency
- * key tests so far.
+ * key tests so far —
+ * and finally a keyed audit hash chain segment:
+ * a dedicated task constructed with a pinned
+ * `auditSecret` is driven under fixed timestamps, so
+ * every audit link is HMAC-SHA256 keyed by that secret
+ * instead of plain SHA-256; `verifyHistoryChain` with
+ * the correct secret verifies it, with a wrong secret
+ * it returns `false`, a detached copy whose middle
+ * entry gains a `payoutAmount` it never carried also
+ * returns `false` under the correct secret, and the
+ * same history verified with no secret at all returns
+ * `false` too (fail-closed) — the keyed tamper-evidence
+ * mode a reader has only seen on the main task's
+ * unkeyed chain and in the keyed hash-chain tests and
+ * benchmark so far. The secrets themselves are never
+ * printed.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -389,7 +404,10 @@
  * list, its cross-event and stale retry returns and
  * its post-retry history length, and its retry task
  * with its failed-dispatch error and its pinned
- * retry key,
+ * retry key, the keyed audit hash chain segment's
+ * dedicated task with its four verdicts (correct
+ * secret, wrong secret, tampered copy under the
+ * correct secret, and no secret),
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -413,6 +431,7 @@ import {
   deliverPayoutWebhookToMany,
   expireOverdueTasks,
   expiredTasks,
+  GENESIS_PREV_HASH,
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
@@ -463,6 +482,15 @@ export const DEMO_WEBHOOK_SECRET = "demo-secret-do-not-use-in-production";
  */
 export const DEMO_ROTATION_NEW_SECRET = "demo-payout-webhook-secret-new";
 export const DEMO_ROTATION_OLD_SECRET = "demo-payout-webhook-secret-old";
+
+/**
+ * Audit secrets for the demo's closing keyed hash-chain segment
+ * only — placeholders printed in the source, NOT real credentials.
+ * A real deployment loads its audit secret from its own credential
+ * store and never commits it.
+ */
+export const DEMO_AUDIT_SECRET = "demo-audit-secret";
+export const DEMO_AUDIT_WRONG_SECRET = "demo-audit-secret-wrong";
 
 const steps: Array<{
   event: TaskEvent;
@@ -679,6 +707,16 @@ export interface DemoResult {
   idempotencyFailedError: string;
   /** Pinned key DEMO-027 fails under, then succeeds under. */
   idempotencyRetryKey: string;
+  /** Keyed task of the closing auditSecret segment (DEMO-028). */
+  auditSecretTask: TaskLifecycle;
+  /** Correct-secret verdict on DEMO-028's keyed history (true). */
+  auditSecretVerified: boolean;
+  /** Wrong-secret verdict on DEMO-028's keyed history (false). */
+  auditSecretWrongVerified: boolean;
+  /** Correct-secret verdict on the tampered copy (false). */
+  auditSecretTamperedVerified: boolean;
+  /** No-secret verdict on DEMO-028's keyed history (false). */
+  auditSecretUnkeyedVerified: boolean;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -834,7 +872,9 @@ export interface DemoResult {
  * its duplicate / cross-event / stale retry returns,
  * its post-duplicate and post-retry history lengths,
  * its notified event list, and its failed-dispatch
- * error, and the exact lines
+ * error, the keyed audit hash chain segment's dedicated
+ * task with its correct-secret, wrong-secret, tampered
+ * and no-secret verdicts, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -3864,7 +3904,110 @@ export async function runDemo(): Promise<DemoResult> {
     `  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ${idempotencyRetryTask.state}; history entries: ${idempotencyRetryTask.history.length} (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Keyed audit hash chain segment (closing): the audit
+  // hash-chain segment near the top of this demo verifies
+  // the main task's UNKEYED chain — every link there is a
+  // plain SHA-256 anyone can recompute. A task constructed
+  // with `auditSecret` (TaskLifecycleOptions, unit-tested
+  // since the keyed hash-chain tests landed) upgrades
+  // every link to HMAC-SHA256 keyed by that secret, so a
+  // persisted log rewrite needs the secret as well as the
+  // data, and verification is fail-closed across modes.
+  // One dedicated task is driven under fixed literal
+  // timestamps — no network, no randomness, no wall clock:
+  //   - DEMO-028 is constructed with the pinned demo
+  //     audit secret and driven PUBLISH -> ACCEPT ->
+  //     START_CAPTURE -> SUBMIT at 2026-04-04T09:00 /
+  //     09:05 / 09:10 / 09:15, landing in SUBMITTED with
+  //     exactly 4 history entries, genesis-linked to
+  //     GENESIS_PREV_HASH with every successor linking
+  //     to its predecessor's hash;
+  //   - `verifyHistoryChain(history, { auditSecret })`
+  //     with the correct secret returns true;
+  //   - the same history under the pinned wrong secret
+  //     returns false (no throw — a verdict, fail-closed);
+  //   - a detached copy whose middle entry (index 2,
+  //     START_CAPTURE) gains a payoutAmount of 999 it
+  //     never carried returns false under the correct
+  //     secret, and the original history still verifies
+  //     afterwards, proving the tamper copy was detached;
+  //   - the same keyed history verified with no secret
+  //     at all returns false — a keyed chain never
+  //     verifies unkeyed, exactly as an unkeyed chain
+  //     never verifies under a secret.
+  // The secrets themselves are never printed.
+  // Hand-written expectations — written out here from
+  // the TaskLifecycleOptions docs and the keyed
+  // hash-chain tests, never derived from
+  // verifyHistoryChain itself. The segment asserts all
+  // of this here, outside the printed lines: a keyed
+  // verdict that drifted would fail the demo itself,
+  // not just a test.
+  const auditSecretTask = new TaskLifecycle("DEMO-028", {
+    auditSecret: DEMO_AUDIT_SECRET,
+  });
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-04-04T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-04-04T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-04-04T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-04-04T09:15:00.000Z"],
+  ] as const) {
+    auditSecretTask.dispatch(event, { actor, at });
+  }
+  const auditSecretVerified = verifyHistoryChain(auditSecretTask.history, {
+    auditSecret: DEMO_AUDIT_SECRET,
+  });
+  const auditSecretWrongVerified = verifyHistoryChain(
+    auditSecretTask.history,
+    { auditSecret: DEMO_AUDIT_WRONG_SECRET },
+  );
+  const auditSecretTamperedHistory = auditSecretTask.history.map(
+    (entry) => ({ ...entry }),
+  );
+  auditSecretTamperedHistory[2] = {
+    ...auditSecretTamperedHistory[2],
+    payoutAmount: 999,
+  };
+  const auditSecretTamperedVerified = verifyHistoryChain(
+    auditSecretTamperedHistory,
+    { auditSecret: DEMO_AUDIT_SECRET },
+  );
+  const auditSecretUnkeyedVerified = verifyHistoryChain(
+    auditSecretTask.history,
+  );
+  if (
+    auditSecretTask.state !== "SUBMITTED" ||
+    auditSecretTask.history.length !== 4 ||
+    auditSecretTask.history[0].prevHash !== GENESIS_PREV_HASH ||
+    auditSecretTask.history[1].prevHash !== auditSecretTask.history[0].hash ||
+    auditSecretTask.history[2].prevHash !== auditSecretTask.history[1].hash ||
+    auditSecretTask.history[3].prevHash !== auditSecretTask.history[2].hash ||
+    auditSecretTask.history[0].event !== "PUBLISH" ||
+    auditSecretTask.history[0].at !== "2026-04-04T09:00:00.000Z" ||
+    auditSecretTask.history[3].event !== "SUBMIT" ||
+    auditSecretTask.history[3].at !== "2026-04-04T09:15:00.000Z" ||
+    auditSecretVerified !== true ||
+    auditSecretWrongVerified !== false ||
+    auditSecretTamperedVerified !== false ||
+    auditSecretUnkeyedVerified !== false ||
+    verifyHistoryChain(auditSecretTask.history, {
+      auditSecret: DEMO_AUDIT_SECRET,
+    }) !== true
+  ) {
+    throw new Error(
+      "demo fixture broken: verifyHistoryChain auditSecret does not match the hand-pinned contract (the keyed history must verify under the correct secret with its genesis and successor links pinned, must return false under a wrong secret, must return false for a detached tampered copy under the correct secret while the original still verifies, and must return false with no secret at all)",
+    );
+  }
+  lines.push(
+    "",
+    "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
+    `  keyed task DEMO-028 (constructed with auditSecret, driven PUBLISH -> SUBMIT under fixed timestamps): history entries: 4; verifyHistoryChain with the correct secret: ${auditSecretVerified} (every link is HMAC-SHA256 keyed by the pinned secret — the secret itself is never printed)`,
+    `  wrong secret: verifyHistoryChain: ${auditSecretWrongVerified} (the same history under a different secret recomputes no link — verification fails closed as false, never a throw)`,
+    `  tampered copy: middle entry START_CAPTURE gains payoutAmount 999 — verifyHistoryChain with the correct secret: ${auditSecretTamperedVerified} (tamper detected: the stored HMAC no longer recomputes); original history after the tamper check: verifyHistoryChain: ${verifyHistoryChain(auditSecretTask.history, { auditSecret: DEMO_AUDIT_SECRET })} (detached copy — the keyed task's own history is untouched)`,
+    `  no secret: verifyHistoryChain without a secret: ${auditSecretUnkeyedVerified} (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

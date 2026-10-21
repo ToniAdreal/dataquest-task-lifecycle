@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   runDemo,
+  DEMO_AUDIT_SECRET,
+  DEMO_AUDIT_WRONG_SECRET,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
   DEMO_WEBHOOK_SECRET,
@@ -474,11 +476,17 @@ Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried disp
   same key, same event (DEMO-026): PUBLISH with idempotencyKey "demo-idem-publish" at <timestamp> -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)
   keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
   a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey "demo-idem-retry" -> rejected: "invalid transition: ACCEPT from DRAFT"; history entries after the failure: 0; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)
-  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)`;
+  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)
+
+Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):
+  keyed task DEMO-028 (constructed with auditSecret, driven PUBLISH -> SUBMIT under fixed timestamps): history entries: 4; verifyHistoryChain with the correct secret: true (every link is HMAC-SHA256 keyed by the pinned secret — the secret itself is never printed)
+  wrong secret: verifyHistoryChain: false (the same history under a different secret recomputes no link — verification fails closed as false, never a throw)
+  tampered copy: middle entry START_CAPTURE gains payoutAmount 999 — verifyHistoryChain with the correct secret: false (tamper detected: the stored HMAC no longer recomputes); original history after the tamper check: verifyHistoryChain: true (detached copy — the keyed task's own history is untouched)
+  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 409);
+  assert.equal(lines.length, 415);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1923,7 +1931,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 409);
+  assert.equal(out.trimEnd().split("\n").length, 415);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -4122,8 +4130,9 @@ test("demo shows the payout webhook freshness window segment in-process: inside 
   // The segment follows the payout webhook AbortSignal
   // segment and prints its lines verbatim (the payout
   // reference enforcement segment follows it, and the
-  // dispatch idempotency key segment now closes the demo
-  // after that).
+  // dispatch idempotency key segment follows that, with
+  // the keyed audit hash chain segment now closing the
+  // demo after it).
   const freshnessAt = text.indexOf(
     "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
   );
@@ -4280,8 +4289,9 @@ test("demo shows the payout reference enforcement segment in-process: ref-less c
   );
   // The segment follows the payout webhook freshness
   // window segment and prints its lines verbatim (the
-  // dispatch idempotency key segment now closes the demo
-  // after it).
+  // dispatch idempotency key segment follows it, and the
+  // keyed audit hash chain segment now closes the demo
+  // after that).
   const enforcementAt = text.indexOf(
     "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
   );
@@ -4452,9 +4462,10 @@ test("demo shows the dispatch idempotency key segment in-process: same-key dupli
   independentRetry.dispatch("ACCEPT", { at: "2026-04-05T09:10:00.000Z" });
   assert.equal(independentRetry.state, "ACCEPTED");
   assert.equal(independentRetry.history.length, 2);
-  // The segment closes the demo: it follows the payout
-  // reference enforcement segment, prints its lines
-  // verbatim, and its no-key line is the demo's last line.
+  // The segment follows the payout reference
+  // enforcement segment and prints its lines verbatim
+  // (the keyed audit hash chain segment now closes the
+  // demo after it).
   const idempotencyAt = text.indexOf(
     "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
   );
@@ -4473,9 +4484,11 @@ test("demo shows the dispatch idempotency key segment in-process: same-key dupli
   ]) {
     assert.ok(text.includes(line), `missing idempotency line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)",
+  assert.ok(
+    text.indexOf(
+      "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
+    ) > idempotencyAt,
+    "keyed audit hash chain segment must follow the dispatch idempotency key segment",
   );
 });
 
@@ -4483,6 +4496,7 @@ test("demo dispatch idempotency key segment is deterministic: two runs print byt
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):"),
+      ls.indexOf("Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4515,4 +4529,136 @@ test("demo dispatch idempotency key segment is deterministic: two runs print byt
   assert.deepEqual(a.idempotencyRetryTask.history, b.idempotencyRetryTask.history);
   assert.equal(a.idempotencyFailedError, b.idempotencyFailedError);
   assert.equal(a.idempotencyRetryKey, b.idempotencyRetryKey);
+});
+
+test("demo shows the keyed audit hash chain segment in-process: correct secret verifies, wrong secret and tampered copy and no secret all fail closed", async () => {
+  const {
+    auditSecretTask,
+    auditSecretVerified,
+    auditSecretWrongVerified,
+    auditSecretTamperedVerified,
+    auditSecretUnkeyedVerified,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/keyedHashChain.test.ts, never derived from the
+  // verification itself.
+  assert.equal(DEMO_AUDIT_SECRET, "demo-audit-secret");
+  assert.equal(DEMO_AUDIT_WRONG_SECRET, "demo-audit-secret-wrong");
+  assert.equal(auditSecretTask.id, "DEMO-028");
+  assert.equal(auditSecretTask.state, "SUBMITTED");
+  assert.equal(auditSecretTask.history.length, 4);
+  assert.equal(auditSecretVerified, true);
+  assert.equal(auditSecretWrongVerified, false);
+  assert.equal(auditSecretTamperedVerified, false);
+  assert.equal(auditSecretUnkeyedVerified, false);
+  assert.equal(auditSecretTask.history[0].prevHash, "GENESIS");
+  assert.equal(auditSecretTask.history[0].event, "PUBLISH");
+  assert.equal(auditSecretTask.history[0].at, "2026-04-04T09:00:00.000Z");
+  assert.equal(auditSecretTask.history[3].event, "SUBMIT");
+  assert.equal(auditSecretTask.history[3].at, "2026-04-04T09:15:00.000Z");
+  for (let i = 1; i < auditSecretTask.history.length; i++) {
+    assert.equal(
+      auditSecretTask.history[i].prevHash,
+      auditSecretTask.history[i - 1].hash,
+    );
+  }
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh keyed task driven here
+  // under the same fixed timestamps reproduces every
+  // verdict on its own (the script from the keyed
+  // hash-chain tests).
+  const independent = new TaskLifecycle("test-keyed-demo", {
+    auditSecret: DEMO_AUDIT_SECRET,
+  });
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-04-04T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-04-04T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-04-04T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-04-04T09:15:00.000Z"],
+  ] as const) {
+    independent.dispatch(event, { actor, at });
+  }
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(independent.history)),
+    JSON.parse(JSON.stringify(auditSecretTask.history)),
+  );
+  assert.equal(
+    verifyHistoryChain(independent.history, {
+      auditSecret: DEMO_AUDIT_SECRET,
+    }),
+    true,
+  );
+  assert.equal(
+    verifyHistoryChain(independent.history, {
+      auditSecret: DEMO_AUDIT_WRONG_SECRET,
+    }),
+    false,
+  );
+  assert.equal(verifyHistoryChain(independent.history), false);
+  const independentTampered = independent.history.map((e) => ({ ...e }));
+  independentTampered[2] = { ...independentTampered[2], payoutAmount: 999 };
+  assert.equal(
+    verifyHistoryChain(independentTampered, {
+      auditSecret: DEMO_AUDIT_SECRET,
+    }),
+    false,
+  );
+  assert.equal(
+    verifyHistoryChain(independent.history, {
+      auditSecret: DEMO_AUDIT_SECRET,
+    }),
+    true,
+  );
+  // The segment closes the demo: it follows the dispatch
+  // idempotency key segment, prints its lines verbatim,
+  // and its no-secret line is the demo's last line.
+  const auditAt = text.indexOf(
+    "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
+  );
+  assert.ok(
+    auditAt >
+      text.indexOf(
+        "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+      ),
+    "keyed audit hash chain segment must follow the dispatch idempotency key segment",
+  );
+  for (const line of [
+    "  keyed task DEMO-028 (constructed with auditSecret, driven PUBLISH -> SUBMIT under fixed timestamps): history entries: 4; verifyHistoryChain with the correct secret: true (every link is HMAC-SHA256 keyed by the pinned secret — the secret itself is never printed)",
+    "  wrong secret: verifyHistoryChain: false (the same history under a different secret recomputes no link — verification fails closed as false, never a throw)",
+    "  tampered copy: middle entry START_CAPTURE gains payoutAmount 999 — verifyHistoryChain with the correct secret: false (tamper detected: the stored HMAC no longer recomputes); original history after the tamper check: verifyHistoryChain: true (detached copy — the keyed task's own history is untouched)",
+    "  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)",
+  ]) {
+    assert.ok(text.includes(line), `missing keyed audit line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)",
+  );
+});
+
+test("demo keyed audit hash chain segment is deterministic: two runs print byte-identical keyed lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + correct-secret / wrong-secret / tampered /
+  // no-secret lines; every value in the segment is a
+  // fixed literal (a pinned secret, fixed timestamps),
+  // so no normalization is needed — the hashes themselves
+  // are asserted in-process above, not printed here.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.auditSecretTask.state, b.auditSecretTask.state);
+  assert.deepEqual(a.auditSecretTask.history, b.auditSecretTask.history);
+  assert.equal(a.auditSecretVerified, b.auditSecretVerified);
+  assert.equal(a.auditSecretWrongVerified, b.auditSecretWrongVerified);
+  assert.equal(a.auditSecretTamperedVerified, b.auditSecretTamperedVerified);
+  assert.equal(a.auditSecretUnkeyedVerified, b.auditSecretUnkeyedVerified);
 });
