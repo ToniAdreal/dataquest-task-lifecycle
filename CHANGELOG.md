@@ -11,6 +11,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch idempotency dedupe benchmark path:
+  `npm run bench` now also times `dispatch` with a
+  pinned `idempotencyKey` over a fresh task per
+  iteration — one keyed `PUBLISH` that appends exactly
+  one entry and consumes the key, plus the same event
+  under the same key again, which returns the current
+  state and appends nothing — the retry-safety cost
+  previously invisible inside the plain dispatch row,
+  which never carries a key. Its per-iteration
+  self-check pins both returns, the exactly-one-entry
+  history with a gap-free seq, the consumed-key
+  snapshot holding exactly the pinned key, and exactly
+  one listener notification; outside the timed loop,
+  the same key under a different event is pinned to
+  dedupe, a stale retry after the task moved on is
+  pinned to answer with the current state, a failed
+  dispatch is pinned to consume no key (the corrected
+  retry under the same key executes), and two keyless
+  dispatches are pinned to append two entries. The
+  README Benchmarks table is refreshed from one real
+  run and gains the new row (`dispatch idempotency
+  dedupe (keyed dispatch + duplicate)` at ~59,303
+  ops/sec on that run). No network, no randomness, and
+  no wall clock. Benchmark only; no library behavior
+  change.
+
 - A keyed hash-chain verification benchmark path:
   `npm run bench` now also times
   `verifyHistoryChain(history, { auditSecret })` over a
