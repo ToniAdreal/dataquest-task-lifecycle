@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook secret-rotation verification
+  benchmark path: `npm run bench` now also times
+  `verifyPayoutWebhook` with the rotation candidate
+  set `{ secrets: [new, old] }` over the fixed webhook
+  fixture (signed with the old secret at the fixed
+  timestamp / `eventId`, so the matching candidate is
+  the second one tried) — the steady-state receiver
+  cost inside a rotation window, which pays one failed
+  HMAC trial before the match and was previously
+  invisible inside the single-secret verify row. Its
+  per-iteration self-check pins the verdict to
+  exactly `true`; outside the timed loop, a candidate
+  pair in which neither secret matches is pinned to
+  return `false` (all-mismatch fails closed, no
+  throw), and an empty `secrets` array is pinned to
+  throw the exact configuration error. The README
+  Benchmarks table is refreshed from one real run and
+  gains the new row (`verifyPayoutWebhook (secrets
+  rotation, 2 candidates)` at ~55,723 ops/sec on that
+  run). No network, no randomness, and no wall clock.
+  Benchmark only; no library behavior change.
+
 - A dispatch idempotency dedupe benchmark path:
   `npm run bench` now also times `dispatch` with a
   pinned `idempotencyKey` over a fresh task per
