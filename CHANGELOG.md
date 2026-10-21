@@ -11,6 +11,46 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `maxFutureSkewMs` future-skew
+  benchmark path: `npm run bench` now also times
+  `verifyPayoutWebhook` over the fixed signed webhook
+  with `{ maxFutureSkewMs: 300000, now }` and the
+  receiver `now` injected 60 seconds before signing —
+  the future side of the two-sided freshness window
+  every freshness-checking receiver pays after the
+  signature matches (a legitimately-signed payload
+  dated further in the future than the window fails
+  closed even though a `maxAgeMs`-only check would
+  pass it — a negative age always passes — and its
+  signature alone would verify forever, so without
+  this bound a far-future timestamp gains a
+  near-unbounded replay window), previously
+  invisible inside the plain verify row and the
+  `maxAgeMs` row, whose options never bound the
+  future direction at all. Its per-iteration
+  self-check pins the verdict to exactly `true` (a
+  future skew of 60,000 ms inside the 5-minute
+  window); outside the timed loop, a payload 1 ms
+  beyond the window is pinned to return `false`, a
+  payload skewed exactly `maxFutureSkewMs` is pinned
+  to still verify (the boundary is inclusive — only
+  `at - now > maxFutureSkewMs` fails), the two-sided
+  window formed with `maxAgeMs` is pinned on all
+  three sides (inside both bounds verifies, beyond
+  the future bound returns `false`, beyond the age
+  bound returns `false`), and an illegal
+  `maxFutureSkewMs` of -1 is pinned to throw the
+  exact configuration error
+  (`cannot verify payout webhook: maxFutureSkewMs must be a finite non-negative number, got -1`).
+  The README Benchmarks table is refreshed from one
+  real run and gains the new row
+  (`verifyPayoutWebhook maxFutureSkewMs future-skew window` at
+  ~51,430 ops/sec on that run).
+  No network, no randomness, and no wall clock —
+  the signing time and every receiver `now` are
+  injected fixed instants. Benchmark only; no
+  library behavior change.
+
 - A payout webhook `maxAgeMs` freshness-window
   benchmark path: `npm run bench` now also times
   `verifyPayoutWebhook` over the fixed signed webhook
