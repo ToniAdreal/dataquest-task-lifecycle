@@ -322,7 +322,25 @@
  * mode a reader has only seen on the main task's
  * unkeyed chain and in the keyed hash-chain tests and
  * benchmark so far. The secrets themselves are never
- * printed.
+ * printed —
+ * and finally an event-level RBAC segment:
+ * a dedicated task constructed with a pinned
+ * `rolePolicy` (PUBLISH only by researcher, ACCEPT
+ * only by contributor, arbitration only by
+ * senior-moderator) is driven under fixed timestamps:
+ * a covered event dispatched by an actor outside the
+ * allowlist — or with no actor at all — is rejected
+ * with the pinned `actor not authorized for …` error
+ * and leaves state and history untouched, an actor
+ * inside the allowlist advances the task, events the
+ * policy does not cover are unrestricted (no actor
+ * needed), and a second dedicated task constructed
+ * without any policy arbitrates with no actor at
+ * all — the event-level authorization gate a reader
+ * has only seen asserted by the RBAC tests so far.
+ * Honest limit, printed in the segment itself: an
+ * allowlist is an authorization check on the actor
+ * name, not identity authentication.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -407,7 +425,11 @@
  * retry key, the keyed audit hash chain segment's
  * dedicated task with its four verdicts (correct
  * secret, wrong secret, tampered copy under the
- * correct secret, and no secret),
+ * correct secret, and no secret), the event-level
+ * RBAC segment's pinned policy with its policy task,
+ * its publish and arbitration rejection errors with
+ * their post-rejection states and history lengths,
+ * and its policy-free default task,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -459,6 +481,7 @@ import {
   type PayoutMismatch,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
+  type RolePolicy,
   type StaleActionResult,
   type TaskEvent,
   type TaskHistoryEntry,
@@ -491,6 +514,20 @@ export const DEMO_ROTATION_OLD_SECRET = "demo-payout-webhook-secret-old";
  */
 export const DEMO_AUDIT_SECRET = "demo-audit-secret";
 export const DEMO_AUDIT_WRONG_SECRET = "demo-audit-secret-wrong";
+
+/**
+ * Event-level RBAC policy for the demo's closing rolePolicy
+ * segment only — pinned actor names, not credentials. A real
+ * deployment authenticates its actors itself; the policy is
+ * only an authorization check on the actor name a dispatch
+ * carries.
+ */
+export const DEMO_ROLE_POLICY: RolePolicy = {
+  PUBLISH: ["researcher"],
+  ACCEPT: ["contributor"],
+  ARBITRATE_APPROVE: ["senior-moderator"],
+  ARBITRATE_REJECT: ["senior-moderator"],
+};
 
 const steps: Array<{
   event: TaskEvent;
@@ -717,6 +754,28 @@ export interface DemoResult {
   auditSecretTamperedVerified: boolean;
   /** No-secret verdict on DEMO-028's keyed history (false). */
   auditSecretUnkeyedVerified: boolean;
+  /** Policy task of the closing rolePolicy segment (DEMO-029). */
+  rolePolicyTask: TaskLifecycle;
+  /** The segment's pinned policy (DEMO_ROLE_POLICY). */
+  rolePolicy: RolePolicy;
+  /** Error from DEMO-029's PUBLISH by contributor ("" if accepted). */
+  rolePolicyPublishUnauthorizedError: string;
+  /** Error from DEMO-029's actor-less PUBLISH ("" if accepted). */
+  rolePolicyPublishMissingActorError: string;
+  /** DEMO-029's state after both PUBLISH rejections (DRAFT). */
+  rolePolicyStateAfterPublishRejects: TaskState;
+  /** DEMO-029's history length after both PUBLISH rejections (0). */
+  rolePolicyHistoryLengthAfterPublishRejects: number;
+  /** Error from DEMO-029's ARBITRATE_APPROVE by contributor. */
+  rolePolicyArbitrateUnauthorizedError: string;
+  /** Error from DEMO-029's actor-less ARBITRATE_APPROVE. */
+  rolePolicyArbitrateMissingActorError: string;
+  /** DEMO-029's state after both arbitration rejections (DISPUTED). */
+  rolePolicyStateAfterArbitrateRejects: TaskState;
+  /** DEMO-029's history length after both arbitration rejections (7). */
+  rolePolicyHistoryLengthAfterArbitrateRejects: number;
+  /** Default task of the closing rolePolicy segment (DEMO-030). */
+  rolePolicyDefaultTask: TaskLifecycle;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -874,7 +933,10 @@ export interface DemoResult {
  * its notified event list, and its failed-dispatch
  * error, the keyed audit hash chain segment's dedicated
  * task with its correct-secret, wrong-secret, tampered
- * and no-secret verdicts, and the exact lines
+ * and no-secret verdicts, the event-level RBAC segment's
+ * pinned policy with its policy and default tasks, its
+ * publish and arbitration rejection errors, and its
+ * post-rejection states and history lengths, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -4007,7 +4069,168 @@ export async function runDemo(): Promise<DemoResult> {
     `  no secret: verifyHistoryChain without a secret: ${auditSecretUnkeyedVerified} (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Event-level RBAC segment (closing): every segment above
+  // dispatches with named actors, but nothing ever checked
+  // WHO may dispatch WHAT — the demo's actors were pure
+  // audit decoration. The opt-in `rolePolicy`
+  // (TaskLifecycleOptions, unit-tested since the RBAC tests
+  // landed) maps covered events to an actor allowlist:
+  // a covered dispatch whose actor is missing or outside
+  // the list throws `actor not authorized for …` before
+  // anything is appended; uncovered events skip the check
+  // entirely; a task built without a policy skips it
+  // everywhere. Two dedicated tasks are driven under fixed
+  // literal timestamps — no network, no randomness, no
+  // wall clock:
+  //   - DEMO-029 carries the pinned DEMO_ROLE_POLICY
+  //     (PUBLISH: [researcher], ACCEPT: [contributor],
+  //     ARBITRATE_APPROVE / ARBITRATE_REJECT:
+  //     [senior-moderator]). Its PUBLISH by contributor
+  //     and its actor-less PUBLISH are both rejected with
+  //     the pinned errors, leaving DRAFT / 0 entries; the
+  //     allowlisted researcher then publishes and the
+  //     allowlisted contributor accepts; the five
+  //     uncovered events (START_CAPTURE, SUBMIT,
+  //     BEGIN_REVIEW, REJECT, DISPUTE) run with no actor
+  //     at all to DISPUTED / 7 entries; arbitration by
+  //     contributor and actor-less arbitration are both
+  //     rejected, leaving DISPUTED / 7 entries; the
+  //     senior moderator then arbitrates to APPROVED.
+  //   - DEMO-030 carries no policy: the same drive to
+  //     DISPUTED and an actor-less ARBITRATE_APPROVE both
+  //     succeed — the pre-policy behavior, unchanged.
+  // Hand-written expectations — written out here from
+  // the TaskLifecycleOptions docs and the RBAC tests,
+  // never derived from the gate itself. The segment
+  // asserts all of this here, outside the printed lines:
+  // an authorization verdict that drifted would fail the
+  // demo itself, not just a test. Honest limit: the
+  // allowlist checks the actor NAME a dispatch carries;
+  // authenticating that the caller really is that actor
+  // is the caller's job, not this library's.
+  const rolePolicyTask = new TaskLifecycle("DEMO-029", {
+    rolePolicy: DEMO_ROLE_POLICY,
+  });
+  let rolePolicyPublishUnauthorizedError = "";
+  try {
+    rolePolicyTask.dispatch("PUBLISH", {
+      actor: "contributor",
+      at: "2026-04-06T09:00:00.000Z",
+    });
+  } catch (err) {
+    rolePolicyPublishUnauthorizedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  let rolePolicyPublishMissingActorError = "";
+  try {
+    rolePolicyTask.dispatch("PUBLISH", {
+      at: "2026-04-06T09:00:00.000Z",
+    });
+  } catch (err) {
+    rolePolicyPublishMissingActorError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const rolePolicyStateAfterPublishRejects = rolePolicyTask.state;
+  const rolePolicyHistoryLengthAfterPublishRejects =
+    rolePolicyTask.history.length;
+  rolePolicyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-06T09:00:00.000Z",
+  });
+  rolePolicyTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-06T09:05:00.000Z",
+  });
+  for (const [event, at] of [
+    ["START_CAPTURE", "2026-04-06T09:10:00.000Z"],
+    ["SUBMIT", "2026-04-06T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "2026-04-06T09:20:00.000Z"],
+    ["REJECT", "2026-04-06T09:25:00.000Z"],
+    ["DISPUTE", "2026-04-06T09:30:00.000Z"],
+  ] as const) {
+    rolePolicyTask.dispatch(event, { at });
+  }
+  let rolePolicyArbitrateUnauthorizedError = "";
+  try {
+    rolePolicyTask.dispatch("ARBITRATE_APPROVE", {
+      actor: "contributor",
+      at: "2026-04-06T09:35:00.000Z",
+    });
+  } catch (err) {
+    rolePolicyArbitrateUnauthorizedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  let rolePolicyArbitrateMissingActorError = "";
+  try {
+    rolePolicyTask.dispatch("ARBITRATE_APPROVE", {
+      at: "2026-04-06T09:35:00.000Z",
+    });
+  } catch (err) {
+    rolePolicyArbitrateMissingActorError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const rolePolicyStateAfterArbitrateRejects = rolePolicyTask.state;
+  const rolePolicyHistoryLengthAfterArbitrateRejects =
+    rolePolicyTask.history.length;
+  rolePolicyTask.dispatch("ARBITRATE_APPROVE", {
+    actor: "senior-moderator",
+    at: "2026-04-06T09:40:00.000Z",
+  });
+  const rolePolicyDefaultTask = new TaskLifecycle("DEMO-030");
+  for (const [event, at] of [
+    ["PUBLISH", "2026-04-06T09:00:00.000Z"],
+    ["ACCEPT", "2026-04-06T09:05:00.000Z"],
+    ["START_CAPTURE", "2026-04-06T09:10:00.000Z"],
+    ["SUBMIT", "2026-04-06T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "2026-04-06T09:20:00.000Z"],
+    ["REJECT", "2026-04-06T09:25:00.000Z"],
+    ["DISPUTE", "2026-04-06T09:30:00.000Z"],
+    ["ARBITRATE_APPROVE", "2026-04-06T09:35:00.000Z"],
+  ] as const) {
+    rolePolicyDefaultTask.dispatch(event, { at });
+  }
+  if (
+    rolePolicyPublishUnauthorizedError !==
+      'actor not authorized for PUBLISH: "contributor" is not in [researcher]' ||
+    rolePolicyPublishMissingActorError !==
+      "actor not authorized for PUBLISH: policy requires an actor in [researcher]" ||
+    rolePolicyStateAfterPublishRejects !== "DRAFT" ||
+    rolePolicyHistoryLengthAfterPublishRejects !== 0 ||
+    rolePolicyArbitrateUnauthorizedError !==
+      'actor not authorized for ARBITRATE_APPROVE: "contributor" is not in [senior-moderator]' ||
+    rolePolicyArbitrateMissingActorError !==
+      "actor not authorized for ARBITRATE_APPROVE: policy requires an actor in [senior-moderator]" ||
+    rolePolicyStateAfterArbitrateRejects !== "DISPUTED" ||
+    rolePolicyHistoryLengthAfterArbitrateRejects !== 7 ||
+    rolePolicyTask.state !== "APPROVED" ||
+    rolePolicyTask.history.length !== 8 ||
+    rolePolicyTask.history[0].event !== "PUBLISH" ||
+    rolePolicyTask.history[0].actor !== "researcher" ||
+    rolePolicyTask.history[0].at !== "2026-04-06T09:00:00.000Z" ||
+    rolePolicyTask.history[2].actor !== undefined ||
+    rolePolicyTask.history[7].event !== "ARBITRATE_APPROVE" ||
+    rolePolicyTask.history[7].actor !== "senior-moderator" ||
+    rolePolicyTask.history[7].at !== "2026-04-06T09:40:00.000Z" ||
+    rolePolicyDefaultTask.state !== "APPROVED" ||
+    rolePolicyDefaultTask.history.length !== 8 ||
+    rolePolicyDefaultTask.history[7].event !== "ARBITRATE_APPROVE" ||
+    rolePolicyDefaultTask.history[7].actor !== undefined
+  ) {
+    throw new Error(
+      "demo fixture broken: rolePolicy does not match the hand-pinned contract (a covered event must reject an actor outside the allowlist and a missing actor with the pinned errors and no state or history change, an allowlisted actor must advance the task, uncovered events must run actor-less, and a task without a policy must arbitrate actor-less exactly as before)",
+    );
+  }
+  lines.push(
+    "",
+    "Event-level RBAC (rolePolicy gates covered events to the listed actors):",
+    `  policy task DEMO-029 (constructed with rolePolicy { PUBLISH: [researcher], ACCEPT: [contributor], ARBITRATE_APPROVE: [senior-moderator], ARBITRATE_REJECT: [senior-moderator] }): PUBLISH by researcher at 2026-04-06T09:00:00.000Z -> OPEN; ACCEPT by contributor -> ACCEPTED (the allowlist is an authorization check on the actor name, not identity authentication — a real deployment authenticates its actors itself)`,
+    `  covered event, wrong or missing actor (DEMO-029): PUBLISH by contributor -> rejected: "${rolePolicyPublishUnauthorizedError}"; PUBLISH with no actor -> rejected: "${rolePolicyPublishMissingActorError}"; state after both rejections: ${rolePolicyStateAfterPublishRejects}, history entries: ${rolePolicyHistoryLengthAfterPublishRejects} (a rejected dispatch appends nothing — the check runs before the audit entry is written)`,
+    `  uncovered events are unrestricted (DEMO-029): START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT and DISPUTE with no actor at all -> DISPUTED, history entries: 7 (the policy lists only PUBLISH, ACCEPT and the two arbitration events — every other event skips the check entirely)`,
+    `  arbitration is moderator-only (DEMO-029): ARBITRATE_APPROVE by contributor -> rejected: "${rolePolicyArbitrateUnauthorizedError}"; ARBITRATE_APPROVE with no actor -> rejected: "${rolePolicyArbitrateMissingActorError}"; state after both rejections: ${rolePolicyStateAfterArbitrateRejects}, history entries: ${rolePolicyHistoryLengthAfterArbitrateRejects}; ARBITRATE_APPROVE by senior-moderator -> ${rolePolicyTask.state}, history entries: ${rolePolicyTask.history.length}`,
+    `  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> ${rolePolicyDefaultTask.state}, history entries: ${rolePolicyDefaultTask.history.length} (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

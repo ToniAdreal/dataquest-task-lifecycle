@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 570 tests, all local
+npm test   # 572 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1247,6 +1247,13 @@ library records the actor string it is given but cannot verify who
 "senior-moderator" really is. It guarantees policy violations never
 dispatch and every allowed dispatch is audited with its actor string.
 
+`npm run demo` closes with this segment: a task under a pinned policy
+(PUBLISH by researcher, ACCEPT by contributor, arbitration by
+senior-moderator) rejects wrong and missing actors with no history
+trace, advances under the allowlisted actors, runs its uncovered
+events actor-less, and a policy-free task arbitrates actor-less
+exactly as before.
+
 ## Dispatch subscriptions
 
 `dispatch()` has an in-process notification seam — the starting point
@@ -1402,7 +1409,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 570 tests covering the happy path, reject→resubmit
+`npm test` runs 572 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

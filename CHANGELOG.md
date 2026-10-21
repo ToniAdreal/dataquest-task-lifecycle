@@ -11,6 +11,35 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An event-level RBAC CLI demo segment:
+  `npm run demo` now closes with a dedicated task
+  (DEMO-029) constructed with a pinned `rolePolicy`
+  (PUBLISH: [researcher], ACCEPT: [contributor],
+  ARBITRATE_APPROVE / ARBITRATE_REJECT:
+  [senior-moderator]) and driven under fixed
+  timestamps. PUBLISH by contributor and an
+  actor-less PUBLISH are both rejected with the
+  pinned `actor not authorized for …` errors,
+  leaving DRAFT with zero history entries; the
+  allowlisted researcher publishes and the
+  allowlisted contributor accepts; the uncovered
+  events run with no actor at all to DISPUTED;
+  arbitration by contributor and actor-less
+  arbitration are likewise rejected with no trace,
+  and the senior moderator then arbitrates to
+  APPROVED. A second task (DEMO-030) built without
+  any policy is driven to DISPUTED and arbitrated
+  actor-less, pinning the unchanged pre-policy
+  default. The segment prints the honest limit
+  itself: an allowlist is an authorization check
+  on the actor name, not identity authentication.
+  The demo tests gain two cases for the segment
+  (in-process verdicts with independent
+  reproduction, and byte-identical determinism),
+  for 572 tests in total. No network, no
+  randomness, and no wall clock. Demo only; no
+  library behavior change.
+
 - A dispatch payout-reference enforcement benchmark
   path: `npm run bench` now also times
   `dispatch("PAYOUT_COMPLETE", { payoutRef })` on a

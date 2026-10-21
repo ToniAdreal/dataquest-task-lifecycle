@@ -8,6 +8,7 @@ import {
   runDemo,
   DEMO_AUDIT_SECRET,
   DEMO_AUDIT_WRONG_SECRET,
+  DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
   DEMO_WEBHOOK_SECRET,
@@ -482,11 +483,18 @@ Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC
   keyed task DEMO-028 (constructed with auditSecret, driven PUBLISH -> SUBMIT under fixed timestamps): history entries: 4; verifyHistoryChain with the correct secret: true (every link is HMAC-SHA256 keyed by the pinned secret — the secret itself is never printed)
   wrong secret: verifyHistoryChain: false (the same history under a different secret recomputes no link — verification fails closed as false, never a throw)
   tampered copy: middle entry START_CAPTURE gains payoutAmount 999 — verifyHistoryChain with the correct secret: false (tamper detected: the stored HMAC no longer recomputes); original history after the tamper check: verifyHistoryChain: true (detached copy — the keyed task's own history is untouched)
-  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)`;
+  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)
+
+Event-level RBAC (rolePolicy gates covered events to the listed actors):
+  policy task DEMO-029 (constructed with rolePolicy { PUBLISH: [researcher], ACCEPT: [contributor], ARBITRATE_APPROVE: [senior-moderator], ARBITRATE_REJECT: [senior-moderator] }): PUBLISH by researcher at <timestamp> -> OPEN; ACCEPT by contributor -> ACCEPTED (the allowlist is an authorization check on the actor name, not identity authentication — a real deployment authenticates its actors itself)
+  covered event, wrong or missing actor (DEMO-029): PUBLISH by contributor -> rejected: "actor not authorized for PUBLISH: \"contributor\" is not in [researcher]"; PUBLISH with no actor -> rejected: "actor not authorized for PUBLISH: policy requires an actor in [researcher]"; state after both rejections: DRAFT, history entries: 0 (a rejected dispatch appends nothing — the check runs before the audit entry is written)
+  uncovered events are unrestricted (DEMO-029): START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT and DISPUTE with no actor at all -> DISPUTED, history entries: 7 (the policy lists only PUBLISH, ACCEPT and the two arbitration events — every other event skips the check entirely)
+  arbitration is moderator-only (DEMO-029): ARBITRATE_APPROVE by contributor -> rejected: "actor not authorized for ARBITRATE_APPROVE: \"contributor\" is not in [senior-moderator]"; ARBITRATE_APPROVE with no actor -> rejected: "actor not authorized for ARBITRATE_APPROVE: policy requires an actor in [senior-moderator]"; state after both rejections: DISPUTED, history entries: 7; ARBITRATE_APPROVE by senior-moderator -> APPROVED, history entries: 8
+  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 415);
+  assert.equal(lines.length, 422);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1931,7 +1939,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 415);
+  assert.equal(out.trimEnd().split("\n").length, 422);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -4613,9 +4621,9 @@ test("demo shows the keyed audit hash chain segment in-process: correct secret v
     }),
     true,
   );
-  // The segment closes the demo: it follows the dispatch
-  // idempotency key segment, prints its lines verbatim,
-  // and its no-secret line is the demo's last line.
+  // The segment follows the dispatch idempotency key
+  // segment and prints its lines verbatim (the event-level
+  // RBAC segment now closes the demo after it).
   const auditAt = text.indexOf(
     "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
   );
@@ -4634,9 +4642,11 @@ test("demo shows the keyed audit hash chain segment in-process: correct secret v
   ]) {
     assert.ok(text.includes(line), `missing keyed audit line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  no secret: verifyHistoryChain without a secret: false (a keyed chain never verifies unkeyed — fail-closed both ways, exactly as an unkeyed chain never verifies under a secret)",
+  assert.ok(
+    text.indexOf(
+      "Event-level RBAC (rolePolicy gates covered events to the listed actors):",
+    ) > auditAt,
+    "event-level RBAC segment must follow the keyed audit hash chain segment",
   );
 });
 
@@ -4644,6 +4654,7 @@ test("demo keyed audit hash chain segment is deterministic: two runs print byte-
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):"),
+      ls.indexOf("Event-level RBAC (rolePolicy gates covered events to the listed actors):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4661,4 +4672,221 @@ test("demo keyed audit hash chain segment is deterministic: two runs print byte-
   assert.equal(a.auditSecretWrongVerified, b.auditSecretWrongVerified);
   assert.equal(a.auditSecretTamperedVerified, b.auditSecretTamperedVerified);
   assert.equal(a.auditSecretUnkeyedVerified, b.auditSecretUnkeyedVerified);
+});
+
+test("demo shows the event-level RBAC segment in-process: allowlisted actors advance, wrong or missing actors are rejected without a trace, uncovered events and policy-free tasks are unrestricted", async () => {
+  const {
+    rolePolicyTask,
+    rolePolicy,
+    rolePolicyPublishUnauthorizedError,
+    rolePolicyPublishMissingActorError,
+    rolePolicyStateAfterPublishRejects,
+    rolePolicyHistoryLengthAfterPublishRejects,
+    rolePolicyArbitrateUnauthorizedError,
+    rolePolicyArbitrateMissingActorError,
+    rolePolicyStateAfterArbitrateRejects,
+    rolePolicyHistoryLengthAfterArbitrateRejects,
+    rolePolicyDefaultTask,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/rbac.test.ts, never derived from the gate itself.
+  assert.deepEqual(DEMO_ROLE_POLICY, {
+    PUBLISH: ["researcher"],
+    ACCEPT: ["contributor"],
+    ARBITRATE_APPROVE: ["senior-moderator"],
+    ARBITRATE_REJECT: ["senior-moderator"],
+  });
+  assert.deepEqual(rolePolicy, DEMO_ROLE_POLICY);
+  assert.equal(rolePolicyTask.id, "DEMO-029");
+  assert.equal(rolePolicyTask.state, "APPROVED");
+  assert.equal(rolePolicyTask.history.length, 8);
+  assert.equal(
+    rolePolicyPublishUnauthorizedError,
+    'actor not authorized for PUBLISH: "contributor" is not in [researcher]',
+  );
+  assert.equal(
+    rolePolicyPublishMissingActorError,
+    "actor not authorized for PUBLISH: policy requires an actor in [researcher]",
+  );
+  assert.equal(rolePolicyStateAfterPublishRejects, "DRAFT");
+  assert.equal(rolePolicyHistoryLengthAfterPublishRejects, 0);
+  assert.equal(
+    rolePolicyArbitrateUnauthorizedError,
+    'actor not authorized for ARBITRATE_APPROVE: "contributor" is not in [senior-moderator]',
+  );
+  assert.equal(
+    rolePolicyArbitrateMissingActorError,
+    "actor not authorized for ARBITRATE_APPROVE: policy requires an actor in [senior-moderator]",
+  );
+  assert.equal(rolePolicyStateAfterArbitrateRejects, "DISPUTED");
+  assert.equal(rolePolicyHistoryLengthAfterArbitrateRejects, 7);
+  assert.equal(rolePolicyTask.history[0].event, "PUBLISH");
+  assert.equal(rolePolicyTask.history[0].actor, "researcher");
+  assert.equal(rolePolicyTask.history[0].at, "2026-04-06T09:00:00.000Z");
+  assert.equal(rolePolicyTask.history[2].actor, undefined);
+  assert.equal(rolePolicyTask.history[7].event, "ARBITRATE_APPROVE");
+  assert.equal(rolePolicyTask.history[7].actor, "senior-moderator");
+  assert.equal(rolePolicyTask.history[7].at, "2026-04-06T09:40:00.000Z");
+  assert.equal(rolePolicyDefaultTask.id, "DEMO-030");
+  assert.equal(rolePolicyDefaultTask.state, "APPROVED");
+  assert.equal(rolePolicyDefaultTask.history.length, 8);
+  assert.equal(rolePolicyDefaultTask.history[7].event, "ARBITRATE_APPROVE");
+  assert.equal(rolePolicyDefaultTask.history[7].actor, undefined);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here under
+  // the same policy and fixed timestamps reproduce every
+  // verdict on their own (the script from the RBAC tests).
+  const independent = new TaskLifecycle("test-rbac-demo", {
+    rolePolicy: DEMO_ROLE_POLICY,
+  });
+  assert.throws(
+    () =>
+      independent.dispatch("PUBLISH", {
+        actor: "contributor",
+        at: "2026-04-06T09:00:00.000Z",
+      }),
+    /actor not authorized for PUBLISH: "contributor" is not in \[researcher\]/,
+  );
+  assert.throws(
+    () => independent.dispatch("PUBLISH", { at: "2026-04-06T09:00:00.000Z" }),
+    /actor not authorized for PUBLISH: policy requires an actor in \[researcher\]/,
+  );
+  assert.equal(independent.state, "DRAFT");
+  assert.equal(independent.history.length, 0);
+  independent.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-06T09:00:00.000Z",
+  });
+  independent.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-06T09:05:00.000Z",
+  });
+  for (const [event, at] of [
+    ["START_CAPTURE", "2026-04-06T09:10:00.000Z"],
+    ["SUBMIT", "2026-04-06T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "2026-04-06T09:20:00.000Z"],
+    ["REJECT", "2026-04-06T09:25:00.000Z"],
+    ["DISPUTE", "2026-04-06T09:30:00.000Z"],
+  ] as const) {
+    independent.dispatch(event, { at });
+  }
+  assert.equal(independent.state, "DISPUTED");
+  assert.throws(
+    () =>
+      independent.dispatch("ARBITRATE_APPROVE", {
+        actor: "contributor",
+        at: "2026-04-06T09:35:00.000Z",
+      }),
+    /actor not authorized for ARBITRATE_APPROVE: "contributor" is not in \[senior-moderator\]/,
+  );
+  assert.equal(independent.history.length, 7);
+  independent.dispatch("ARBITRATE_APPROVE", {
+    actor: "senior-moderator",
+    at: "2026-04-06T09:40:00.000Z",
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(independent.history)),
+    JSON.parse(JSON.stringify(rolePolicyTask.history)),
+  );
+  const independentDefault = new TaskLifecycle("test-rbac-demo-default");
+  for (const [event, at] of [
+    ["PUBLISH", "2026-04-06T09:00:00.000Z"],
+    ["ACCEPT", "2026-04-06T09:05:00.000Z"],
+    ["START_CAPTURE", "2026-04-06T09:10:00.000Z"],
+    ["SUBMIT", "2026-04-06T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "2026-04-06T09:20:00.000Z"],
+    ["REJECT", "2026-04-06T09:25:00.000Z"],
+    ["DISPUTE", "2026-04-06T09:30:00.000Z"],
+    ["ARBITRATE_APPROVE", "2026-04-06T09:35:00.000Z"],
+  ] as const) {
+    independentDefault.dispatch(event, { at });
+  }
+  assert.equal(independentDefault.state, "APPROVED");
+  // The segment closes the demo: it follows the keyed
+  // audit hash chain segment, prints its lines verbatim,
+  // and its no-policy line is the demo's last line.
+  const rbacAt = text.indexOf(
+    "Event-level RBAC (rolePolicy gates covered events to the listed actors):",
+  );
+  assert.ok(
+    rbacAt >
+      text.indexOf(
+        "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
+      ),
+    "event-level RBAC segment must follow the keyed audit hash chain segment",
+  );
+  for (const line of [
+    "  policy task DEMO-029 (constructed with rolePolicy { PUBLISH: [researcher], ACCEPT: [contributor], ARBITRATE_APPROVE: [senior-moderator], ARBITRATE_REJECT: [senior-moderator] }): PUBLISH by researcher at 2026-04-06T09:00:00.000Z -> OPEN; ACCEPT by contributor -> ACCEPTED (the allowlist is an authorization check on the actor name, not identity authentication — a real deployment authenticates its actors itself)",
+    "  covered event, wrong or missing actor (DEMO-029): PUBLISH by contributor -> rejected: \"actor not authorized for PUBLISH: \"contributor\" is not in [researcher]\"; PUBLISH with no actor -> rejected: \"actor not authorized for PUBLISH: policy requires an actor in [researcher]\"; state after both rejections: DRAFT, history entries: 0 (a rejected dispatch appends nothing — the check runs before the audit entry is written)",
+    "  uncovered events are unrestricted (DEMO-029): START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT and DISPUTE with no actor at all -> DISPUTED, history entries: 7 (the policy lists only PUBLISH, ACCEPT and the two arbitration events — every other event skips the check entirely)",
+    "  arbitration is moderator-only (DEMO-029): ARBITRATE_APPROVE by contributor -> rejected: \"actor not authorized for ARBITRATE_APPROVE: \"contributor\" is not in [senior-moderator]\"; ARBITRATE_APPROVE with no actor -> rejected: \"actor not authorized for ARBITRATE_APPROVE: policy requires an actor in [senior-moderator]\"; state after both rejections: DISPUTED, history entries: 7; ARBITRATE_APPROVE by senior-moderator -> APPROVED, history entries: 8",
+    "  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)",
+  ]) {
+    assert.ok(text.includes(line), `missing RBAC line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    "  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)",
+  );
+});
+
+test("demo event-level RBAC segment is deterministic: two runs print byte-identical RBAC lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Event-level RBAC (rolePolicy gates covered events to the listed actors):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + policy / covered-rejection / uncovered /
+  // arbitration / no-policy lines; every value in the
+  // segment is a fixed literal (a pinned policy, fixed
+  // timestamps, pinned errors), so no normalization is
+  // needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.rolePolicy, b.rolePolicy);
+  assert.equal(a.rolePolicyTask.state, b.rolePolicyTask.state);
+  assert.deepEqual(a.rolePolicyTask.history, b.rolePolicyTask.history);
+  assert.equal(
+    a.rolePolicyPublishUnauthorizedError,
+    b.rolePolicyPublishUnauthorizedError,
+  );
+  assert.equal(
+    a.rolePolicyPublishMissingActorError,
+    b.rolePolicyPublishMissingActorError,
+  );
+  assert.equal(
+    a.rolePolicyStateAfterPublishRejects,
+    b.rolePolicyStateAfterPublishRejects,
+  );
+  assert.equal(
+    a.rolePolicyHistoryLengthAfterPublishRejects,
+    b.rolePolicyHistoryLengthAfterPublishRejects,
+  );
+  assert.equal(
+    a.rolePolicyArbitrateUnauthorizedError,
+    b.rolePolicyArbitrateUnauthorizedError,
+  );
+  assert.equal(
+    a.rolePolicyArbitrateMissingActorError,
+    b.rolePolicyArbitrateMissingActorError,
+  );
+  assert.equal(
+    a.rolePolicyStateAfterArbitrateRejects,
+    b.rolePolicyStateAfterArbitrateRejects,
+  );
+  assert.equal(
+    a.rolePolicyHistoryLengthAfterArbitrateRejects,
+    b.rolePolicyHistoryLengthAfterArbitrateRejects,
+  );
+  assert.equal(a.rolePolicyDefaultTask.state, b.rolePolicyDefaultTask.state);
+  assert.deepEqual(
+    a.rolePolicyDefaultTask.history,
+    b.rolePolicyDefaultTask.history,
+  );
 });
