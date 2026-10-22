@@ -512,11 +512,18 @@ Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves ti
   pinned override, hanging receiver (slow, https://slow.example.com/hooks/payout): per-endpoint timeoutMs 50 overrides the call-level 5000; the endpoint's own injected fetch never answers on its own and only settles when the per-attempt abort fires -> ok=false attempts=3 error="webhook delivery timed out after 50ms"; fetch calls: 3 (a timeout is a retryable failure, so the endpoint burns all 3 attempts at 50 ms each — the waits are the behaviour under test itself, at their pinned short length, and no elapsed duration is asserted)
   no override, same call (billing + notifications): neither endpoint pins timeoutMs, so the call-level 5000 applies and both answer 200 at once -> billing ok=true attempts=1 status=200, notifications ok=true attempts=1 status=200; fan-out: 2 delivered, 1 failed — results stay in input order (billing, slow, notifications) and the timed-out endpoint did not block the others
   invalid override, isolated failure (notifications): per-endpoint timeoutMs 0 -> its result is exactly { ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }; fetch calls to that endpoint: 0; billing and slow (answering 200 at once in this call) are unchanged at ok=true attempts=1 status=200 — a bad per-endpoint override is reported for its own endpoint only, where the same value at call level would throw for the whole call before any request
-  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)`;
+  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)
+
+Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):
+  correct guard (DEMO-033): driven PUBLISH -> ACCEPT under fixed timestamps to seq 2 (state ACCEPTED, history entries: 2); START_CAPTURE with expectedSeq 2 at <timestamp> -> CAPTURING, history entries: 3; last entry: seq 3 START_CAPTURE ACCEPTED -> CAPTURING by contributor (the caller pinned the seq it based its decision on and the task was still there, so exactly one step advances)
+  stale guard (DEMO-034): the same pinned 2-entry history; START_CAPTURE with expectedSeq 1 -> rejected: "dispatch conflict: expected seq 1 but task is at seq 2"; state after: ACCEPTED, history entries: 2 (the guard runs before every other dispatch check and changes nothing — no state move, no history entry — so a writer holding a stale snapshot fails loudly instead of advancing a state it never saw, and re-reading the task and retrying with the fresh seq works)
+  empty history (DEMO-035): a fresh task (history entries: 0); PUBLISH with expectedSeq 0 -> OPEN, history entries: 1 (0 is the guard for an empty history — the seq is the history length, which is the last entry's seq once entries exist)
+  illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got -1"; PUBLISH with expectedSeq 1.5 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5"; state after both: DRAFT, history entries: 0 (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)
+  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 442);
+  assert.equal(lines.length, 449);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1961,7 +1968,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 442);
+  assert.equal(out.trimEnd().split("\n").length, 449);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5422,9 +5429,9 @@ test("demo shows the payout webhook fan-out timeout override segment in-process:
     eventId: EVENT_ID,
   });
   assert.deepEqual(independentPlain, fanoutTimeoutPlainResult);
-  // The segment closes the demo: it follows the payout
-  // webhook timeout segment, prints its lines verbatim,
-  // and its no-overrides line is the demo's last line.
+  // The segment follows the payout webhook timeout
+  // segment and prints its lines verbatim, and the
+  // dispatch expectedSeq segment follows it.
   const fanoutTimeoutAt = text.indexOf(
     "Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):",
   );
@@ -5444,17 +5451,19 @@ test("demo shows the payout webhook fan-out timeout override segment in-process:
   ]) {
     assert.ok(text.includes(line), `missing fan-out timeout line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
+  assert.ok(
+    text.indexOf(
+      "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+    ) > fanoutTimeoutAt,
+    "expectedSeq segment must follow the fan-out timeout override segment",
   );
 });
 
 test("demo payout webhook fan-out timeout override segment is deterministic: two runs print byte-identical fan-out timeout lines", async () => {
-  const segment = (ls: string[]) =>
-    ls.slice(
-      ls.indexOf("Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):"),
-    );
+  const segment = (ls: string[]) => {
+    const start = ls.indexOf("Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):");
+    return ls.slice(start, start + 6);
+  };
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -5478,4 +5487,202 @@ test("demo payout webhook fan-out timeout override segment is deterministic: two
     b.fanoutTimeoutInvalidFetchCalls,
   );
   assert.deepEqual(a.fanoutTimeoutPlainResult, b.fanoutTimeoutPlainResult);
+});
+
+test("demo shows the dispatch expectedSeq segment in-process: a correct guard advances one step, a stale guard conflicts untouched, 0 guards an empty history, illegal values throw, and no guard is unchanged", async () => {
+  const {
+    expectedSeqTask,
+    expectedSeqGuardedReturn,
+    expectedSeqConflictTask,
+    expectedSeqConflictError,
+    expectedSeqConflictStateAfter,
+    expectedSeqConflictHistoryLengthAfter,
+    expectedSeqEmptyTask,
+    expectedSeqEmptyReturn,
+    expectedSeqIllegalTask,
+    expectedSeqNegativeError,
+    expectedSeqFractionError,
+    expectedSeqUnguardedTask,
+    expectedSeqUnguardedReturn,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // DispatchOptions docs in src/taskLifecycle.ts and
+  // test/expectedSeq.test.ts, never derived from the
+  // demo's own dispatches.
+  const AT = (s: number) =>
+    new Date(Date.parse("2026-03-22T09:00:00.000Z") + s * 1000).toISOString();
+  assert.equal(expectedSeqGuardedReturn, "CAPTURING");
+  assert.equal(expectedSeqTask.id, "DEMO-033");
+  assert.equal(expectedSeqTask.state, "CAPTURING");
+  assert.equal(expectedSeqTask.history.length, 3);
+  assert.deepEqual(
+    expectedSeqTask.history.map((h) => [h.seq, h.event, h.from, h.to, h.at, h.actor]),
+    [
+      [1, "PUBLISH", "DRAFT", "OPEN", AT(0), "researcher"],
+      [2, "ACCEPT", "OPEN", "ACCEPTED", AT(1), "contributor"],
+      [3, "START_CAPTURE", "ACCEPTED", "CAPTURING", AT(2), "contributor"],
+    ],
+  );
+  assert.equal(
+    expectedSeqConflictError,
+    "dispatch conflict: expected seq 1 but task is at seq 2",
+  );
+  assert.equal(expectedSeqConflictStateAfter, "ACCEPTED");
+  assert.equal(expectedSeqConflictHistoryLengthAfter, 2);
+  assert.equal(expectedSeqConflictTask.state, "ACCEPTED");
+  assert.equal(expectedSeqConflictTask.history.length, 2);
+  assert.equal(expectedSeqEmptyReturn, "OPEN");
+  assert.equal(expectedSeqEmptyTask.state, "OPEN");
+  assert.equal(expectedSeqEmptyTask.history.length, 1);
+  assert.equal(expectedSeqEmptyTask.history[0].seq, 1);
+  assert.equal(
+    expectedSeqNegativeError,
+    "invalid dispatch options: expectedSeq must be a non-negative integer, got -1",
+  );
+  assert.equal(
+    expectedSeqFractionError,
+    "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5",
+  );
+  assert.equal(expectedSeqIllegalTask.state, "DRAFT");
+  assert.equal(expectedSeqIllegalTask.history.length, 0);
+  assert.equal(expectedSeqUnguardedReturn, "CAPTURING");
+  assert.equal(expectedSeqUnguardedTask.state, "CAPTURING");
+  assert.equal(expectedSeqUnguardedTask.history.length, 3);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the same five forms are driven
+  // here on fresh tasks.
+  const build = (id: string) => {
+    const t = new TaskLifecycle(id);
+    t.dispatch("PUBLISH", { actor: "researcher", at: AT(0) });
+    t.dispatch("ACCEPT", { actor: "contributor", at: AT(1) });
+    return t;
+  };
+  const independentGuarded = build("TEST-SEQ-001");
+  assert.equal(
+    independentGuarded.dispatch("START_CAPTURE", {
+      actor: "contributor",
+      at: AT(2),
+      expectedSeq: 2,
+    }),
+    expectedSeqGuardedReturn,
+  );
+  assert.deepEqual(
+    independentGuarded.history.map((h) => [h.seq, h.event, h.from, h.to, h.at, h.actor]),
+    expectedSeqTask.history.map((h) => [h.seq, h.event, h.from, h.to, h.at, h.actor]),
+  );
+  const independentConflict = build("TEST-SEQ-002");
+  const independentHistoryBefore = historyToNdjson(independentConflict.history);
+  assert.throws(
+    () =>
+      independentConflict.dispatch("START_CAPTURE", {
+        actor: "contributor",
+        at: AT(2),
+        expectedSeq: 1,
+      }),
+    (err: unknown) =>
+      err instanceof Error && err.message === expectedSeqConflictError,
+  );
+  assert.equal(independentConflict.state, expectedSeqConflictStateAfter);
+  assert.equal(
+    historyToNdjson(independentConflict.history),
+    independentHistoryBefore,
+  );
+  const independentEmpty = new TaskLifecycle("TEST-SEQ-003");
+  assert.equal(
+    independentEmpty.dispatch("PUBLISH", {
+      actor: "researcher",
+      at: AT(0),
+      expectedSeq: 0,
+    }),
+    expectedSeqEmptyReturn,
+  );
+  const independentIllegal = new TaskLifecycle("TEST-SEQ-004");
+  for (const [bad, pinned] of [
+    [-1, expectedSeqNegativeError],
+    [1.5, expectedSeqFractionError],
+  ] as Array<[number, string]>) {
+    assert.throws(
+      () =>
+        independentIllegal.dispatch("PUBLISH", {
+          actor: "researcher",
+          at: AT(0),
+          expectedSeq: bad,
+        }),
+      (err: unknown) => err instanceof Error && err.message === pinned,
+    );
+  }
+  assert.equal(independentIllegal.state, "DRAFT");
+  assert.equal(independentIllegal.history.length, 0);
+  const independentUnguarded = build("TEST-SEQ-005");
+  assert.equal(
+    independentUnguarded.dispatch("START_CAPTURE", {
+      actor: "contributor",
+      at: AT(2),
+    }),
+    expectedSeqUnguardedReturn,
+  );
+  // The segment closes the demo: it follows the fan-out
+  // timeout override segment, prints its lines verbatim,
+  // and its no-guard line is the demo's last line.
+  const expectedSeqAt = text.indexOf(
+    "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+  );
+  assert.ok(
+    expectedSeqAt >
+      text.indexOf(
+        "Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):",
+      ),
+    "expectedSeq segment must follow the fan-out timeout override segment",
+  );
+  for (const line of [
+    `  correct guard (DEMO-033): driven PUBLISH -> ACCEPT under fixed timestamps to seq 2 (state ACCEPTED, history entries: 2); START_CAPTURE with expectedSeq 2 at ${AT(2)} -> CAPTURING, history entries: 3; last entry: seq 3 START_CAPTURE ACCEPTED -> CAPTURING by contributor (the caller pinned the seq it based its decision on and the task was still there, so exactly one step advances)`,
+    `  stale guard (DEMO-034): the same pinned 2-entry history; START_CAPTURE with expectedSeq 1 -> rejected: "dispatch conflict: expected seq 1 but task is at seq 2"; state after: ACCEPTED, history entries: 2 (the guard runs before every other dispatch check and changes nothing — no state move, no history entry — so a writer holding a stale snapshot fails loudly instead of advancing a state it never saw, and re-reading the task and retrying with the fresh seq works)`,
+    `  empty history (DEMO-035): a fresh task (history entries: 0); PUBLISH with expectedSeq 0 -> OPEN, history entries: 1 (0 is the guard for an empty history — the seq is the history length, which is the last entry's seq once entries exist)`,
+    `  illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got -1"; PUBLISH with expectedSeq 1.5 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5"; state after both: DRAFT, history entries: 0 (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)`,
+    `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)`,
+  ]) {
+    assert.ok(text.includes(line), `missing expectedSeq line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)`,
+  );
+});
+
+test("demo dispatch expectedSeq segment is deterministic: two runs print byte-identical expectedSeq lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + correct / stale / empty / illegal / no-guard
+  // lines; every value in the segment is a pinned literal
+  // (fixed timestamps, the pinned conflict and
+  // configuration error texts), so no normalization is
+  // needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.expectedSeqGuardedReturn, b.expectedSeqGuardedReturn);
+  assert.equal(a.expectedSeqConflictError, b.expectedSeqConflictError);
+  assert.equal(
+    a.expectedSeqConflictStateAfter,
+    b.expectedSeqConflictStateAfter,
+  );
+  assert.equal(
+    a.expectedSeqConflictHistoryLengthAfter,
+    b.expectedSeqConflictHistoryLengthAfter,
+  );
+  assert.equal(a.expectedSeqEmptyReturn, b.expectedSeqEmptyReturn);
+  assert.equal(a.expectedSeqNegativeError, b.expectedSeqNegativeError);
+  assert.equal(a.expectedSeqFractionError, b.expectedSeqFractionError);
+  assert.equal(a.expectedSeqUnguardedReturn, b.expectedSeqUnguardedReturn);
+  assert.deepEqual(
+    a.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
+    b.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
+  );
 });

@@ -11,6 +11,37 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch `expectedSeq` optimistic-concurrency
+  CLI demo segment: `npm run demo` now closes with
+  five dedicated tasks under fixed timestamps acting
+  out the `dispatch(event, { expectedSeq })` guard —
+  a task driven to a pinned 2-entry ACCEPTED history
+  advances exactly one step under `START_CAPTURE`
+  with `expectedSeq: 2`, its last entry hand-pinned
+  (seq 3, START_CAPTURE, ACCEPTED -> CAPTURING, the
+  pinned instant and actor); a second task at the
+  same history rejects the same dispatch with a
+  stale `expectedSeq: 1` with exactly
+  `dispatch conflict: expected seq 1 but task is at seq 2`,
+  its state and history byte-identical afterwards
+  through the canonical NDJSON serializer; a fresh
+  task advances under `expectedSeq: 0`, the guard
+  for an empty history; `-1` and `1.5` throw exactly
+  their pinned
+  `invalid dispatch options: expectedSeq must be a non-negative integer, got …`
+  configuration errors and append nothing; and a
+  task dispatched with no `expectedSeq` at all
+  advances exactly as before the guard existed.
+  Honest limit: the guard is a single-process
+  optimistic lock against the in-memory history —
+  cross-process writers still need compare-and-swap
+  in the durable store itself. The demo tests gain
+  two cases for the segment (in-process verdicts
+  with independent reproduction, and byte-identical
+  determinism), for 580 tests in total. No network
+  and no randomness. Demo only; no library behavior
+  change.
+
 - A payout webhook `timeoutMs` timeout benchmark
   path: `npm run bench` now also times
   `deliverPayoutWebhook` delivering the fixed signed

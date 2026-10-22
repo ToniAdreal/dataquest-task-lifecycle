@@ -406,9 +406,38 @@
  * behaves exactly as the fan-out segment above did.
  * Honest limit, as in the timeout segment: the 50 ms
  * waits are the behaviour under test itself, at their
- * pinned short length — the segment asserts the
+ * length — the segment asserts the
  * reported results and the fetch counts, never an
  * elapsed wall-clock duration.
+ * and finally a dispatch `expectedSeq` optimistic
+ * concurrency segment: five dedicated tasks under
+ * fixed timestamps (zero network, zero randomness)
+ * act out the `dispatch(event, { expectedSeq })`
+ * guard a reader has only seen asserted by the
+ * expectedSeq tests and timed by the benchmark —
+ * DEMO-033 is driven to a pinned 2-entry ACCEPTED
+ * history and advances exactly one step under
+ * `START_CAPTURE` with `expectedSeq: 2`, its last
+ * entry hand-pinned (seq 3, START_CAPTURE,
+ * ACCEPTED -> CAPTURING, the pinned instant and
+ * actor); DEMO-034 at the same pinned history
+ * rejects the same dispatch with a stale
+ * `expectedSeq: 1` with the pinned
+ * `dispatch conflict: expected seq 1 but task is at seq 2`
+ * error and its state and history are byte-identical
+ * afterwards (through the canonical NDJSON
+ * serializer); a fresh DEMO-035 advances under
+ * `expectedSeq: 0`, the guard for an empty history;
+ * a DEMO-036 probe rejects `-1` and `1.5` with their
+ * pinned `invalid dispatch options: …` configuration
+ * errors and appends nothing; and DEMO-037, at the
+ * same pinned history, advances under a dispatch
+ * with no `expectedSeq` at all, exactly as before
+ * the guard existed. Honest limit, as in the
+ * DispatchOptions docs: this is a single-process
+ * optimistic lock against the in-memory history —
+ * cross-process writers still need compare-and-swap
+ * in the durable store itself.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -920,6 +949,32 @@ export interface DemoResult {
   fanoutTimeoutInvalidFetchCalls: number;
   /** Aggregate result of the no-override fan-out call (3 delivered, 0 failed). */
   fanoutTimeoutPlainResult: DeliverPayoutWebhookToManyResult;
+  /** Guarded task of the closing expectedSeq segment (DEMO-033, CAPTURING, 3 entries). */
+  expectedSeqTask: TaskLifecycle;
+  /** Return of DEMO-033's guarded START_CAPTURE (CAPTURING). */
+  expectedSeqGuardedReturn: TaskState;
+  /** Conflict task of the closing expectedSeq segment (DEMO-034). */
+  expectedSeqConflictTask: TaskLifecycle;
+  /** Error from DEMO-034's stale expectedSeq dispatch ("" if accepted). */
+  expectedSeqConflictError: string;
+  /** DEMO-034's state after the conflict (ACCEPTED). */
+  expectedSeqConflictStateAfter: TaskState;
+  /** DEMO-034's history length after the conflict (2). */
+  expectedSeqConflictHistoryLengthAfter: number;
+  /** Empty-history task of the closing expectedSeq segment (DEMO-035). */
+  expectedSeqEmptyTask: TaskLifecycle;
+  /** Return of DEMO-035's PUBLISH under expectedSeq 0 (OPEN). */
+  expectedSeqEmptyReturn: TaskState;
+  /** Probe task of the closing expectedSeq segment (DEMO-036, DRAFT, 0 entries). */
+  expectedSeqIllegalTask: TaskLifecycle;
+  /** Error from DEMO-036's expectedSeq -1 dispatch ("" if accepted). */
+  expectedSeqNegativeError: string;
+  /** Error from DEMO-036's expectedSeq 1.5 dispatch ("" if accepted). */
+  expectedSeqFractionError: string;
+  /** Unguarded task of the closing expectedSeq segment (DEMO-037, CAPTURING, 3 entries). */
+  expectedSeqUnguardedTask: TaskLifecycle;
+  /** Return of DEMO-037's START_CAPTURE with no expectedSeq (CAPTURING). */
+  expectedSeqUnguardedReturn: TaskState;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -1095,7 +1150,12 @@ export interface DemoResult {
  * segment's call-level and per-endpoint pinned
  * `timeoutMs` values with its override, invalid-override
  * and no-override aggregate results and its hanging,
- * fast and invalid-endpoint fetch-call counts, and the exact lines
+ * fast and invalid-endpoint fetch-call counts, the
+ * dispatch expectedSeq optimistic concurrency
+ * segment's guarded, conflict, empty-history,
+ * illegal-value and unguarded tasks with its pinned
+ * conflict and configuration errors and its
+ * post-rejection states and history lengths, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -4875,7 +4935,190 @@ export async function runDemo(): Promise<DemoResult> {
     `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: ${fanoutTimeoutPlainResult.delivered} delivered, ${fanoutTimeoutPlainResult.failed} failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Dispatch expectedSeq optimistic concurrency segment
+  // (closing): every dispatch above moves its task
+  // forward on the caller's word alone. None of them
+  // shows the optimistic-concurrency guard —
+  // `dispatch(event, { expectedSeq })`
+  // (taskLifecycle, unit-tested since the expectedSeq
+  // tests landed and timed by the benchmark) — under
+  // which the caller pins the history length (the
+  // last entry's `seq`; 0 for an empty history) it
+  // based its decision on, and the guard runs before
+  // every other dispatch check. Here five dedicated
+  // tasks act it out under fixed timestamps — zero
+  // network, zero randomness:
+  //   - correct guard: DEMO-033 is driven PUBLISH ->
+  //     ACCEPT (researcher / contributor, at the
+  //     pinned base instant and base + 1s) to a pinned
+  //     2-entry history in ACCEPTED, and
+  //     `START_CAPTURE` with `expectedSeq: 2` at
+  //     base + 2s advances it exactly one step: the
+  //     dispatch returns CAPTURING, the history grows
+  //     to exactly 3 entries, and the last entry is
+  //     seq 3 / START_CAPTURE / ACCEPTED -> CAPTURING
+  //     at base + 2s, carrying the pinned actor.
+  //   - stale guard: DEMO-034, at the same pinned
+  //     2-entry history, rejects the same dispatch
+  //     with `expectedSeq: 1` with exactly
+  //     `dispatch conflict: expected seq 1 but task is at seq 2`
+  //     and changes nothing — the state stays
+  //     ACCEPTED, the history stays at 2 entries and
+  //     is byte-identical through the canonical
+  //     NDJSON serializer.
+  //   - empty history: a fresh DEMO-035 advances
+  //     under `PUBLISH` with `expectedSeq: 0` to OPEN
+  //     with exactly 1 entry — 0 is the guard for an
+  //     empty history.
+  //   - illegal guards: on a fresh DEMO-036 probe,
+  //     `expectedSeq: -1` and `expectedSeq: 1.5` each
+  //     throw exactly their pinned
+  //     `invalid dispatch options: expectedSeq must be a non-negative integer, got …`
+  //     configuration error and append nothing — the
+  //     probe stays in DRAFT with 0 entries.
+  //   - no guard: DEMO-037, at the same pinned
+  //     2-entry history, advances under
+  //     `START_CAPTURE` with no `expectedSeq` at all
+  //     to CAPTURING with 3 entries — omitting the
+  //     guard preserves the exact pre-guard behavior.
+  // Hand-written expectations — written out here from
+  // the DispatchOptions docs and cross-checked
+  // against test/expectedSeq.test.ts, never derived
+  // from the guard itself. The segment asserts all of
+  // this here, outside the printed lines: a guard
+  // verdict that drifted would fail the demo itself,
+  // not just a test. Honest limit, as in the
+  // DispatchOptions docs: this is a single-process
+  // optimistic lock against the in-memory history;
+  // cross-process writers still need compare-and-swap
+  // in the durable store itself.
+  const expectedSeqAt = (offsetSeconds: number): string =>
+    new Date(
+      Date.parse("2026-03-22T09:00:00.000Z") + offsetSeconds * 1000,
+    ).toISOString();
+  const buildExpectedSeqTask = (id: string): TaskLifecycle => {
+    const pinned = new TaskLifecycle(id);
+    pinned.dispatch("PUBLISH", {
+      actor: "researcher",
+      at: expectedSeqAt(0),
+    });
+    pinned.dispatch("ACCEPT", {
+      actor: "contributor",
+      at: expectedSeqAt(1),
+    });
+    return pinned;
+  };
+  const expectedSeqTask = buildExpectedSeqTask("DEMO-033");
+  const expectedSeqGuardedReturn = expectedSeqTask.dispatch(
+    "START_CAPTURE",
+    {
+      actor: "contributor",
+      at: expectedSeqAt(2),
+      expectedSeq: 2,
+    },
+  );
+  const expectedSeqConflictTask = buildExpectedSeqTask("DEMO-034");
+  const expectedSeqConflictHistoryBefore = historyToNdjson(
+    expectedSeqConflictTask.history,
+  );
+  let expectedSeqConflictError = "";
+  try {
+    expectedSeqConflictTask.dispatch("START_CAPTURE", {
+      actor: "contributor",
+      at: expectedSeqAt(2),
+      expectedSeq: 1,
+    });
+  } catch (err) {
+    expectedSeqConflictError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const expectedSeqConflictStateAfter = expectedSeqConflictTask.state;
+  const expectedSeqConflictHistoryLengthAfter =
+    expectedSeqConflictTask.history.length;
+  const expectedSeqEmptyTask = new TaskLifecycle("DEMO-035");
+  const expectedSeqEmptyReturn = expectedSeqEmptyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: expectedSeqAt(0),
+    expectedSeq: 0,
+  });
+  const expectedSeqIllegalTask = new TaskLifecycle("DEMO-036");
+  let expectedSeqNegativeError = "";
+  try {
+    expectedSeqIllegalTask.dispatch("PUBLISH", {
+      actor: "researcher",
+      at: expectedSeqAt(0),
+      expectedSeq: -1,
+    });
+  } catch (err) {
+    expectedSeqNegativeError =
+      err instanceof Error ? err.message : String(err);
+  }
+  let expectedSeqFractionError = "";
+  try {
+    expectedSeqIllegalTask.dispatch("PUBLISH", {
+      actor: "researcher",
+      at: expectedSeqAt(0),
+      expectedSeq: 1.5,
+    });
+  } catch (err) {
+    expectedSeqFractionError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const expectedSeqUnguardedTask = buildExpectedSeqTask("DEMO-037");
+  const expectedSeqUnguardedReturn = expectedSeqUnguardedTask.dispatch(
+    "START_CAPTURE",
+    {
+      actor: "contributor",
+      at: expectedSeqAt(2),
+    },
+  );
+  const expectedSeqLast = expectedSeqTask.history[2];
+  if (
+    expectedSeqGuardedReturn !== "CAPTURING" ||
+    expectedSeqTask.state !== "CAPTURING" ||
+    expectedSeqTask.history.length !== 3 ||
+    expectedSeqLast.seq !== 3 ||
+    expectedSeqLast.event !== "START_CAPTURE" ||
+    expectedSeqLast.from !== "ACCEPTED" ||
+    expectedSeqLast.to !== "CAPTURING" ||
+    expectedSeqLast.at !== expectedSeqAt(2) ||
+    expectedSeqLast.actor !== "contributor" ||
+    expectedSeqConflictError !==
+      "dispatch conflict: expected seq 1 but task is at seq 2" ||
+    expectedSeqConflictStateAfter !== "ACCEPTED" ||
+    expectedSeqConflictHistoryLengthAfter !== 2 ||
+    historyToNdjson(expectedSeqConflictTask.history) !==
+      expectedSeqConflictHistoryBefore ||
+    expectedSeqEmptyReturn !== "OPEN" ||
+    expectedSeqEmptyTask.state !== "OPEN" ||
+    expectedSeqEmptyTask.history.length !== 1 ||
+    expectedSeqEmptyTask.history[0].seq !== 1 ||
+    expectedSeqEmptyTask.history[0].event !== "PUBLISH" ||
+    expectedSeqNegativeError !==
+      "invalid dispatch options: expectedSeq must be a non-negative integer, got -1" ||
+    expectedSeqFractionError !==
+      "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5" ||
+    expectedSeqIllegalTask.state !== "DRAFT" ||
+    expectedSeqIllegalTask.history.length !== 0 ||
+    expectedSeqUnguardedReturn !== "CAPTURING" ||
+    expectedSeqUnguardedTask.state !== "CAPTURING" ||
+    expectedSeqUnguardedTask.history.length !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: dispatch expectedSeq does not match the hand-pinned contract (a task at seq 2 must advance exactly one step under START_CAPTURE with expectedSeq 2 to CAPTURING with a pinned seq-3 last entry; a stale expectedSeq 1 must throw the pinned dispatch-conflict error and leave state and history byte-identical; expectedSeq 0 must advance an empty history; -1 and 1.5 must throw their pinned configuration errors and append nothing; and dispatch without expectedSeq must behave unchanged)",
+    );
+  }
+  lines.push(
+    "",
+    "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+    `  correct guard (DEMO-033): driven PUBLISH -> ACCEPT under fixed timestamps to seq 2 (state ACCEPTED, history entries: 2); START_CAPTURE with expectedSeq 2 at ${expectedSeqAt(2)} -> ${expectedSeqGuardedReturn}, history entries: ${expectedSeqTask.history.length}; last entry: seq 3 START_CAPTURE ACCEPTED -> CAPTURING by contributor (the caller pinned the seq it based its decision on and the task was still there, so exactly one step advances)`,
+    `  stale guard (DEMO-034): the same pinned 2-entry history; START_CAPTURE with expectedSeq 1 -> rejected: "${expectedSeqConflictError}"; state after: ${expectedSeqConflictStateAfter}, history entries: ${expectedSeqConflictHistoryLengthAfter} (the guard runs before every other dispatch check and changes nothing — no state move, no history entry — so a writer holding a stale snapshot fails loudly instead of advancing a state it never saw, and re-reading the task and retrying with the fresh seq works)`,
+    `  empty history (DEMO-035): a fresh task (history entries: 0); PUBLISH with expectedSeq 0 -> ${expectedSeqEmptyReturn}, history entries: ${expectedSeqEmptyTask.history.length} (0 is the guard for an empty history — the seq is the history length, which is the last entry's seq once entries exist)`,
+    `  illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "${expectedSeqNegativeError}"; PUBLISH with expectedSeq 1.5 -> rejected: "${expectedSeqFractionError}"; state after both: ${expectedSeqIllegalTask.state}, history entries: ${expectedSeqIllegalTask.history.length} (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)`,
+    `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> ${expectedSeqUnguardedReturn}, history entries: ${expectedSeqUnguardedTask.history.length} (omitting expectedSeq preserves the exact pre-guard behavior)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {
