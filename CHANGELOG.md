@@ -11,6 +11,40 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `timeoutMs` timeout benchmark
+  path: `npm run bench` now also times
+  `deliverPayoutWebhook` delivering the fixed signed
+  webhook to the single-target endpoint through an
+  injected hanging fake fetch with `timeoutMs` pinned
+  at 10 and `maxAttempts: 1` — the per-attempt deadline
+  every delivery to a slow or hung receiver pays,
+  previously invisible inside the plain single-target
+  row, whose fake fetch answers 200 immediately and
+  never reaches the timer at all. The fake never
+  answers on its own and only settles when the
+  per-attempt abort fires, so the pinned short timeout
+  is the only thing that can end the attempt. Every
+  timed iteration checks the reported result is
+  exactly
+  `{ ok: false, attempts: 1, error: "webhook delivery timed out after 10ms" }`
+  with no status, after exactly one fetch call — the
+  timeout is reported, never thrown, per this module's
+  convention. Outside the timed loop, an illegal
+  `timeoutMs` of 0 is pinned to throw exactly
+  `cannot deliver payout webhook: timeoutMs must be a positive number, got 0`
+  before any request (zero fetch calls), and a
+  generous `timeoutMs` of 5000 over an
+  immediately-200 fake is pinned to the unchanged
+  normal delivery
+  `{ ok: true, attempts: 1, status: 200 }` after
+  exactly one fetch call. Honest limit: the timeout
+  wait itself is the object under test, at its pinned
+  short length of 10 ms, and no elapsed duration is
+  asserted anywhere. The README Benchmarks table is
+  refreshed from one real run (the new path measured
+  88.8 ops/sec on 2026-10-22). No network and no
+  randomness. Bench only; no library behavior change.
+
 - A payout webhook fan-out per-endpoint timeout
   override CLI demo segment: `npm run demo` now
   closes with the main task's payout event fanned
