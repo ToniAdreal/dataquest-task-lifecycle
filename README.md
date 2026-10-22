@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 574 tests, all local
+npm test   # 576 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1058,6 +1058,19 @@ request is made.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
 with no network and no real sleeps.
 
+`npm run demo` closes with a payout webhook timeout segment: the
+main task's signed webhook is delivered to a hanging injected
+fetch under a pinned `timeoutMs` of 50 with `maxAttempts: 1`, and
+the timeout is reported — never thrown — as
+`{ ok: false, attempts: 1, error: "webhook delivery timed out after 50ms" }`
+after exactly one fetch call; a `timeoutMs` of 0 throws the pinned
+`cannot deliver payout webhook: timeoutMs must be a positive number, got 0`
+configuration error before any request, with zero fetch calls; and
+the same endpoint under a loose `timeoutMs` of 5000 answers 200 at
+once and reports the unchanged success shape. The 50 ms wait is
+the behaviour under test itself, at its pinned short length — no
+elapsed wall-clock duration is asserted.
+
 Multi-endpoint fan-out is included too:
 `deliverPayoutWebhookToMany(task, endpoints)` delivers ONE settlement
 event concurrently to every endpoint — the marketplace shape where
@@ -1419,7 +1432,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 574 tests covering the happy path, reject→resubmit
+`npm test` runs 576 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

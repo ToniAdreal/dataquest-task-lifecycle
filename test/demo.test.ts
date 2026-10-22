@@ -498,11 +498,17 @@ Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed d
   seeded key, illegal event (DEMO-031): ACCEPT with idempotencyKey "demo-seed-accept" from DRAFT (no ACCEPT edge leaves DRAFT) -> returns DRAFT; state after: DRAFT, history entries: 0, listener notifications: 0 (a consumed key is a complete no-op — the transition is not even validated, nothing is appended, no listener is notified)
   same event, fresh keys (DEMO-031): PUBLISH with idempotencyKey "demo-fresh-publish" -> OPEN; ACCEPT with idempotencyKey "demo-fresh-accept" -> ACCEPTED, history entries: 2; snapshot idempotencyKeys after both: ["demo-seed-publish","demo-seed-accept","demo-fresh-publish","demo-fresh-accept"] (each fresh key is consumed by its successful dispatch — a later retry under either is a no-op)
   invalid seed (construction): idempotencyKeys [""] -> rejected: "invalid option: idempotencyKeys entries must be non-empty strings, got """ (every seed must be a non-empty string — the same bar dispatch applies to a single key, checked at construction before any task exists)
-  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`;
+  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)
+
+Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):
+  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
+  hanging receiver, pinned timeout: timeoutMs 50 with maxAttempts 1; the injected fetch never answers on its own and only settles when the per-attempt abort fires -> delivery ok=false attempts=1 error="webhook delivery timed out after 50ms"; fetch calls: 1 (the timeout is reported in the result, never thrown — the 50 ms wait is the behaviour under test itself, at its pinned short length, and no elapsed duration is asserted)
+  invalid timeout (configuration): timeoutMs 0 -> rejected: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0"; fetch calls: 0 (an invalid timeout is a caller bug, so it throws before any request is made — a delivery outcome, by contrast, is only ever reported)
+  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 429);
+  assert.equal(lines.length, 435);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1947,7 +1953,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 429);
+  assert.equal(out.trimEnd().split("\n").length, 435);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5018,9 +5024,9 @@ test("demo shows the preseeded idempotency keys segment in-process: seeded keys 
   });
   assert.equal(independentDefault.state, "OPEN");
   assert.equal(independentDefault.toJSON().idempotencyKeys, undefined);
-  // The segment closes the demo: it follows the event-level
-  // RBAC segment, prints its lines verbatim, and its
-  // no-seed line is the demo's last line.
+  // The segment follows the event-level RBAC segment
+  // and prints its lines verbatim (the payout webhook
+  // timeout segment now closes the demo after it).
   const seededAt = text.indexOf(
     "Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):",
   );
@@ -5041,7 +5047,11 @@ test("demo shows the preseeded idempotency keys segment in-process: seeded keys 
     assert.ok(text.includes(line), `missing seeded idempotency line: ${line}`);
   }
   assert.equal(
-    lines[lines.length - 1],
+    lines[
+      lines.indexOf(
+        "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
+      ) - 2
+    ],
     `  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`,
   );
 });
@@ -5050,6 +5060,7 @@ test("demo preseeded idempotency keys segment is deterministic: two runs print b
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):"),
+      ls.indexOf("Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -5094,5 +5105,169 @@ test("demo preseeded idempotency keys segment is deterministic: two runs print b
   assert.equal(
     a.seededIdempotencyDefaultSnapshotKeys,
     b.seededIdempotencyDefaultSnapshotKeys,
+  );
+});
+
+test("demo shows the payout webhook timeout segment in-process: a hanging fetch is reported as timed out, an invalid timeout throws with zero fetches, and a loose timeout succeeds unchanged", async () => {
+  const {
+    webhook,
+    timeoutDeliveryEndpoint,
+    timeoutDeliveryTimeoutMs,
+    timeoutDeliveryResult,
+    timeoutDeliveryFetchCalls,
+    timeoutDeliveryInvalidError,
+    timeoutDeliveryInvalidFetchCalls,
+    timeoutDeliveryLooseResult,
+    timeoutDeliveryLooseFetchCalls,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // DeliverPayoutWebhookOptions docs in
+  // src/settlementWebhook.ts and
+  // test/payoutWebhookDelivery.test.ts, never derived from
+  // the demo's own delivery calls.
+  assert.equal(
+    timeoutDeliveryEndpoint,
+    "https://payouts.example.com/hooks/payout",
+  );
+  assert.equal(timeoutDeliveryTimeoutMs, 50);
+  assert.deepEqual(timeoutDeliveryResult, {
+    ok: false,
+    attempts: 1,
+    error: "webhook delivery timed out after 50ms",
+  });
+  assert.equal(timeoutDeliveryFetchCalls, 1);
+  assert.equal(
+    timeoutDeliveryInvalidError,
+    "cannot deliver payout webhook: timeoutMs must be a positive number, got 0",
+  );
+  assert.equal(timeoutDeliveryInvalidFetchCalls, 0);
+  assert.deepEqual(timeoutDeliveryLooseResult, {
+    ok: true,
+    attempts: 1,
+    status: 200,
+  });
+  assert.equal(timeoutDeliveryLooseFetchCalls, 1);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the same three deliveries are
+  // driven here with fresh counting fetches (the script
+  // from the delivery tests). The hanging fetch only
+  // settles when its abort signal fires, exactly like the
+  // real fetch; no elapsed duration is asserted anywhere —
+  // the pinned 50 ms timeout is the behaviour under test
+  // itself.
+  let independentHangCalls = 0;
+  const independentHangResult = await deliverPayoutWebhook(
+    timeoutDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          independentHangCalls += 1;
+          init.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("The operation was aborted")),
+            { once: true },
+          );
+        }),
+      timeoutMs: 50,
+      maxAttempts: 1,
+    },
+  );
+  assert.deepEqual(independentHangResult, {
+    ok: false,
+    attempts: 1,
+    error: "webhook delivery timed out after 50ms",
+  });
+  assert.equal(independentHangCalls, 1);
+  let independentInvalidCalls = 0;
+  await assert.rejects(
+    () =>
+      deliverPayoutWebhook(timeoutDeliveryEndpoint, webhook, {
+        fetchImpl: async () => {
+          independentInvalidCalls += 1;
+          return new Response("{}", { status: 200 });
+        },
+        timeoutMs: 0,
+      }),
+    /cannot deliver payout webhook: timeoutMs must be a positive number, got 0/,
+  );
+  assert.equal(independentInvalidCalls, 0);
+  let independentLooseCalls = 0;
+  const independentLooseResult = await deliverPayoutWebhook(
+    timeoutDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        independentLooseCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      timeoutMs: 5000,
+    },
+  );
+  assert.deepEqual(independentLooseResult, {
+    ok: true,
+    attempts: 1,
+    status: 200,
+  });
+  assert.equal(independentLooseCalls, 1);
+  // The segment closes the demo: it follows the preseeded
+  // idempotency keys segment, prints its lines verbatim,
+  // and its loose-timeout line is the demo's last line.
+  const timeoutAt = text.indexOf(
+    "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
+  );
+  assert.ok(
+    timeoutAt >
+      text.indexOf(
+        "Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):",
+      ),
+    "payout webhook timeout segment must follow the preseeded idempotency keys segment",
+  );
+  for (const line of [
+    `  endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)`,
+    `  hanging receiver, pinned timeout: timeoutMs 50 with maxAttempts 1; the injected fetch never answers on its own and only settles when the per-attempt abort fires -> delivery ok=false attempts=1 error="webhook delivery timed out after 50ms"; fetch calls: 1 (the timeout is reported in the result, never thrown — the 50 ms wait is the behaviour under test itself, at its pinned short length, and no elapsed duration is asserted)`,
+    `  invalid timeout (configuration): timeoutMs 0 -> rejected: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0"; fetch calls: 0 (an invalid timeout is a caller bug, so it throws before any request is made — a delivery outcome, by contrast, is only ever reported)`,
+    `  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`,
+  ]) {
+    assert.ok(text.includes(line), `missing timeout line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`,
+  );
+});
+
+test("demo payout webhook timeout segment is deterministic: two runs print byte-identical timeout lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + endpoint / hanging / invalid / loose lines;
+  // every value in the segment is a pinned literal (the
+  // pinned 50 ms timeout, the pinned error texts, the
+  // fetch counts), so no normalization is needed — the
+  // only real wait is the pinned 50 ms timeout itself,
+  // whose duration is never printed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.timeoutDeliveryEndpoint, b.timeoutDeliveryEndpoint);
+  assert.equal(a.timeoutDeliveryTimeoutMs, b.timeoutDeliveryTimeoutMs);
+  assert.deepEqual(a.timeoutDeliveryResult, b.timeoutDeliveryResult);
+  assert.equal(a.timeoutDeliveryFetchCalls, b.timeoutDeliveryFetchCalls);
+  assert.equal(a.timeoutDeliveryInvalidError, b.timeoutDeliveryInvalidError);
+  assert.equal(
+    a.timeoutDeliveryInvalidFetchCalls,
+    b.timeoutDeliveryInvalidFetchCalls,
+  );
+  assert.deepEqual(a.timeoutDeliveryLooseResult, b.timeoutDeliveryLooseResult);
+  assert.equal(
+    a.timeoutDeliveryLooseFetchCalls,
+    b.timeoutDeliveryLooseFetchCalls,
   );
 });

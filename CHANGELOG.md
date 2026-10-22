@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook `timeoutMs` CLI demo segment:
+  `npm run demo` now closes with the main task's
+  signed webhook delivered by `deliverPayoutWebhook`
+  under a pinned per-attempt `timeoutMs` in three
+  forms. A hanging injected fetch — one that only
+  settles when its abort signal fires — under
+  `timeoutMs: 50` and `maxAttempts: 1` is cut off by
+  the per-attempt `AbortController`, and the timeout
+  is reported, never thrown, as exactly
+  `{ ok: false, attempts: 1, error: "webhook delivery timed out after 50ms" }`
+  after exactly one fetch call. A `timeoutMs` of 0
+  throws the pinned configuration error
+  (`cannot deliver payout webhook: timeoutMs must be a positive number, got 0`)
+  before any request, with zero fetch calls. The
+  same endpoint under a loose `timeoutMs: 5000`
+  answers 200 at once and reports the unchanged
+  success shape
+  (`{ ok: true, attempts: 1, status: 200 }`). The
+  50 ms wait is the behaviour under test itself, at
+  its pinned short length — no elapsed wall-clock
+  duration is asserted. The demo tests gain two
+  cases for the segment (in-process verdicts with
+  independent reproduction, and byte-identical
+  determinism), for 576 tests in total. No real
+  network and no randomness. Demo only; no library
+  behavior change.
+
 - A preseeded idempotency keys CLI demo segment:
   `npm run demo` now closes with a dedicated task
   (DEMO-031) constructed with a pinned

@@ -360,6 +360,28 @@
  * before — the exactly-once recovery path a reader has
  * only seen asserted by the idempotency key snapshot
  * tests so far.
+ * and finally a payout webhook timeout segment:
+ * the main task's signed webhook is delivered with
+ * `deliverPayoutWebhook` under a pinned per-attempt
+ * `timeoutMs` in three forms — a hanging injected
+ * fetch that only settles when its abort signal
+ * fires is cut off at the pinned 50 ms and the
+ * timeout is reported (never thrown) as the pinned
+ * `{ ok: false, attempts: 1, error: "webhook delivery timed out after 50ms" }`
+ * under `maxAttempts: 1`, so exactly one fetch is
+ * made; an invalid `timeoutMs` of 0 throws the
+ * pinned `cannot deliver payout webhook: …`
+ * configuration error before any request, so zero
+ * fetches are made; and the same endpoint under a
+ * loose 5000 ms timeout answers 200 at once and
+ * reports the unchanged success shape — the
+ * per-attempt deadline a reader has only seen
+ * asserted by the payout webhook delivery tests so
+ * far. Honest limit: the 50 ms wait is the behaviour
+ * under test itself, at its pinned short length —
+ * the segment asserts the reported result and the
+ * fetch counts, never an elapsed wall-clock
+ * duration.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -839,6 +861,22 @@ export interface DemoResult {
   seededIdempotencyDefaultTask: TaskLifecycle;
   /** DEMO-032's snapshot key list — undefined (the field is omitted while empty). */
   seededIdempotencyDefaultSnapshotKeys: string[] | undefined;
+  /** Fixed endpoint of the closing payout webhook timeout segment. */
+  timeoutDeliveryEndpoint: string;
+  /** The segment's pinned per-attempt `timeoutMs` (50). */
+  timeoutDeliveryTimeoutMs: number;
+  /** Reported result of the hanging-fetch delivery (timed out). */
+  timeoutDeliveryResult: DeliverWebhookResult;
+  /** Fetch calls the hanging-fetch delivery made (1). */
+  timeoutDeliveryFetchCalls: number;
+  /** Error from the segment's `timeoutMs: 0` call ("" if accepted). */
+  timeoutDeliveryInvalidError: string;
+  /** Fetch calls the invalid-timeout call made (0). */
+  timeoutDeliveryInvalidFetchCalls: number;
+  /** Result of the loose-timeout immediate-200 delivery. */
+  timeoutDeliveryLooseResult: DeliverWebhookResult;
+  /** Fetch calls the loose-timeout delivery made (1). */
+  timeoutDeliveryLooseFetchCalls: number;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -1005,7 +1043,12 @@ export interface DemoResult {
  * lists, its seeded-key no-op return and post-no-op
  * state, history length and notification count, its
  * notified event list, and its empty-seed construction
- * error, and the exact lines
+ * error, the payout webhook timeout segment's endpoint
+ * with its pinned `timeoutMs`, its timed-out reported
+ * result and fetch-call count, its invalid-timeout
+ * configuration error and zero fetch-call count, and
+ * its loose-timeout success result and fetch-call
+ * count, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -4444,7 +4487,127 @@ export async function runDemo(): Promise<DemoResult> {
     `  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> ${seededIdempotencyDefaultTask.state}, history entries: ${seededIdempotencyDefaultTask.history.length}; snapshot idempotencyKeys: ${seededIdempotencyDefaultSnapshotKeys} (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout webhook timeout segment (closing): every
+  // delivery segment above settles through a response —
+  // a success, a retry, a clamped wait, an abort the
+  // caller asked for. None of them shows the per-attempt
+  // deadline itself: `deliverPayoutWebhook`'s `timeoutMs`
+  // option (settlementWebhook, unit-tested since the
+  // delivery tests landed) arms an `AbortController` on
+  // every attempt, so a receiver that never answers
+  // cannot hang the delivery forever. Here the main
+  // task's signed webhook (built and verified above) is
+  // delivered to one fixed endpoint in three pinned
+  // forms, all through injected fetches — zero real
+  // network, zero randomness:
+  //   - hanging receiver: the injected fetch never
+  //     answers on its own and only settles when its
+  //     `init.signal` aborts (exactly how the real
+  //     fetch behaves), so the pinned `timeoutMs: 50`
+  //     is the only thing that can end the attempt;
+  //     with `maxAttempts: 1` the delivery reports
+  //     exactly { ok: false, attempts: 1,
+  //     error: "webhook delivery timed out after 50ms" }
+  //     with no status, after exactly 1 fetch call —
+  //     reported, never thrown, per this module's
+  //     convention. The 50 ms wait is the behaviour
+  //     under test itself, at its pinned short length;
+  //     no elapsed wall-clock duration is asserted.
+  //   - invalid timeout: `timeoutMs: 0` is a caller
+  //     configuration error, so the call throws the
+  //     pinned `cannot deliver payout webhook:
+  //     timeoutMs must be a positive number, got 0`
+  //     before any request — the counting fetch is
+  //     never called (0 calls).
+  //   - loose timeout: the same endpoint answering 200
+  //     at once under `timeoutMs: 5000` reports exactly
+  //     { ok: true, attempts: 1, status: 200 } after
+  //     1 fetch call — a generous deadline changes
+  //     nothing when the receiver is fast.
+  // Hand-written expectations — written out here from
+  // the DeliverPayoutWebhookOptions docs and the
+  // delivery tests, never derived by calling
+  // deliverPayoutWebhook itself. The segment asserts
+  // all of this here, outside the printed lines: a
+  // timeout verdict that drifted would fail the demo
+  // itself, not just a test.
+  const timeoutDeliveryEndpoint =
+    "https://payouts.example.com/hooks/payout";
+  const timeoutDeliveryTimeoutMs = 50;
+  let timeoutDeliveryFetchCalls = 0;
+  const timeoutDeliveryResult = await deliverPayoutWebhook(
+    timeoutDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          timeoutDeliveryFetchCalls += 1;
+          init.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("The operation was aborted")),
+            { once: true },
+          );
+        }),
+      timeoutMs: timeoutDeliveryTimeoutMs,
+      maxAttempts: 1,
+    },
+  );
+  let timeoutDeliveryInvalidFetchCalls = 0;
+  let timeoutDeliveryInvalidError = "";
+  try {
+    await deliverPayoutWebhook(timeoutDeliveryEndpoint, webhook, {
+      fetchImpl: async () => {
+        timeoutDeliveryInvalidFetchCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      timeoutMs: 0,
+    });
+  } catch (err) {
+    timeoutDeliveryInvalidError =
+      err instanceof Error ? err.message : String(err);
+  }
+  let timeoutDeliveryLooseFetchCalls = 0;
+  const timeoutDeliveryLooseResult = await deliverPayoutWebhook(
+    timeoutDeliveryEndpoint,
+    webhook,
+    {
+      fetchImpl: async () => {
+        timeoutDeliveryLooseFetchCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      timeoutMs: 5000,
+    },
+  );
+  if (
+    timeoutDeliveryResult.ok !== false ||
+    timeoutDeliveryResult.attempts !== 1 ||
+    timeoutDeliveryResult.status !== undefined ||
+    timeoutDeliveryResult.error !==
+      "webhook delivery timed out after 50ms" ||
+    timeoutDeliveryFetchCalls !== 1 ||
+    timeoutDeliveryInvalidError !==
+      "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" ||
+    timeoutDeliveryInvalidFetchCalls !== 0 ||
+    timeoutDeliveryLooseResult.ok !== true ||
+    timeoutDeliveryLooseResult.attempts !== 1 ||
+    timeoutDeliveryLooseResult.status !== 200 ||
+    timeoutDeliveryLooseResult.error !== undefined ||
+    timeoutDeliveryLooseFetchCalls !== 1
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook timeoutMs does not match the hand-pinned contract (a hanging fetch under timeoutMs 50 with maxAttempts 1 must report { ok: false, attempts: 1, error: \"webhook delivery timed out after 50ms\" } with exactly one fetch call, timeoutMs 0 must throw the pinned configuration error with zero fetch calls, and an immediate 200 under timeoutMs 5000 must report { ok: true, attempts: 1, status: 200 } with exactly one fetch call)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
+    `  endpoint: ${timeoutDeliveryEndpoint} (the main task's signed payout webhook, delivered on its own — no fan-out)`,
+    `  hanging receiver, pinned timeout: timeoutMs ${timeoutDeliveryTimeoutMs} with maxAttempts 1; the injected fetch never answers on its own and only settles when the per-attempt abort fires -> delivery ok=${timeoutDeliveryResult.ok} attempts=${timeoutDeliveryResult.attempts} error="${timeoutDeliveryResult.error}"; fetch calls: ${timeoutDeliveryFetchCalls} (the timeout is reported in the result, never thrown — the 50 ms wait is the behaviour under test itself, at its pinned short length, and no elapsed duration is asserted)`,
+    `  invalid timeout (configuration): timeoutMs 0 -> rejected: "${timeoutDeliveryInvalidError}"; fetch calls: ${timeoutDeliveryInvalidFetchCalls} (an invalid timeout is a caller bug, so it throws before any request is made — a delivery outcome, by contrast, is only ever reported)`,
+    `  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=${timeoutDeliveryLooseResult.ok} attempts=${timeoutDeliveryLooseResult.attempts} status=${timeoutDeliveryLooseResult.status}; fetch calls: ${timeoutDeliveryLooseFetchCalls} (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {
