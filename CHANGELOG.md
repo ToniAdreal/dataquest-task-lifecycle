@@ -11,6 +11,48 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch `maxDisputes` dispute-budget benchmark
+  path: `npm run bench` now also times
+  `dispatch("DISPUTE")` on a fresh task constructed
+  with the pinned budget `maxDisputes: 1` and driven
+  under fixed timestamps to a pinned 6-entry history
+  (PUBLISH, ACCEPT, START_CAPTURE, SUBMIT,
+  BEGIN_REVIEW, REJECT) in REJECTED — the appeal-round
+  cap every moderation deployment pays on a contested
+  rejection, previously invisible inside the plain
+  dispatch row, whose tasks carry no budget, and
+  inside the snapshot row, where `maxDisputes` appears
+  only as a fixture field, never as a timed
+  constructor option. Every timed iteration rebuilds
+  the fresh task (the DISPUTE dispatch spends the
+  single budget unit and mutates it, so the rebuild
+  cost is inside the timed region) and checks the
+  DISPUTED return, the exactly-7-entry history, and
+  the last entry's pinned fields (seq 7, `DISPUTE`,
+  at BASE + 6s, the pinned actor). Outside the timed
+  loop, a second DISPUTE after one full appeal round
+  is pinned to throw exactly
+  `dispute budget exhausted: 1 of 1 DISPUTEs already used`
+  and leave state and history byte-identical (compared
+  through the canonical NDJSON serializer), a budget
+  of 0 is pinned to make the first DISPUTE throw
+  `dispute budget exhausted: 0 of 0 DISPUTEs already used`
+  at once, a task built without the option is pinned
+  to run repeated appeal rounds (the pre-budget
+  default), a snapshot round-trip is pinned to keep
+  the budget exhausted (the used count is
+  history-derived, so it does not reset), and illegal
+  budgets (-1 and 1.5) are pinned to throw their exact
+  configuration errors
+  (`invalid option: maxDisputes must be a non-negative integer or Infinity, got -1`
+  and the same with `got 1.5`), with an illegal
+  snapshot budget pinned to
+  `invalid snapshot: maxDisputes must be a non-negative integer or Infinity, got -1`.
+  The README Benchmarks table is refreshed from one
+  real run (the new path measured 20,692 ops/sec on
+  2026-10-22). No network, no randomness, and no wall
+  clock. Bench only; no library behavior change.
+
 - A dispatch `expectedSeq` optimistic-concurrency
   benchmark path: `npm run bench` now also times
   `dispatch("START_CAPTURE", { expectedSeq: 2 })` on a
