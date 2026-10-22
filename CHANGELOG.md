@@ -11,6 +11,35 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A payout webhook fan-out per-endpoint timeout
+  override CLI demo segment: `npm run demo` now
+  closes with the main task's payout event fanned
+  out by `deliverPayoutWebhookToMany` to three fixed
+  endpoints (one shared fixed `now` / `eventId`, each
+  endpoint signed with its own secret, all delivery
+  through injected fetches) in three pinned forms —
+  under a loose call-level `timeoutMs: 5000`, the
+  slow endpoint's per-endpoint override of 50 (with
+  its own hanging injected fetch) cuts every attempt
+  off at 50 ms and its result is exactly
+  `{ ok: false, attempts: 3, error: "webhook delivery timed out after 50ms" }`
+  after 3 fetch calls, while the endpoints without an
+  override still succeed and the results stay in
+  input order; an invalid per-endpoint override of
+  0 lands as exactly
+  `{ ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }`
+  for that endpoint alone, with zero fetch calls to
+  it; and a fan-out with no override anywhere
+  delivers all three endpoints unchanged. The 50 ms
+  waits are the behaviour under test itself, at
+  their pinned short length — no elapsed wall-clock
+  duration is asserted. The demo tests gain two
+  cases for the segment (in-process verdicts with
+  independent reproduction, and byte-identical
+  determinism), for 578 tests in total. No real
+  network and no randomness. Demo only; no library
+  behavior change.
+
 - A dispatch `maxDisputes` dispute-budget benchmark
   path: `npm run bench` now also times
   `dispatch("DISPUTE")` on a fresh task constructed

@@ -38,6 +38,7 @@ import {
   verifyHistoryChain,
   buildPayoutWebhook,
   deliverPayoutWebhook,
+  deliverPayoutWebhookToMany,
   verifyPayoutWebhook,
   type TaskState,
 } from "../src/index.js";
@@ -504,11 +505,18 @@ Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, i
   endpoint: https://payouts.example.com/hooks/payout (the main task's signed payout webhook, delivered on its own — no fan-out)
   hanging receiver, pinned timeout: timeoutMs 50 with maxAttempts 1; the injected fetch never answers on its own and only settles when the per-attempt abort fires -> delivery ok=false attempts=1 error="webhook delivery timed out after 50ms"; fetch calls: 1 (the timeout is reported in the result, never thrown — the 50 ms wait is the behaviour under test itself, at its pinned short length, and no elapsed duration is asserted)
   invalid timeout (configuration): timeoutMs 0 -> rejected: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0"; fetch calls: 0 (an invalid timeout is a caller bug, so it throws before any request is made — a delivery outcome, by contrast, is only ever reported)
-  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`;
+  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)
+
+Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):
+  shared eventId: evt_demo_fanout_timeout_001, shared at: <timestamp> (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)
+  pinned override, hanging receiver (slow, https://slow.example.com/hooks/payout): per-endpoint timeoutMs 50 overrides the call-level 5000; the endpoint's own injected fetch never answers on its own and only settles when the per-attempt abort fires -> ok=false attempts=3 error="webhook delivery timed out after 50ms"; fetch calls: 3 (a timeout is a retryable failure, so the endpoint burns all 3 attempts at 50 ms each — the waits are the behaviour under test itself, at their pinned short length, and no elapsed duration is asserted)
+  no override, same call (billing + notifications): neither endpoint pins timeoutMs, so the call-level 5000 applies and both answer 200 at once -> billing ok=true attempts=1 status=200, notifications ok=true attempts=1 status=200; fan-out: 2 delivered, 1 failed — results stay in input order (billing, slow, notifications) and the timed-out endpoint did not block the others
+  invalid override, isolated failure (notifications): per-endpoint timeoutMs 0 -> its result is exactly { ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }; fetch calls to that endpoint: 0; billing and slow (answering 200 at once in this call) are unchanged at ok=true attempts=1 status=200 — a bad per-endpoint override is reported for its own endpoint only, where the same value at call level would throw for the whole call before any request
+  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 435);
+  assert.equal(lines.length, 442);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1953,7 +1961,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 435);
+  assert.equal(out.trimEnd().split("\n").length, 442);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5213,9 +5221,10 @@ test("demo shows the payout webhook timeout segment in-process: a hanging fetch 
     status: 200,
   });
   assert.equal(independentLooseCalls, 1);
-  // The segment closes the demo: it follows the preseeded
-  // idempotency keys segment, prints its lines verbatim,
-  // and its loose-timeout line is the demo's last line.
+  // The segment follows the preseeded idempotency keys
+  // segment and prints its lines verbatim; its
+  // loose-timeout line closes the segment (the fan-out
+  // timeout override segment now closes the demo).
   const timeoutAt = text.indexOf(
     "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
   );
@@ -5235,16 +5244,20 @@ test("demo shows the payout webhook timeout segment in-process: a hanging fetch 
     assert.ok(text.includes(line), `missing timeout line: ${line}`);
   }
   assert.equal(
-    lines[lines.length - 1],
+    lines[
+      lines.indexOf(
+        "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
+      ) + 4
+    ],
     `  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=true attempts=1 status=200; fetch calls: 1 (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`,
   );
 });
 
 test("demo payout webhook timeout segment is deterministic: two runs print byte-identical timeout lines", async () => {
-  const segment = (ls: string[]) =>
-    ls.slice(
-      ls.indexOf("Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):"),
-    );
+  const segment = (ls: string[]) => {
+    const at = ls.indexOf("Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):");
+    return ls.slice(at, at + 5);
+  };
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
@@ -5270,4 +5283,199 @@ test("demo payout webhook timeout segment is deterministic: two runs print byte-
     a.timeoutDeliveryLooseFetchCalls,
     b.timeoutDeliveryLooseFetchCalls,
   );
+});
+
+test("demo shows the payout webhook fan-out timeout override segment in-process: a per-endpoint override times out alone, an invalid override fails only its endpoint, and no override is unchanged", async () => {
+  const {
+    task,
+    fanoutTimeoutCallTimeoutMs,
+    fanoutTimeoutOverrideMs,
+    fanoutTimeoutResult,
+    fanoutTimeoutHangFetchCalls,
+    fanoutTimeoutFastFetchCalls,
+    fanoutTimeoutInvalidResult,
+    fanoutTimeoutInvalidFetchCalls,
+    fanoutTimeoutPlainResult,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // PayoutWebhookEndpoint docs in src/settlementWebhook.ts
+  // and test/payoutWebhookFanout.test.ts, never derived
+  // from the demo's own fan-out calls.
+  assert.equal(fanoutTimeoutCallTimeoutMs, 5000);
+  assert.equal(fanoutTimeoutOverrideMs, 50);
+  assert.deepEqual(fanoutTimeoutResult, {
+    results: [
+      { ok: true, attempts: 1, status: 200 },
+      { ok: false, attempts: 3, error: "webhook delivery timed out after 50ms" },
+      { ok: true, attempts: 1, status: 200 },
+    ],
+    delivered: 2,
+    failed: 1,
+  });
+  assert.equal(fanoutTimeoutHangFetchCalls, 3);
+  assert.equal(fanoutTimeoutFastFetchCalls, 2);
+  assert.deepEqual(fanoutTimeoutInvalidResult, {
+    results: [
+      { ok: true, attempts: 1, status: 200 },
+      { ok: true, attempts: 1, status: 200 },
+      {
+        ok: false,
+        attempts: 0,
+        error:
+          "cannot deliver payout webhook: timeoutMs must be a positive number, got 0",
+      },
+    ],
+    delivered: 2,
+    failed: 1,
+  });
+  assert.equal(fanoutTimeoutInvalidFetchCalls, 0);
+  assert.deepEqual(fanoutTimeoutPlainResult, {
+    results: [
+      { ok: true, attempts: 1, status: 200 },
+      { ok: true, attempts: 1, status: 200 },
+      { ok: true, attempts: 1, status: 200 },
+    ],
+    delivered: 3,
+    failed: 0,
+  });
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the same three fan-outs are
+  // driven here with fresh counting fetches. The hanging
+  // fetch only settles when its abort signal fires, exactly
+  // like the real fetch; no elapsed duration is asserted
+  // anywhere — the pinned 50 ms timeout is the behaviour
+  // under test itself.
+  const NOW = new Date("2026-03-21T09:00:00.000Z");
+  const EVENT_ID = "evt_demo_fanout_timeout_001";
+  const endpoints = [
+    { url: "https://billing.example.com/hooks/payout", secret: "test-secret-billing" },
+    { url: "https://slow.example.com/hooks/payout", secret: "test-secret-slow" },
+    { url: "https://notifications.example.com/hooks/payout", secret: "test-secret-notifications" },
+  ];
+  let independentHangCalls = 0;
+  const independentOverride = await deliverPayoutWebhookToMany(
+    task,
+    endpoints.map((ep) =>
+      ep.url === endpoints[1].url
+        ? {
+            ...ep,
+            timeoutMs: 50,
+            fetchImpl: ((_url: string, init: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                independentHangCalls += 1;
+                init.signal?.addEventListener(
+                  "abort",
+                  () => reject(new Error("The operation was aborted")),
+                  { once: true },
+                );
+              })) as (
+              url: string,
+              init: RequestInit,
+            ) => Promise<Response>,
+          }
+        : ep,
+    ),
+    {
+      fetchImpl: async () => new Response("{}", { status: 200 }),
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      timeoutMs: 5000,
+      now: NOW,
+      eventId: EVENT_ID,
+    },
+  );
+  assert.deepEqual(independentOverride, fanoutTimeoutResult);
+  assert.equal(independentHangCalls, 3);
+  const independentInvalidCalls = new Map<string, number>();
+  const independentInvalid = await deliverPayoutWebhookToMany(
+    task,
+    endpoints.map((ep) =>
+      ep.url === endpoints[2].url ? { ...ep, timeoutMs: 0 } : ep,
+    ),
+    {
+      fetchImpl: async (url: string) => {
+        independentInvalidCalls.set(
+          url,
+          (independentInvalidCalls.get(url) ?? 0) + 1,
+        );
+        return new Response("{}", { status: 200 });
+      },
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      timeoutMs: 5000,
+      now: NOW,
+      eventId: EVENT_ID,
+    },
+  );
+  assert.deepEqual(independentInvalid, fanoutTimeoutInvalidResult);
+  assert.equal(independentInvalidCalls.get(endpoints[2].url) ?? 0, 0);
+  assert.equal(independentInvalidCalls.get(endpoints[0].url), 1);
+  assert.equal(independentInvalidCalls.get(endpoints[1].url), 1);
+  const independentPlain = await deliverPayoutWebhookToMany(task, endpoints, {
+    fetchImpl: async () => new Response("{}", { status: 200 }),
+    sleepImpl: async () => {},
+    backoffMs: 0,
+    now: NOW,
+    eventId: EVENT_ID,
+  });
+  assert.deepEqual(independentPlain, fanoutTimeoutPlainResult);
+  // The segment closes the demo: it follows the payout
+  // webhook timeout segment, prints its lines verbatim,
+  // and its no-overrides line is the demo's last line.
+  const fanoutTimeoutAt = text.indexOf(
+    "Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):",
+  );
+  assert.ok(
+    fanoutTimeoutAt >
+      text.indexOf(
+        "Payout webhook timeout (deliverPayoutWebhook enforces a per-attempt timeoutMs, injected hanging fetch — no real network):",
+      ),
+    "fan-out timeout override segment must follow the payout webhook timeout segment",
+  );
+  for (const line of [
+    `  shared eventId: evt_demo_fanout_timeout_001, shared at: 2026-03-21T09:00:00.000Z (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)`,
+    `  pinned override, hanging receiver (slow, https://slow.example.com/hooks/payout): per-endpoint timeoutMs 50 overrides the call-level 5000; the endpoint's own injected fetch never answers on its own and only settles when the per-attempt abort fires -> ok=false attempts=3 error="webhook delivery timed out after 50ms"; fetch calls: 3 (a timeout is a retryable failure, so the endpoint burns all 3 attempts at 50 ms each — the waits are the behaviour under test itself, at their pinned short length, and no elapsed duration is asserted)`,
+    `  no override, same call (billing + notifications): neither endpoint pins timeoutMs, so the call-level 5000 applies and both answer 200 at once -> billing ok=true attempts=1 status=200, notifications ok=true attempts=1 status=200; fan-out: 2 delivered, 1 failed — results stay in input order (billing, slow, notifications) and the timed-out endpoint did not block the others`,
+    `  invalid override, isolated failure (notifications): per-endpoint timeoutMs 0 -> its result is exactly { ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }; fetch calls to that endpoint: 0; billing and slow (answering 200 at once in this call) are unchanged at ok=true attempts=1 status=200 — a bad per-endpoint override is reported for its own endpoint only, where the same value at call level would throw for the whole call before any request`,
+    `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
+  ]) {
+    assert.ok(text.includes(line), `missing fan-out timeout line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
+  );
+});
+
+test("demo payout webhook fan-out timeout override segment is deterministic: two runs print byte-identical fan-out timeout lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + shared / override / no-override / invalid /
+  // plain lines; every value in the segment is a pinned
+  // literal (the pinned 50 ms override, the pinned error
+  // texts, the fetch counts), so no normalization is
+  // needed — the only real waits are the pinned 50 ms
+  // timeouts themselves, whose durations are never
+  // printed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.fanoutTimeoutCallTimeoutMs, b.fanoutTimeoutCallTimeoutMs);
+  assert.equal(a.fanoutTimeoutOverrideMs, b.fanoutTimeoutOverrideMs);
+  assert.deepEqual(a.fanoutTimeoutResult, b.fanoutTimeoutResult);
+  assert.equal(a.fanoutTimeoutHangFetchCalls, b.fanoutTimeoutHangFetchCalls);
+  assert.equal(a.fanoutTimeoutFastFetchCalls, b.fanoutTimeoutFastFetchCalls);
+  assert.deepEqual(a.fanoutTimeoutInvalidResult, b.fanoutTimeoutInvalidResult);
+  assert.equal(
+    a.fanoutTimeoutInvalidFetchCalls,
+    b.fanoutTimeoutInvalidFetchCalls,
+  );
+  assert.deepEqual(a.fanoutTimeoutPlainResult, b.fanoutTimeoutPlainResult);
 });

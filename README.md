@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 576 tests, all local
+npm test   # 578 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1058,7 +1058,7 @@ request is made.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
 with no network and no real sleeps.
 
-`npm run demo` closes with a payout webhook timeout segment: the
+`npm run demo` includes a payout webhook timeout segment: the
 main task's signed webhook is delivered to a hanging injected
 fetch under a pinned `timeoutMs` of 50 with `maxAttempts: 1`, and
 the timeout is reported — never thrown — as
@@ -1069,7 +1069,20 @@ configuration error before any request, with zero fetch calls; and
 the same endpoint under a loose `timeoutMs` of 5000 answers 200 at
 once and reports the unchanged success shape. The 50 ms wait is
 the behaviour under test itself, at its pinned short length — no
-elapsed wall-clock duration is asserted.
+elapsed wall-clock duration is asserted. The demo then closes
+with a fan-out per-endpoint timeout override segment:
+`deliverPayoutWebhookToMany` resolves `timeoutMs` per endpoint
+(`endpoint.timeoutMs ?? call-level timeoutMs`), shown in three
+pinned forms over three fixed endpoints — under a loose
+call-level `timeoutMs` of 5000, one endpoint's override of 50
+(with its own hanging injected fetch) makes that endpoint alone
+report `{ ok: false, attempts: 3, error: "webhook delivery timed out after 50ms" }`
+while the others still succeed in input order; an invalid
+override of 0 is reported for its endpoint alone as
+`{ ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }`
+with zero fetch calls to it; and a fan-out with no override
+anywhere behaves exactly as before. No real network, no
+randomness, and no elapsed wall-clock duration is asserted.
 
 Multi-endpoint fan-out is included too:
 `deliverPayoutWebhookToMany(task, endpoints)` delivers ONE settlement
@@ -1432,7 +1445,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 576 tests covering the happy path, reject→resubmit
+`npm test` runs 578 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

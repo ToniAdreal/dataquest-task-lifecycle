@@ -382,6 +382,33 @@
  * the segment asserts the reported result and the
  * fetch counts, never an elapsed wall-clock
  * duration.
+ * and finally a payout webhook fan-out timeout
+ * override segment: the main task's payout event is
+ * fanned out with `deliverPayoutWebhookToMany` in
+ * three pinned forms over the same three fixed
+ * endpoints (one shared fixed `now` / `eventId`, each
+ * endpoint signed with its own demo secret, all
+ * delivery through injected fetches — zero real
+ * network, zero randomness) — under a loose
+ * call-level `timeoutMs` of 5000, the slow endpoint's
+ * per-endpoint override of 50 (with its own hanging
+ * injected fetch) cuts every one of its attempts off
+ * at 50 ms and its result is exactly the pinned
+ * timed-out failure shape after 3 attempts, while the
+ * two endpoints without an override still succeed and
+ * the results stay in input order; an invalid
+ * per-endpoint override of 0 lands as exactly
+ * `{ ok: false, attempts: 0, error: <the pinned
+ * configuration text> }` for that endpoint alone —
+ * reported, never thrown, and no fetch is made to it —
+ * while the other endpoints are unchanged; and a
+ * fan-out with no per-endpoint override anywhere
+ * behaves exactly as the fan-out segment above did.
+ * Honest limit, as in the timeout segment: the 50 ms
+ * waits are the behaviour under test itself, at their
+ * pinned short length — the segment asserts the
+ * reported results and the fetch counts, never an
+ * elapsed wall-clock duration.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -877,6 +904,22 @@ export interface DemoResult {
   timeoutDeliveryLooseResult: DeliverWebhookResult;
   /** Fetch calls the loose-timeout delivery made (1). */
   timeoutDeliveryLooseFetchCalls: number;
+  /** Call-level `timeoutMs` of the fan-out timeout override segment (5000). */
+  fanoutTimeoutCallTimeoutMs: number;
+  /** The slow endpoint's pinned per-endpoint `timeoutMs` override (50). */
+  fanoutTimeoutOverrideMs: number;
+  /** Aggregate result of the override fan-out call (2 delivered, 1 failed). */
+  fanoutTimeoutResult: DeliverPayoutWebhookToManyResult;
+  /** Fetch calls the hanging per-endpoint fetch made (3 — one per attempt). */
+  fanoutTimeoutHangFetchCalls: number;
+  /** Call-level fetch calls the override fan-out call made (2 — billing + notifications). */
+  fanoutTimeoutFastFetchCalls: number;
+  /** Aggregate result of the invalid-override fan-out call (2 delivered, 1 failed). */
+  fanoutTimeoutInvalidResult: DeliverPayoutWebhookToManyResult;
+  /** Fetch calls made to the invalid-override endpoint in its call (0). */
+  fanoutTimeoutInvalidFetchCalls: number;
+  /** Aggregate result of the no-override fan-out call (3 delivered, 0 failed). */
+  fanoutTimeoutPlainResult: DeliverPayoutWebhookToManyResult;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -1048,7 +1091,11 @@ export interface DemoResult {
  * result and fetch-call count, its invalid-timeout
  * configuration error and zero fetch-call count, and
  * its loose-timeout success result and fetch-call
- * count, and the exact lines
+ * count, the payout webhook fan-out timeout override
+ * segment's call-level and per-endpoint pinned
+ * `timeoutMs` values with its override, invalid-override
+ * and no-override aggregate results and its hanging,
+ * fast and invalid-endpoint fetch-call counts, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -4607,7 +4654,228 @@ export async function runDemo(): Promise<DemoResult> {
     `  loose timeout, immediate answer: timeoutMs 5000 and the endpoint answers 200 at once -> delivery ok=${timeoutDeliveryLooseResult.ok} attempts=${timeoutDeliveryLooseResult.attempts} status=${timeoutDeliveryLooseResult.status}; fetch calls: ${timeoutDeliveryLooseFetchCalls} (a generous deadline changes nothing when the receiver is fast — the success shape is exactly the untimed one)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout webhook fan-out timeout override segment
+  // (closing): the timeout segment above pins the
+  // deadline on a single-endpoint delivery. The fan-out
+  // delivery resolves `timeoutMs` PER ENDPOINT —
+  // `endpoint.timeoutMs ?? opts.timeoutMs`
+  // (settlementWebhook) — so one slow receiver can be
+  // given a tight deadline without tightening the whole
+  // fan-out, and a bad override is a per-endpoint
+  // pre-flight failure that lands in that endpoint's
+  // result instead of throwing for the call. Here the
+  // main task's payout event is fanned out to the same
+  // three fixed endpoints in three pinned forms — one
+  // shared fixed `now` (2026-03-21T09:00:00.000Z) and
+  // one shared fixed eventId ("evt_demo_fanout_timeout_001")
+  // per call, each endpoint signed with its own demo
+  // secret (placeholder values in this source, not real
+  // credentials), all through injected fetches with an
+  // injected no-op sleep and backoffMs 0 — zero real
+  // network, zero randomness:
+  //   - override: under a loose call-level
+  //     `timeoutMs: 5000`, the slow endpoint pins its
+  //     own `timeoutMs: 50` AND its own hanging fetch
+  //     (per-endpoint `fetchImpl` override — it never
+  //     answers on its own and only settles when the
+  //     per-attempt abort fires). A timeout is a
+  //     retryable failure, so the endpoint burns all
+  //     3 default attempts at 50 ms each and reports
+  //     exactly { ok: false, attempts: 3,
+  //     error: "webhook delivery timed out after 50ms" }
+  //     after exactly 3 fetch calls; billing and
+  //     notifications (no override) answer 200 at once
+  //     under the call-level deadline and report the
+  //     unchanged success shape, and the results stay
+  //     in input order — delivered 2, failed 1.
+  //   - invalid override: the notifications endpoint
+  //     pins `timeoutMs: 0`. That is a caller
+  //     configuration error for that endpoint only, so
+  //     the fan-out reports it as exactly
+  //     { ok: false, attempts: 0,
+  //     error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }
+  //     and makes zero fetch calls to it, while billing
+  //     and slow (answering 200 at once in this call)
+  //     are unchanged — delivered 2, failed 1. (The
+  //     same value at CALL level would throw for the
+  //     whole call before any request, as the timeout
+  //     segment's single-endpoint form showed.)
+  //   - no override: no endpoint pins `timeoutMs` and
+  //     the call does not set one either (the 5000 ms
+  //     default applies) — all three endpoints report
+  //     the unchanged success shape, delivered 3,
+  //     failed 0: omitting the override preserves the
+  //     exact fan-out behaviour of the segment above.
+  // Hand-written expectations — written out here from
+  // the PayoutWebhookEndpoint docs and the fan-out
+  // tests, never derived by calling
+  // deliverPayoutWebhookToMany itself. The segment
+  // asserts all of this here, outside the printed
+  // lines: an override verdict that drifted would fail
+  // the demo itself, not just a test. Honest limit, as
+  // in the timeout segment: the 50 ms waits are the
+  // behaviour under test itself, at their pinned short
+  // length; no elapsed wall-clock duration is asserted.
+  const FANOUT_TIMEOUT_NOW = new Date("2026-03-21T09:00:00.000Z");
+  const FANOUT_TIMEOUT_EVENT_ID = "evt_demo_fanout_timeout_001";
+  const fanoutTimeoutCallTimeoutMs = 5000;
+  const fanoutTimeoutOverrideMs = 50;
+  const fanoutTimeoutEndpoints = [
+    {
+      name: "billing",
+      url: "https://billing.example.com/hooks/payout",
+      secret: ["demo-secret", "fanout-timeout", "billing"].join("-"),
+    },
+    {
+      name: "slow",
+      url: "https://slow.example.com/hooks/payout",
+      secret: ["demo-secret", "fanout-timeout", "slow"].join("-"),
+    },
+    {
+      name: "notifications",
+      url: "https://notifications.example.com/hooks/payout",
+      secret: ["demo-secret", "fanout-timeout", "notifications"].join("-"),
+    },
+  ] as const;
+  const immediate200 = (count: (url: string) => void): PayoutWebhookFetchImpl =>
+    async (url) => {
+      count(url);
+      return new Response("{}", { status: 200 });
+    };
+  // Override call: billing + notifications go through the
+  // call-level counting fetch; slow goes through its own
+  // per-endpoint hanging fetch.
+  let fanoutTimeoutFastFetchCalls = 0;
+  let fanoutTimeoutHangFetchCalls = 0;
+  const fanoutTimeoutResult = await deliverPayoutWebhookToMany(
+    task,
+    fanoutTimeoutEndpoints.map((ep) =>
+      ep.name === "slow"
+        ? {
+            url: ep.url,
+            secret: ep.secret,
+            timeoutMs: fanoutTimeoutOverrideMs,
+            fetchImpl: ((_url: string, init: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                fanoutTimeoutHangFetchCalls += 1;
+                init.signal?.addEventListener(
+                  "abort",
+                  () => reject(new Error("The operation was aborted")),
+                  { once: true },
+                );
+              })) as PayoutWebhookFetchImpl,
+          }
+        : { url: ep.url, secret: ep.secret },
+    ),
+    {
+      fetchImpl: immediate200(() => {
+        fanoutTimeoutFastFetchCalls += 1;
+      }),
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      timeoutMs: fanoutTimeoutCallTimeoutMs,
+      now: FANOUT_TIMEOUT_NOW,
+      eventId: FANOUT_TIMEOUT_EVENT_ID,
+    },
+  );
+  // Invalid-override call: notifications pins timeoutMs 0;
+  // every endpoint would go through the counting fetch,
+  // so the invalid endpoint's zero fetch calls are
+  // observable per URL.
+  const fanoutTimeoutInvalidCallsByUrl = new Map<string, number>();
+  const fanoutTimeoutInvalidResult = await deliverPayoutWebhookToMany(
+    task,
+    fanoutTimeoutEndpoints.map((ep) =>
+      ep.name === "notifications"
+        ? { url: ep.url, secret: ep.secret, timeoutMs: 0 }
+        : { url: ep.url, secret: ep.secret },
+    ),
+    {
+      fetchImpl: immediate200((url) => {
+        fanoutTimeoutInvalidCallsByUrl.set(
+          url,
+          (fanoutTimeoutInvalidCallsByUrl.get(url) ?? 0) + 1,
+        );
+      }),
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      timeoutMs: fanoutTimeoutCallTimeoutMs,
+      now: FANOUT_TIMEOUT_NOW,
+      eventId: FANOUT_TIMEOUT_EVENT_ID,
+    },
+  );
+  const fanoutTimeoutInvalidFetchCalls =
+    fanoutTimeoutInvalidCallsByUrl.get(fanoutTimeoutEndpoints[2].url) ?? 0;
+  // No-override call: no timeoutMs anywhere — neither on
+  // an endpoint nor at call level.
+  const fanoutTimeoutPlainResult = await deliverPayoutWebhookToMany(
+    task,
+    fanoutTimeoutEndpoints.map(({ url, secret }) => ({ url, secret })),
+    {
+      fetchImpl: immediate200(() => {}),
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      now: FANOUT_TIMEOUT_NOW,
+      eventId: FANOUT_TIMEOUT_EVENT_ID,
+    },
+  );
+  const fanoutTimeoutOkShape = { ok: true, attempts: 1, status: 200 };
+  if (
+    fanoutTimeoutResult.delivered !== 2 ||
+    fanoutTimeoutResult.failed !== 1 ||
+    fanoutTimeoutResult.results.length !== 3 ||
+    fanoutTimeoutResult.results[0].ok !== fanoutTimeoutOkShape.ok ||
+    fanoutTimeoutResult.results[0].attempts !== 1 ||
+    fanoutTimeoutResult.results[0].status !== 200 ||
+    fanoutTimeoutResult.results[0].error !== undefined ||
+    fanoutTimeoutResult.results[1].ok !== false ||
+    fanoutTimeoutResult.results[1].attempts !== 3 ||
+    fanoutTimeoutResult.results[1].status !== undefined ||
+    fanoutTimeoutResult.results[1].error !==
+      "webhook delivery timed out after 50ms" ||
+    fanoutTimeoutResult.results[2].ok !== fanoutTimeoutOkShape.ok ||
+    fanoutTimeoutResult.results[2].attempts !== 1 ||
+    fanoutTimeoutResult.results[2].status !== 200 ||
+    fanoutTimeoutResult.results[2].error !== undefined ||
+    fanoutTimeoutHangFetchCalls !== 3 ||
+    fanoutTimeoutFastFetchCalls !== 2 ||
+    fanoutTimeoutInvalidResult.delivered !== 2 ||
+    fanoutTimeoutInvalidResult.failed !== 1 ||
+    fanoutTimeoutInvalidResult.results[0].ok !== true ||
+    fanoutTimeoutInvalidResult.results[0].attempts !== 1 ||
+    fanoutTimeoutInvalidResult.results[0].status !== 200 ||
+    fanoutTimeoutInvalidResult.results[1].ok !== true ||
+    fanoutTimeoutInvalidResult.results[1].attempts !== 1 ||
+    fanoutTimeoutInvalidResult.results[1].status !== 200 ||
+    fanoutTimeoutInvalidResult.results[2].ok !== false ||
+    fanoutTimeoutInvalidResult.results[2].attempts !== 0 ||
+    fanoutTimeoutInvalidResult.results[2].status !== undefined ||
+    fanoutTimeoutInvalidResult.results[2].error !==
+      "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" ||
+    fanoutTimeoutInvalidFetchCalls !== 0 ||
+    (fanoutTimeoutInvalidCallsByUrl.get(fanoutTimeoutEndpoints[0].url) ?? 0) !== 1 ||
+    (fanoutTimeoutInvalidCallsByUrl.get(fanoutTimeoutEndpoints[1].url) ?? 0) !== 1 ||
+    fanoutTimeoutPlainResult.delivered !== 3 ||
+    fanoutTimeoutPlainResult.failed !== 0 ||
+    fanoutTimeoutPlainResult.results.some(
+      (r) => r.ok !== true || r.attempts !== 1 || r.status !== 200 || r.error !== undefined,
+    )
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhookToMany per-endpoint timeoutMs overrides do not match the hand-pinned contract (under a call-level timeoutMs 5000, the slow endpoint's timeoutMs 50 override with a hanging fetch must report { ok: false, attempts: 3, error: \"webhook delivery timed out after 50ms\" } after exactly 3 fetch calls while billing and notifications report { ok: true, attempts: 1, status: 200 } in input order; a timeoutMs 0 override must land as { ok: false, attempts: 0, error: \"cannot deliver payout webhook: timeoutMs must be a positive number, got 0\" } for that endpoint alone with zero fetch calls to it; and a fan-out with no override anywhere must deliver all three endpoints unchanged)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):",
+    `  shared eventId: ${FANOUT_TIMEOUT_EVENT_ID}, shared at: ${FANOUT_TIMEOUT_NOW.toISOString()} (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)`,
+    `  pinned override, hanging receiver (slow, ${fanoutTimeoutEndpoints[1].url}): per-endpoint timeoutMs ${fanoutTimeoutOverrideMs} overrides the call-level ${fanoutTimeoutCallTimeoutMs}; the endpoint's own injected fetch never answers on its own and only settles when the per-attempt abort fires -> ok=${fanoutTimeoutResult.results[1].ok} attempts=${fanoutTimeoutResult.results[1].attempts} error="${fanoutTimeoutResult.results[1].error}"; fetch calls: ${fanoutTimeoutHangFetchCalls} (a timeout is a retryable failure, so the endpoint burns all 3 attempts at 50 ms each — the waits are the behaviour under test itself, at their pinned short length, and no elapsed duration is asserted)`,
+    `  no override, same call (billing + notifications): neither endpoint pins timeoutMs, so the call-level ${fanoutTimeoutCallTimeoutMs} applies and both answer 200 at once -> billing ok=${fanoutTimeoutResult.results[0].ok} attempts=${fanoutTimeoutResult.results[0].attempts} status=${fanoutTimeoutResult.results[0].status}, notifications ok=${fanoutTimeoutResult.results[2].ok} attempts=${fanoutTimeoutResult.results[2].attempts} status=${fanoutTimeoutResult.results[2].status}; fan-out: ${fanoutTimeoutResult.delivered} delivered, ${fanoutTimeoutResult.failed} failed — results stay in input order (billing, slow, notifications) and the timed-out endpoint did not block the others`,
+    `  invalid override, isolated failure (notifications): per-endpoint timeoutMs 0 -> its result is exactly { ok: false, attempts: 0, error: "${fanoutTimeoutInvalidResult.results[2].error}" }; fetch calls to that endpoint: ${fanoutTimeoutInvalidFetchCalls}; billing and slow (answering 200 at once in this call) are unchanged at ok=true attempts=1 status=200 — a bad per-endpoint override is reported for its own endpoint only, where the same value at call level would throw for the whole call before any request`,
+    `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: ${fanoutTimeoutPlainResult.delivered} delivered, ${fanoutTimeoutPlainResult.failed} failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {
