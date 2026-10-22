@@ -11,6 +11,7 @@ import {
   DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
+  DEMO_SEEDED_IDEMPOTENCY_KEYS,
   DEMO_WEBHOOK_SECRET,
 } from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
@@ -490,11 +491,18 @@ Event-level RBAC (rolePolicy gates covered events to the listed actors):
   covered event, wrong or missing actor (DEMO-029): PUBLISH by contributor -> rejected: "actor not authorized for PUBLISH: \"contributor\" is not in [researcher]"; PUBLISH with no actor -> rejected: "actor not authorized for PUBLISH: policy requires an actor in [researcher]"; state after both rejections: DRAFT, history entries: 0 (a rejected dispatch appends nothing — the check runs before the audit entry is written)
   uncovered events are unrestricted (DEMO-029): START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT and DISPUTE with no actor at all -> DISPUTED, history entries: 7 (the policy lists only PUBLISH, ACCEPT and the two arbitration events — every other event skips the check entirely)
   arbitration is moderator-only (DEMO-029): ARBITRATE_APPROVE by contributor -> rejected: "actor not authorized for ARBITRATE_APPROVE: \"contributor\" is not in [senior-moderator]"; ARBITRATE_APPROVE with no actor -> rejected: "actor not authorized for ARBITRATE_APPROVE: policy requires an actor in [senior-moderator]"; state after both rejections: DISPUTED, history entries: 7; ARBITRATE_APPROVE by senior-moderator -> APPROVED, history entries: 8
-  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)`;
+  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)
+
+Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):
+  seeded task DEMO-031 (constructed with idempotencyKeys ["demo-seed-publish", "demo-seed-publish", "demo-seed-accept"]): duplicate seed entries are deduped, first occurrence wins — snapshot idempotencyKeys: ["demo-seed-publish","demo-seed-accept"] (the re-attachment path for fromHistory(), whose audit log cannot carry the key set — keys are dispatch configuration, not audit data)
+  seeded key, illegal event (DEMO-031): ACCEPT with idempotencyKey "demo-seed-accept" from DRAFT (no ACCEPT edge leaves DRAFT) -> returns DRAFT; state after: DRAFT, history entries: 0, listener notifications: 0 (a consumed key is a complete no-op — the transition is not even validated, nothing is appended, no listener is notified)
+  same event, fresh keys (DEMO-031): PUBLISH with idempotencyKey "demo-fresh-publish" -> OPEN; ACCEPT with idempotencyKey "demo-fresh-accept" -> ACCEPTED, history entries: 2; snapshot idempotencyKeys after both: ["demo-seed-publish","demo-seed-accept","demo-fresh-publish","demo-fresh-accept"] (each fresh key is consumed by its successful dispatch — a later retry under either is a no-op)
+  invalid seed (construction): idempotencyKeys [""] -> rejected: "invalid option: idempotencyKeys entries must be non-empty strings, got """ (every seed must be a non-empty string — the same bar dispatch applies to a single key, checked at construction before any task exists)
+  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 422);
+  assert.equal(lines.length, 429);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1939,7 +1947,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 422);
+  assert.equal(out.trimEnd().split("\n").length, 429);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -4623,7 +4631,8 @@ test("demo shows the keyed audit hash chain segment in-process: correct secret v
   );
   // The segment follows the dispatch idempotency key
   // segment and prints its lines verbatim (the event-level
-  // RBAC segment now closes the demo after it).
+  // RBAC segment follows it, and the preseeded idempotency
+  // keys segment now closes the demo).
   const auditAt = text.indexOf(
     "Keyed audit hash chain (verifyHistoryChain with { auditSecret } verifies an HMAC-chained history only under its secret):",
   );
@@ -4806,9 +4815,9 @@ test("demo shows the event-level RBAC segment in-process: allowlisted actors adv
     independentDefault.dispatch(event, { at });
   }
   assert.equal(independentDefault.state, "APPROVED");
-  // The segment closes the demo: it follows the keyed
-  // audit hash chain segment, prints its lines verbatim,
-  // and its no-policy line is the demo's last line.
+  // The segment follows the keyed audit hash chain
+  // segment and prints its lines verbatim (the preseeded
+  // idempotency keys segment now closes the demo after it).
   const rbacAt = text.indexOf(
     "Event-level RBAC (rolePolicy gates covered events to the listed actors):",
   );
@@ -4828,9 +4837,11 @@ test("demo shows the event-level RBAC segment in-process: allowlisted actors adv
   ]) {
     assert.ok(text.includes(line), `missing RBAC line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    "  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> APPROVED, history entries: 8 (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)",
+  assert.ok(
+    text.indexOf(
+      "Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):",
+    ) > rbacAt,
+    "preseeded idempotency keys segment must follow the event-level RBAC segment",
   );
 });
 
@@ -4838,6 +4849,7 @@ test("demo event-level RBAC segment is deterministic: two runs print byte-identi
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Event-level RBAC (rolePolicy gates covered events to the listed actors):"),
+      ls.indexOf("Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -4888,5 +4900,199 @@ test("demo event-level RBAC segment is deterministic: two runs print byte-identi
   assert.deepEqual(
     a.rolePolicyDefaultTask.history,
     b.rolePolicyDefaultTask.history,
+  );
+});
+
+test("demo shows the preseeded idempotency keys segment in-process: seeded keys dedupe and no-op, fresh keys advance and are consumed, an empty seed is rejected, and a seed-free task is unchanged", async () => {
+  const {
+    seededIdempotencyTask,
+    seededIdempotencyKeys,
+    seededIdempotencySnapshotKeysAfterSeed,
+    seededIdempotencyNoopReturn,
+    seededIdempotencyStateAfterNoop,
+    seededIdempotencyHistoryLengthAfterNoop,
+    seededIdempotencyNotificationCountAfterNoop,
+    seededIdempotencyNotificationEvents,
+    seededIdempotencySnapshotKeysAfterFreshKeys,
+    seededIdempotencyEmptySeedError,
+    seededIdempotencyDefaultTask,
+    seededIdempotencyDefaultSnapshotKeys,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/idempotencyKeySnapshot.test.ts, never derived from
+  // the seeding itself.
+  assert.deepEqual(DEMO_SEEDED_IDEMPOTENCY_KEYS, [
+    "demo-seed-publish",
+    "demo-seed-accept",
+  ]);
+  assert.deepEqual(seededIdempotencyKeys, DEMO_SEEDED_IDEMPOTENCY_KEYS);
+  assert.equal(seededIdempotencyTask.id, "DEMO-031");
+  assert.deepEqual(seededIdempotencySnapshotKeysAfterSeed, [
+    "demo-seed-publish",
+    "demo-seed-accept",
+  ]);
+  assert.equal(seededIdempotencyNoopReturn, "DRAFT");
+  assert.equal(seededIdempotencyStateAfterNoop, "DRAFT");
+  assert.equal(seededIdempotencyHistoryLengthAfterNoop, 0);
+  assert.equal(seededIdempotencyNotificationCountAfterNoop, 0);
+  assert.equal(seededIdempotencyTask.state, "ACCEPTED");
+  assert.equal(seededIdempotencyTask.history.length, 2);
+  assert.equal(seededIdempotencyTask.history[0].event, "PUBLISH");
+  assert.equal(seededIdempotencyTask.history[0].at, "2026-04-07T09:05:00.000Z");
+  assert.equal(seededIdempotencyTask.history[1].event, "ACCEPT");
+  assert.equal(seededIdempotencyTask.history[1].at, "2026-04-07T09:10:00.000Z");
+  assert.deepEqual(seededIdempotencyNotificationEvents, ["PUBLISH", "ACCEPT"]);
+  assert.deepEqual(seededIdempotencySnapshotKeysAfterFreshKeys, [
+    "demo-seed-publish",
+    "demo-seed-accept",
+    "demo-fresh-publish",
+    "demo-fresh-accept",
+  ]);
+  assert.deepEqual(seededIdempotencyTask.toJSON().idempotencyKeys, [
+    "demo-seed-publish",
+    "demo-seed-accept",
+    "demo-fresh-publish",
+    "demo-fresh-accept",
+  ]);
+  assert.equal(
+    seededIdempotencyEmptySeedError,
+    'invalid option: idempotencyKeys entries must be non-empty strings, got ""',
+  );
+  assert.equal(seededIdempotencyDefaultTask.id, "DEMO-032");
+  assert.equal(seededIdempotencyDefaultTask.state, "OPEN");
+  assert.equal(seededIdempotencyDefaultTask.history.length, 1);
+  assert.equal(seededIdempotencyDefaultSnapshotKeys, undefined);
+  assert.equal(seededIdempotencyDefaultTask.toJSON().idempotencyKeys, undefined);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here with the
+  // same seed and fixed timestamps reproduce every verdict
+  // on their own (the script from the snapshot tests).
+  const independent = new TaskLifecycle("test-seeded-demo", {
+    idempotencyKeys: [
+      "demo-seed-publish",
+      "demo-seed-publish",
+      "demo-seed-accept",
+    ],
+  });
+  assert.deepEqual(independent.toJSON().idempotencyKeys, [
+    "demo-seed-publish",
+    "demo-seed-accept",
+  ]);
+  assert.equal(
+    independent.dispatch("ACCEPT", {
+      actor: "contributor",
+      at: "2026-04-07T09:00:00.000Z",
+      idempotencyKey: "demo-seed-accept",
+    }),
+    "DRAFT",
+  );
+  assert.equal(independent.state, "DRAFT");
+  assert.equal(independent.history.length, 0);
+  independent.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-07T09:05:00.000Z",
+    idempotencyKey: "demo-fresh-publish",
+  });
+  independent.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-07T09:10:00.000Z",
+    idempotencyKey: "demo-fresh-accept",
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(independent.history)),
+    JSON.parse(JSON.stringify(seededIdempotencyTask.history)),
+  );
+  assert.throws(
+    () =>
+      new TaskLifecycle("test-seeded-demo-empty", { idempotencyKeys: [""] }),
+    /invalid option: idempotencyKeys entries must be non-empty strings, got ""/,
+  );
+  const independentDefault = new TaskLifecycle("test-seeded-demo-default");
+  independentDefault.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-07T09:00:00.000Z",
+  });
+  assert.equal(independentDefault.state, "OPEN");
+  assert.equal(independentDefault.toJSON().idempotencyKeys, undefined);
+  // The segment closes the demo: it follows the event-level
+  // RBAC segment, prints its lines verbatim, and its
+  // no-seed line is the demo's last line.
+  const seededAt = text.indexOf(
+    "Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):",
+  );
+  assert.ok(
+    seededAt >
+      text.indexOf(
+        "Event-level RBAC (rolePolicy gates covered events to the listed actors):",
+      ),
+    "preseeded idempotency keys segment must follow the event-level RBAC segment",
+  );
+  for (const line of [
+    `  seeded task DEMO-031 (constructed with idempotencyKeys ["demo-seed-publish", "demo-seed-publish", "demo-seed-accept"]): duplicate seed entries are deduped, first occurrence wins — snapshot idempotencyKeys: ["demo-seed-publish","demo-seed-accept"] (the re-attachment path for fromHistory(), whose audit log cannot carry the key set — keys are dispatch configuration, not audit data)`,
+    `  seeded key, illegal event (DEMO-031): ACCEPT with idempotencyKey "demo-seed-accept" from DRAFT (no ACCEPT edge leaves DRAFT) -> returns DRAFT; state after: DRAFT, history entries: 0, listener notifications: 0 (a consumed key is a complete no-op — the transition is not even validated, nothing is appended, no listener is notified)`,
+    `  same event, fresh keys (DEMO-031): PUBLISH with idempotencyKey "demo-fresh-publish" -> OPEN; ACCEPT with idempotencyKey "demo-fresh-accept" -> ACCEPTED, history entries: 2; snapshot idempotencyKeys after both: ["demo-seed-publish","demo-seed-accept","demo-fresh-publish","demo-fresh-accept"] (each fresh key is consumed by its successful dispatch — a later retry under either is a no-op)`,
+    `  invalid seed (construction): idempotencyKeys [""] -> rejected: "invalid option: idempotencyKeys entries must be non-empty strings, got """ (every seed must be a non-empty string — the same bar dispatch applies to a single key, checked at construction before any task exists)`,
+    `  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`,
+  ]) {
+    assert.ok(text.includes(line), `missing seeded idempotency line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> OPEN, history entries: 1; snapshot idempotencyKeys: undefined (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`,
+  );
+});
+
+test("demo preseeded idempotency keys segment is deterministic: two runs print byte-identical seeded lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + seeded / no-op / fresh-key / invalid-seed /
+  // no-seed lines; every value in the segment is a fixed
+  // literal (pinned keys, fixed timestamps, a pinned
+  // error), so no normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.seededIdempotencyKeys, b.seededIdempotencyKeys);
+  assert.equal(a.seededIdempotencyTask.state, b.seededIdempotencyTask.state);
+  assert.deepEqual(a.seededIdempotencyTask.history, b.seededIdempotencyTask.history);
+  assert.deepEqual(
+    a.seededIdempotencySnapshotKeysAfterSeed,
+    b.seededIdempotencySnapshotKeysAfterSeed,
+  );
+  assert.equal(a.seededIdempotencyNoopReturn, b.seededIdempotencyNoopReturn);
+  assert.equal(a.seededIdempotencyStateAfterNoop, b.seededIdempotencyStateAfterNoop);
+  assert.equal(
+    a.seededIdempotencyHistoryLengthAfterNoop,
+    b.seededIdempotencyHistoryLengthAfterNoop,
+  );
+  assert.equal(
+    a.seededIdempotencyNotificationCountAfterNoop,
+    b.seededIdempotencyNotificationCountAfterNoop,
+  );
+  assert.deepEqual(
+    a.seededIdempotencyNotificationEvents,
+    b.seededIdempotencyNotificationEvents,
+  );
+  assert.deepEqual(
+    a.seededIdempotencySnapshotKeysAfterFreshKeys,
+    b.seededIdempotencySnapshotKeysAfterFreshKeys,
+  );
+  assert.equal(a.seededIdempotencyEmptySeedError, b.seededIdempotencyEmptySeedError);
+  assert.equal(a.seededIdempotencyDefaultTask.state, b.seededIdempotencyDefaultTask.state);
+  assert.deepEqual(
+    a.seededIdempotencyDefaultTask.history,
+    b.seededIdempotencyDefaultTask.history,
+  );
+  assert.equal(
+    a.seededIdempotencyDefaultSnapshotKeys,
+    b.seededIdempotencyDefaultSnapshotKeys,
   );
 });

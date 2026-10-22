@@ -11,6 +11,40 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A preseeded idempotency keys CLI demo segment:
+  `npm run demo` now closes with a dedicated task
+  (DEMO-031) constructed with a pinned
+  `idempotencyKeys` seed
+  (`["demo-seed-publish", "demo-seed-publish",
+  "demo-seed-accept"]`) and driven under fixed
+  timestamps, plus a seed-free task (DEMO-032). The
+  duplicate seed entry is deduped (first occurrence
+  wins), so the opening snapshot carries exactly
+  `["demo-seed-publish", "demo-seed-accept"]` — the
+  re-attachment path for `fromHistory()`, whose
+  audit log cannot carry the key set. An ACCEPT
+  dispatched from DRAFT under the seeded key
+  `demo-seed-accept` — an event with no edge from
+  DRAFT — returns DRAFT as a complete no-op: the
+  transition is not validated, nothing is appended,
+  and no listener is notified. The same ACCEPT
+  event under the fresh key `demo-fresh-accept`
+  (after a fresh-key PUBLISH) advances to ACCEPTED
+  and consumes its key, so the closing snapshot
+  lists the seed keys followed by the two fresh
+  keys. A construction attempt with an empty-string
+  seed is rejected with the pinned error
+  (`invalid option: idempotencyKeys entries must be
+  non-empty strings, got ""`), and the seed-free
+  task dispatches keylessly with no snapshot key
+  field, pinning the unchanged pre-seeding default.
+  The demo tests gain two cases for the segment
+  (in-process verdicts with independent
+  reproduction, and byte-identical determinism),
+  for 574 tests in total. No network, no
+  randomness, and no wall clock. Demo only; no
+  library behavior change.
+
 - A payout webhook `maxFutureSkewMs` future-skew
   benchmark path: `npm run bench` now also times
   `verifyPayoutWebhook` over the fixed signed webhook

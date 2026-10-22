@@ -340,7 +340,26 @@
  * has only seen asserted by the RBAC tests so far.
  * Honest limit, printed in the segment itself: an
  * allowlist is an authorization check on the actor
- * name, not identity authentication.
+ * name, not identity authentication —
+ * and finally a preseeded idempotency keys segment:
+ * a dedicated task constructed with a pinned
+ * `idempotencyKeys` seed (one entry duplicated) starts
+ * with those dispatch keys already consumed — the
+ * re-attachment path for `fromHistory()`, whose audit
+ * log cannot carry the key set: the duplicate seed is
+ * deduped in order in the snapshot, a dispatch under a
+ * seeded key is a complete no-op even for an event that
+ * is illegal from the current state (no transition
+ * validation, no history append, no listener
+ * notification), the same event under a fresh key
+ * advances once its turn comes and consumes that key,
+ * an empty-string seed throws the pinned
+ * `invalid option: idempotencyKeys …` error at
+ * construction, and a second dedicated task constructed
+ * without any seed dispatches keylessly exactly as
+ * before — the exactly-once recovery path a reader has
+ * only seen asserted by the idempotency key snapshot
+ * tests so far.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -430,6 +449,14 @@
  * its publish and arbitration rejection errors with
  * their post-rejection states and history lengths,
  * and its policy-free default task,
+ * the preseeded idempotency keys segment's seeded task
+ * with its pinned seed keys, its deduped snapshot key
+ * list, its seeded-key no-op return with its
+ * post-no-op state, history length and notification
+ * count, its notified event list, its post-fresh-key
+ * snapshot key list, its empty-seed construction
+ * error, and its seed-free default task with its
+ * (absent) snapshot key list,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -528,6 +555,18 @@ export const DEMO_ROLE_POLICY: RolePolicy = {
   ARBITRATE_APPROVE: ["senior-moderator"],
   ARBITRATE_REJECT: ["senior-moderator"],
 };
+
+/**
+ * Already-consumed dispatch idempotency keys for the demo's
+ * closing preseeded-keys segment only — pinned key names, not
+ * credentials. The segment seeds its task with this list plus
+ * one duplicate of the first entry; the snapshot must carry
+ * exactly this deduped list, in this order.
+ */
+export const DEMO_SEEDED_IDEMPOTENCY_KEYS: string[] = [
+  "demo-seed-publish",
+  "demo-seed-accept",
+];
 
 const steps: Array<{
   event: TaskEvent;
@@ -776,6 +815,30 @@ export interface DemoResult {
   rolePolicyHistoryLengthAfterArbitrateRejects: number;
   /** Default task of the closing rolePolicy segment (DEMO-030). */
   rolePolicyDefaultTask: TaskLifecycle;
+  /** Seeded task of the closing preseeded idempotency keys segment (DEMO-031). */
+  seededIdempotencyTask: TaskLifecycle;
+  /** The segment's pinned deduped seed keys (DEMO_SEEDED_IDEMPOTENCY_KEYS). */
+  seededIdempotencyKeys: string[];
+  /** DEMO-031's snapshot key list right after construction (deduped, in seed order). */
+  seededIdempotencySnapshotKeysAfterSeed: string[];
+  /** Return of DEMO-031's seeded-key ACCEPT from DRAFT (DRAFT — a no-op). */
+  seededIdempotencyNoopReturn: TaskState;
+  /** DEMO-031's state after the seeded-key no-op (DRAFT). */
+  seededIdempotencyStateAfterNoop: TaskState;
+  /** DEMO-031's history length after the seeded-key no-op (0). */
+  seededIdempotencyHistoryLengthAfterNoop: number;
+  /** Listener notifications DEMO-031 had after the seeded-key no-op (0). */
+  seededIdempotencyNotificationCountAfterNoop: number;
+  /** Events DEMO-031's listener was notified of ([PUBLISH, ACCEPT]). */
+  seededIdempotencyNotificationEvents: TaskEvent[];
+  /** DEMO-031's snapshot key list after both fresh-key dispatches (seed keys, then fresh keys). */
+  seededIdempotencySnapshotKeysAfterFreshKeys: string[];
+  /** Error from constructing a task with an empty-string seed ("" if accepted). */
+  seededIdempotencyEmptySeedError: string;
+  /** Default task of the closing preseeded idempotency keys segment (DEMO-032). */
+  seededIdempotencyDefaultTask: TaskLifecycle;
+  /** DEMO-032's snapshot key list — undefined (the field is omitted while empty). */
+  seededIdempotencyDefaultSnapshotKeys: string[] | undefined;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -936,7 +999,13 @@ export interface DemoResult {
  * and no-secret verdicts, the event-level RBAC segment's
  * pinned policy with its policy and default tasks, its
  * publish and arbitration rejection errors, and its
- * post-rejection states and history lengths, and the exact lines
+ * post-rejection states and history lengths, the preseeded
+ * idempotency keys segment's seeded and default tasks
+ * with its deduped and post-fresh-key snapshot key
+ * lists, its seeded-key no-op return and post-no-op
+ * state, history length and notification count, its
+ * notified event list, and its empty-seed construction
+ * error, and the exact lines
  * `main()` prints — so tests can assert on the demo itself, not
  * just on the library.
  */
@@ -4229,8 +4298,153 @@ export async function runDemo(): Promise<DemoResult> {
     `  arbitration is moderator-only (DEMO-029): ARBITRATE_APPROVE by contributor -> rejected: "${rolePolicyArbitrateUnauthorizedError}"; ARBITRATE_APPROVE with no actor -> rejected: "${rolePolicyArbitrateMissingActorError}"; state after both rejections: ${rolePolicyStateAfterArbitrateRejects}, history entries: ${rolePolicyHistoryLengthAfterArbitrateRejects}; ARBITRATE_APPROVE by senior-moderator -> ${rolePolicyTask.state}, history entries: ${rolePolicyTask.history.length}`,
     `  no policy, no check (DEMO-030): a task constructed without rolePolicy is driven to DISPUTED and arbitrated with no actor at all -> ${rolePolicyDefaultTask.state}, history entries: ${rolePolicyDefaultTask.history.length} (omitting the policy preserves the exact pre-policy behavior — no event requires an actor anywhere)`,
   );
+  // Preseeded idempotency keys segment (closing): the
+  // dispatch idempotency segment above shows keys consumed
+  // by live dispatches, but a task rebuilt from its audit
+  // log alone loses them — history entries carry no key
+  // set (keys are dispatch configuration, not audit
+  // data). The `idempotencyKeys` constructor option
+  // (TaskLifecycleOptions, unit-tested since the
+  // idempotency key snapshot tests landed) is the
+  // re-attachment path `fromHistory()` documents: seed
+  // the rebuilt task with the keys its predecessor had
+  // already consumed, and their exactly-once effect
+  // survives the rebuild. Two dedicated tasks are driven
+  // under fixed literal timestamps — no network, no
+  // randomness, no wall clock:
+  //   - DEMO-031 is constructed with the seed list
+  //     ["demo-seed-publish", "demo-seed-publish",
+  //     "demo-seed-accept"]: the duplicate entry is
+  //     deduped (first occurrence wins), so its snapshot
+  //     carries exactly DEMO_SEEDED_IDEMPOTENCY_KEYS. It
+  //     carries a collecting listener. Its ACCEPT at
+  //     2026-04-07T09:00 under the seeded key
+  //     "demo-seed-accept" is an event with no edge from
+  //     DRAFT, yet it returns DRAFT without throwing —
+  //     a consumed key is a complete no-op: the
+  //     transition is not validated, nothing is
+  //     appended, no listener is notified. Its PUBLISH
+  //     at 09:05 under the fresh key "demo-fresh-publish"
+  //     lands OPEN, and the same ACCEPT event at 09:10
+  //     under the fresh key "demo-fresh-accept" lands
+  //     ACCEPTED — each fresh key consumed by its
+  //     successful dispatch, so the closing snapshot
+  //     lists the two seed keys followed by the two
+  //     fresh keys.
+  //   - A construction attempt with seed [""] throws
+  //     the pinned `invalid option: idempotencyKeys
+  //     entries must be non-empty strings, got ""`
+  //     before any task exists — the same bar dispatch
+  //     applies to a single key.
+  //   - DEMO-032 carries no seed: its keyless PUBLISH
+  //     at 2026-04-07T09:00 lands OPEN with 1 entry and
+  //     its snapshot omits `idempotencyKeys` entirely —
+  //     the pre-seeding behavior, unchanged.
+  // Hand-written expectations — written out here from
+  // the TaskLifecycleOptions docs and the idempotency
+  // key snapshot tests, never derived from the seeding
+  // itself. The segment asserts all of this here,
+  // outside the printed lines: a seeding verdict that
+  // drifted would fail the demo itself, not just a test.
+  const seededIdempotencyTask = new TaskLifecycle("DEMO-031", {
+    idempotencyKeys: [
+      "demo-seed-publish",
+      "demo-seed-publish",
+      "demo-seed-accept",
+    ],
+  });
+  const seededIdempotencyNotificationEvents: TaskEvent[] = [];
+  seededIdempotencyTask.subscribe((event) => {
+    seededIdempotencyNotificationEvents.push(event);
+  });
+  const seededIdempotencySnapshotKeysAfterSeed =
+    seededIdempotencyTask.toJSON().idempotencyKeys ?? [];
+  const seededIdempotencyNoopReturn = seededIdempotencyTask.dispatch(
+    "ACCEPT",
+    {
+      actor: "contributor",
+      at: "2026-04-07T09:00:00.000Z",
+      idempotencyKey: "demo-seed-accept",
+    },
+  );
+  const seededIdempotencyStateAfterNoop = seededIdempotencyTask.state;
+  const seededIdempotencyHistoryLengthAfterNoop =
+    seededIdempotencyTask.history.length;
+  const seededIdempotencyNotificationCountAfterNoop =
+    seededIdempotencyNotificationEvents.length;
+  seededIdempotencyTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-07T09:05:00.000Z",
+    idempotencyKey: "demo-fresh-publish",
+  });
+  seededIdempotencyTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-07T09:10:00.000Z",
+    idempotencyKey: "demo-fresh-accept",
+  });
+  const seededIdempotencySnapshotKeysAfterFreshKeys =
+    seededIdempotencyTask.toJSON().idempotencyKeys ?? [];
+  let seededIdempotencyEmptySeedError = "";
+  try {
+    new TaskLifecycle("DEMO-031-EMPTY-SEED", { idempotencyKeys: [""] });
+  } catch (err) {
+    seededIdempotencyEmptySeedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const seededIdempotencyDefaultTask = new TaskLifecycle("DEMO-032");
+  seededIdempotencyDefaultTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-07T09:00:00.000Z",
+  });
+  const seededIdempotencyDefaultSnapshotKeys =
+    seededIdempotencyDefaultTask.toJSON().idempotencyKeys;
+  if (
+    JSON.stringify(seededIdempotencySnapshotKeysAfterSeed) !==
+      JSON.stringify(["demo-seed-publish", "demo-seed-accept"]) ||
+    seededIdempotencyNoopReturn !== "DRAFT" ||
+    seededIdempotencyStateAfterNoop !== "DRAFT" ||
+    seededIdempotencyHistoryLengthAfterNoop !== 0 ||
+    seededIdempotencyNotificationCountAfterNoop !== 0 ||
+    seededIdempotencyTask.state !== "ACCEPTED" ||
+    seededIdempotencyTask.history.length !== 2 ||
+    seededIdempotencyTask.history[0].event !== "PUBLISH" ||
+    seededIdempotencyTask.history[0].at !== "2026-04-07T09:05:00.000Z" ||
+    seededIdempotencyTask.history[1].event !== "ACCEPT" ||
+    seededIdempotencyTask.history[1].at !== "2026-04-07T09:10:00.000Z" ||
+    seededIdempotencyNotificationEvents.length !== 2 ||
+    seededIdempotencyNotificationEvents[0] !== "PUBLISH" ||
+    seededIdempotencyNotificationEvents[1] !== "ACCEPT" ||
+    JSON.stringify(seededIdempotencySnapshotKeysAfterFreshKeys) !==
+      JSON.stringify([
+        "demo-seed-publish",
+        "demo-seed-accept",
+        "demo-fresh-publish",
+        "demo-fresh-accept",
+      ]) ||
+    seededIdempotencyEmptySeedError !==
+      'invalid option: idempotencyKeys entries must be non-empty strings, got ""' ||
+    seededIdempotencyDefaultTask.state !== "OPEN" ||
+    seededIdempotencyDefaultTask.history.length !== 1 ||
+    seededIdempotencyDefaultTask.history[0].event !== "PUBLISH" ||
+    seededIdempotencyDefaultTask.history[0].at !==
+      "2026-04-07T09:00:00.000Z" ||
+    seededIdempotencyDefaultSnapshotKeys !== undefined
+  ) {
+    throw new Error(
+      "demo fixture broken: preseeded idempotencyKeys does not match the hand-pinned contract (duplicate seed entries must dedupe in order in the snapshot, a dispatch under a seeded key must be a complete no-op even for an illegal event — no validation, no append, no notification — the same event under a fresh key must advance and consume the key, an empty-string seed must throw the pinned construction error, and a seed-free task must keep the exact pre-seeding behavior with no snapshot key field)",
+    );
+  }
+  lines.push(
+    "",
+    "Preseeded idempotency keys (idempotencyKeys seeds a task with already-consumed dispatch keys):",
+    `  seeded task DEMO-031 (constructed with idempotencyKeys ["demo-seed-publish", "demo-seed-publish", "demo-seed-accept"]): duplicate seed entries are deduped, first occurrence wins — snapshot idempotencyKeys: ${JSON.stringify(seededIdempotencySnapshotKeysAfterSeed)} (the re-attachment path for fromHistory(), whose audit log cannot carry the key set — keys are dispatch configuration, not audit data)`,
+    `  seeded key, illegal event (DEMO-031): ACCEPT with idempotencyKey "demo-seed-accept" from DRAFT (no ACCEPT edge leaves DRAFT) -> returns ${seededIdempotencyNoopReturn}; state after: ${seededIdempotencyStateAfterNoop}, history entries: ${seededIdempotencyHistoryLengthAfterNoop}, listener notifications: ${seededIdempotencyNotificationCountAfterNoop} (a consumed key is a complete no-op — the transition is not even validated, nothing is appended, no listener is notified)`,
+    `  same event, fresh keys (DEMO-031): PUBLISH with idempotencyKey "demo-fresh-publish" -> OPEN; ACCEPT with idempotencyKey "demo-fresh-accept" -> ${seededIdempotencyTask.state}, history entries: ${seededIdempotencyTask.history.length}; snapshot idempotencyKeys after both: ${JSON.stringify(seededIdempotencySnapshotKeysAfterFreshKeys)} (each fresh key is consumed by its successful dispatch — a later retry under either is a no-op)`,
+    `  invalid seed (construction): idempotencyKeys [""] -> rejected: "${seededIdempotencyEmptySeedError}" (every seed must be a non-empty string — the same bar dispatch applies to a single key, checked at construction before any task exists)`,
+    `  no seed, no change (DEMO-032): a task constructed without idempotencyKeys dispatches PUBLISH with no key at all -> ${seededIdempotencyDefaultTask.state}, history entries: ${seededIdempotencyDefaultTask.history.length}; snapshot idempotencyKeys: ${seededIdempotencyDefaultSnapshotKeys} (omitting the seed preserves the exact pre-seeding behavior — the snapshot omits the field while the key set is empty)`,
+  );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 572 tests, all local
+npm test   # 574 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1134,6 +1134,16 @@ parallel can both execute the same key. For cross-process
 exactly-once semantics, pair this with a durable store (e.g. a
 `UNIQUE` constraint on the key column).
 
+`npm run demo` closes with a preseeded-keys segment: a task
+constructed with a duplicated `idempotencyKeys` seed carries the
+deduped key list in its snapshot, a dispatch under a seeded key is
+a complete no-op even for an event that is illegal from the
+current state (no transition validation, no history append, no
+listener notification), the same event under fresh keys advances
+and consumes them, an empty-string seed throws the pinned
+`invalid option: idempotencyKeys …` error at construction, and a
+seed-free task dispatches keylessly exactly as before.
+
 ## Optimistic concurrency (`expectedSeq`)
 
 Two writers holding the same snapshot of a task can both dispatch
@@ -1247,7 +1257,7 @@ library records the actor string it is given but cannot verify who
 "senior-moderator" really is. It guarantees policy violations never
 dispatch and every allowed dispatch is audited with its actor string.
 
-`npm run demo` closes with this segment: a task under a pinned policy
+`npm run demo` includes this segment: a task under a pinned policy
 (PUBLISH by researcher, ACCEPT by contributor, arbitration by
 senior-moderator) rejects wrong and missing actors with no history
 trace, advances under the allowlisted actors, runs its uncovered
@@ -1409,7 +1419,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 572 tests covering the happy path, reject→resubmit
+`npm test` runs 574 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
