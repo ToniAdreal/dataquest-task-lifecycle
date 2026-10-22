@@ -11,6 +11,36 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch `expectedSeq` optimistic-concurrency
+  benchmark path: `npm run bench` now also times
+  `dispatch("START_CAPTURE", { expectedSeq: 2 })` on a
+  fresh task driven under fixed timestamps to a pinned
+  2-entry history (PUBLISH, ACCEPT) in ACCEPTED — the
+  stale-snapshot guard every concurrent writer pays
+  before any other dispatch check, previously invisible
+  inside the plain dispatch row, whose dispatches never
+  carry the guard. Every timed iteration rebuilds the
+  fresh task (the guarded dispatch mutates it, so the
+  rebuild cost is inside the timed region) and checks
+  the CAPTURING return, the exactly-3-entry history,
+  and the last entry's pinned fields (seq 3,
+  `START_CAPTURE`, at BASE + 2s, the pinned actor).
+  Outside the timed loop, a stale `expectedSeq: 1` is
+  pinned to throw exactly
+  `dispatch conflict: expected seq 1 but task is at seq 2`
+  and leave state and history byte-identical (compared
+  through the canonical NDJSON serializer),
+  `expectedSeq: 0` on an empty history is pinned to
+  advance, illegal values (-1 and 1.5) are pinned to
+  throw their exact configuration errors
+  (`invalid dispatch options: expectedSeq must be a non-negative integer, got -1`
+  and the same with `got 1.5`), and dispatch without
+  `expectedSeq` is pinned to behave unchanged. The
+  README Benchmarks table is refreshed from one real
+  run (the new path measured 25,988 ops/sec on
+  2026-10-22). No network, no randomness, and no wall
+  clock. Bench only; no library behavior change.
+
 - A payout webhook `timeoutMs` CLI demo segment:
   `npm run demo` now closes with the main task's
   signed webhook delivered by `deliverPayoutWebhook`
