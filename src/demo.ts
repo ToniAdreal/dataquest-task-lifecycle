@@ -438,6 +438,19 @@
  * optimistic lock against the in-memory history —
  * cross-process writers still need compare-and-swap
  * in the durable store itself.
+ * and finally a stale patrol segment: five further
+ * tasks screened by `staleTasks()` alone at the
+ * stale branches' fixed `now` under a patrol budget
+ * map (the parameter the library calls
+ * `maxAgeByState`: DRAFT / OPEN / PAID at 7 days
+ * each, IN_REVIEW deliberately absent) — exactly
+ * one task is stale; the other four are each
+ * excluded for a different pinned reason (exactly
+ * at the budget, terminal, no history, unmapped
+ * state) — with a notify-only disposition through
+ * `actOnStaleTasks()` that dispatches nothing, and
+ * a fail-fast check pinning the exact configuration
+ * error an unknown state name in the map throws.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -645,6 +658,65 @@ export const DEMO_SEEDED_IDEMPOTENCY_KEYS: string[] = [
   "demo-seed-publish",
   "demo-seed-accept",
 ];
+
+/**
+ * Stale-patrol fixtures for the demo's closing patrol segment
+ * (backlog #510): five further tasks screened by `staleTasks` alone
+ * on the SAME fixed `now` as the stale branches above
+ * (2026-03-22T09:00:00.000Z) under a patrol budget map that
+ * deliberately covers three states — DRAFT, OPEN and PAID, each
+ * 7 days — while IN_REVIEW carries no budget at all. The map is
+ * the `maxAgeByState` parameter of `staleTasks` /
+ * `actOnStaleTasks`; the earlier stale branches pass their own
+ * maps under local names, so the parameter name itself never
+ * appeared in this demo before this segment. Hand-computed
+ * expectations (dwell is `now` minus the last history entry's
+ * `at`; stale only when STRICTLY past the budget):
+ * - DEMO-038 (stale): OPEN at 2026-03-01T09:00 — dwell 21 days
+ *   > the 7-day OPEN budget, so it is the ONLY selection.
+ * - DEMO-039 (exactly at budget): OPEN at 2026-03-15T09:00 —
+ *   dwell exactly 7 days; exactly at the budget is NOT stale.
+ * - DEMO-040 (terminal): PAID, last entry at 2026-02-28T09:00 —
+ *   dwell 22 days and PAID even carries a patrol budget, but
+ *   terminal states are never stale.
+ * - DEMO-041 (no history): a fresh DRAFT task that was never
+ *   dispatched — DRAFT carries a patrol budget, but with no
+ *   history there is no measurable dwell, so it is never stale.
+ * - DEMO-042 (unmapped state): IN_REVIEW, last entry at
+ *   2026-02-15T09:00 — dwell 35 days, but IN_REVIEW is absent
+ *   from the patrol map (no budget = no staleness), so it is
+ *   never stale.
+ * The patrol disposition is a notify-only action through
+ * `actOnStaleTasks` (recording the notified ids, dispatching
+ * nothing), so every patrol task keeps its state and history.
+ * A separate fail-fast check calls `staleTasks` with an unknown
+ * state name in the map and pins the exact configuration error.
+ */
+export const DEMO_PATROL_NOW = "2026-03-22T09:00:00.000Z";
+export const DEMO_PATROL_DAY_MS = 86_400_000;
+export const DEMO_PATROL_MAX_AGE_MS = 7 * DEMO_PATROL_DAY_MS;
+export const DEMO_PATROL_STALE_TASK_ID = "DEMO-038";
+export const DEMO_PATROL_STALE_PUBLISH_AT = "2026-03-01T09:00:00.000Z";
+export const DEMO_PATROL_EXACT_TASK_ID = "DEMO-039";
+export const DEMO_PATROL_EXACT_PUBLISH_AT = "2026-03-15T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_TASK_ID = "DEMO-040";
+export const DEMO_PATROL_TERMINAL_PUBLISH_AT = "2026-02-20T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_ACCEPT_AT = "2026-02-21T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_CAPTURE_AT = "2026-02-22T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_SUBMIT_AT = "2026-02-24T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_REVIEW_AT = "2026-02-25T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_APPROVE_AT = "2026-02-26T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_REQUEST_AT = "2026-02-27T09:00:00.000Z";
+export const DEMO_PATROL_TERMINAL_COMPLETE_AT = "2026-02-28T09:00:00.000Z";
+export const DEMO_PATROL_NO_HISTORY_TASK_ID = "DEMO-041";
+export const DEMO_PATROL_UNMAPPED_TASK_ID = "DEMO-042";
+export const DEMO_PATROL_UNMAPPED_PUBLISH_AT = "2026-02-10T09:00:00.000Z";
+export const DEMO_PATROL_UNMAPPED_ACCEPT_AT = "2026-02-11T09:00:00.000Z";
+export const DEMO_PATROL_UNMAPPED_CAPTURE_AT = "2026-02-12T09:00:00.000Z";
+export const DEMO_PATROL_UNMAPPED_SUBMIT_AT = "2026-02-14T09:00:00.000Z";
+export const DEMO_PATROL_UNMAPPED_REVIEW_AT = "2026-02-15T09:00:00.000Z";
+export const DEMO_PATROL_STALE_CONFIG_ERROR =
+  'invalid maxAgeByState: unknown state "BOGUS"';
 
 const steps: Array<{
   event: TaskEvent;
@@ -975,6 +1047,16 @@ export interface DemoResult {
   expectedSeqUnguardedTask: TaskLifecycle;
   /** Return of DEMO-037's START_CAPTURE with no expectedSeq (CAPTURING). */
   expectedSeqUnguardedReturn: TaskState;
+  /** The closing stale patrol segment's five tasks, in patrol order. */
+  patrolTasks: TaskLifecycle[];
+  /** `staleTasks` selection over {@link DemoResult.patrolTasks} (only DEMO-038). */
+  patrolStaleSelected: TaskLifecycle[];
+  /** Per-task outcomes of `actOnStaleTasks` running the notify-only patrol action. */
+  patrolStaleActionResults: StaleActionResult[];
+  /** Ids the patrol's notify-only action recorded, in action order. */
+  patrolStaleNotifiedIds: string[];
+  /** Exact error of `staleTasks` called with an unknown state name in the patrol map. */
+  patrolStaleConfigError: string;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -5118,7 +5200,170 @@ export async function runDemo(): Promise<DemoResult> {
     `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> ${expectedSeqUnguardedReturn}, history entries: ${expectedSeqUnguardedTask.history.length} (omitting expectedSeq preserves the exact pre-guard behavior)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // --- Stale patrol: staleTasks / maxAgeByState edge forms ---
+  // A dedicated patrol over five further tasks on the same fixed
+  // `now` as the stale branches above, screened by `staleTasks`
+  // ALONE under a patrol budget map — the `maxAgeByState`
+  // parameter itself (DRAFT / OPEN / PAID at 7 days each;
+  // IN_REVIEW deliberately absent), which the branches above
+  // only ever passed under local names — see the fixture comment
+  // above for the hand-computed expectations. Exactly one task
+  // is stale; the other four are each excluded for a different
+  // pinned reason (exactly at the budget, terminal, no history,
+  // unmapped state). The disposition is a notify-only action
+  // through actOnStaleTasks: it records the notified ids and
+  // dispatches nothing, so the patrol changes no task. A
+  // fail-fast check then pins the exact configuration error for
+  // an unknown state name in the map.
+  const patrolNow = new Date(DEMO_PATROL_NOW);
+  const patrolNowMs = Date.parse(DEMO_PATROL_NOW);
+  const patrolStaleTask = new TaskLifecycle(DEMO_PATROL_STALE_TASK_ID);
+  patrolStaleTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_STALE_PUBLISH_AT,
+  });
+  const patrolExactTask = new TaskLifecycle(DEMO_PATROL_EXACT_TASK_ID);
+  patrolExactTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_EXACT_PUBLISH_AT,
+  });
+  const patrolTerminalTask = new TaskLifecycle(DEMO_PATROL_TERMINAL_TASK_ID);
+  patrolTerminalTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_TERMINAL_PUBLISH_AT,
+  });
+  patrolTerminalTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: DEMO_PATROL_TERMINAL_ACCEPT_AT,
+  });
+  patrolTerminalTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: DEMO_PATROL_TERMINAL_CAPTURE_AT,
+  });
+  patrolTerminalTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: DEMO_PATROL_TERMINAL_SUBMIT_AT,
+  });
+  patrolTerminalTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: DEMO_PATROL_TERMINAL_REVIEW_AT,
+  });
+  patrolTerminalTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: DEMO_PATROL_TERMINAL_APPROVE_AT,
+  });
+  patrolTerminalTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: DEMO_PATROL_TERMINAL_REQUEST_AT,
+  });
+  patrolTerminalTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: DEMO_PATROL_TERMINAL_COMPLETE_AT,
+  });
+  const patrolNoHistoryTask = new TaskLifecycle(DEMO_PATROL_NO_HISTORY_TASK_ID);
+  const patrolUnmappedTask = new TaskLifecycle(DEMO_PATROL_UNMAPPED_TASK_ID);
+  patrolUnmappedTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_UNMAPPED_PUBLISH_AT,
+  });
+  patrolUnmappedTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: DEMO_PATROL_UNMAPPED_ACCEPT_AT,
+  });
+  patrolUnmappedTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: DEMO_PATROL_UNMAPPED_CAPTURE_AT,
+  });
+  patrolUnmappedTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: DEMO_PATROL_UNMAPPED_SUBMIT_AT,
+  });
+  patrolUnmappedTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: DEMO_PATROL_UNMAPPED_REVIEW_AT,
+  });
+  const patrolTasks = [
+    patrolStaleTask,
+    patrolExactTask,
+    patrolTerminalTask,
+    patrolNoHistoryTask,
+    patrolUnmappedTask,
+  ];
+  const patrolMaxAgeByState = {
+    DRAFT: DEMO_PATROL_MAX_AGE_MS,
+    OPEN: DEMO_PATROL_MAX_AGE_MS,
+    PAID: DEMO_PATROL_MAX_AGE_MS,
+  };
+  const patrolStaleSelected = staleTasks(
+    patrolTasks,
+    patrolMaxAgeByState,
+    patrolNow,
+  );
+  const patrolStaleNotifiedIds: string[] = [];
+  const patrolStaleActionResults = actOnStaleTasks(
+    patrolTasks,
+    (t) => {
+      patrolStaleNotifiedIds.push(t.id);
+    },
+    patrolMaxAgeByState,
+    patrolNow,
+  );
+  let patrolStaleConfigError = "";
+  try {
+    staleTasks(patrolTasks, { BOGUS: 1000 } as never, patrolNow);
+  } catch (err) {
+    patrolStaleConfigError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    patrolStaleSelected.length !== 1 ||
+    patrolStaleSelected[0] !== patrolStaleTask ||
+    patrolStaleActionResults.length !== 1 ||
+    patrolStaleActionResults[0].task !== patrolStaleTask ||
+    patrolStaleActionResults[0].acted !== true ||
+    patrolStaleActionResults[0].error !== undefined ||
+    patrolStaleNotifiedIds.length !== 1 ||
+    patrolStaleNotifiedIds[0] !== DEMO_PATROL_STALE_TASK_ID ||
+    patrolStaleConfigError !== DEMO_PATROL_STALE_CONFIG_ERROR ||
+    patrolTasks.map((t) => t.state).join(",") !==
+      "OPEN,OPEN,PAID,DRAFT,IN_REVIEW" ||
+    patrolTasks.map((t) => t.history.length).join(",") !== "1,1,8,0,5"
+  ) {
+    throw new Error(
+      "demo fixture broken: stale patrol does not have the pinned shape (only the stale OPEN task selected and notified; exactly-at-budget, terminal, no-history and unmapped tasks excluded; unknown-state config error pinned)",
+    );
+  }
+  const patrolSelectedIds = new Set(patrolStaleSelected.map((t) => t.id));
+  lines.push(
+    "",
+    "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+    `  fixed now: ${DEMO_PATROL_NOW} — patrol budgets: DRAFT 7 days, OPEN 7 days, PAID 7 days (IN_REVIEW has no budget; dwell from the last history entry, strictly past the budget)`,
+  );
+  for (const patrolTask of patrolTasks) {
+    const lastEntry = patrolTask.history[patrolTask.history.length - 1];
+    const dwellText =
+      lastEntry === undefined
+        ? "no history (no measurable dwell)"
+        : `entered ${lastEntry.at}, dwell ${(patrolNowMs - Date.parse(lastEntry.at)) / DEMO_PATROL_DAY_MS} days`;
+    lines.push(
+      `  ${patrolTask.id}: state ${patrolTask.state}, ${dwellText} — stale: ${patrolSelectedIds.has(patrolTask.id)}`,
+    );
+  }
+  lines.push(
+    `  staleTasks selection: [${patrolStaleSelected.map((t) => t.id).join(", ")}] — exactly-at-budget (${DEMO_PATROL_EXACT_TASK_ID}), terminal (${DEMO_PATROL_TERMINAL_TASK_ID}), no-history (${DEMO_PATROL_NO_HISTORY_TASK_ID}) and unmapped-state (${DEMO_PATROL_UNMAPPED_TASK_ID}) tasks are not selected`,
+    `  actOnStaleTasks (action: notify the assignee, dispatch nothing): ${patrolStaleActionResults.length} attempted`,
+  );
+  for (const result of patrolStaleActionResults) {
+    lines.push(
+      result.acted
+        ? `  ${result.task.id}: acted true — notified, task unchanged at ${result.task.state}`
+        : `  ${result.task.id}: acted false — error: ${result.error}`,
+    );
+  }
+  lines.push(
+    `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${patrolStaleConfigError} before any task is read`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

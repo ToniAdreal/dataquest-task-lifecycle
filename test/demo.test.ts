@@ -11,6 +11,18 @@ import {
   DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
+  DEMO_PATROL_EXACT_PUBLISH_AT,
+  DEMO_PATROL_EXACT_TASK_ID,
+  DEMO_PATROL_MAX_AGE_MS,
+  DEMO_PATROL_NOW,
+  DEMO_PATROL_NO_HISTORY_TASK_ID,
+  DEMO_PATROL_STALE_CONFIG_ERROR,
+  DEMO_PATROL_STALE_PUBLISH_AT,
+  DEMO_PATROL_STALE_TASK_ID,
+  DEMO_PATROL_TERMINAL_COMPLETE_AT,
+  DEMO_PATROL_TERMINAL_TASK_ID,
+  DEMO_PATROL_UNMAPPED_REVIEW_AT,
+  DEMO_PATROL_UNMAPPED_TASK_ID,
   DEMO_SEEDED_IDEMPOTENCY_KEYS,
   DEMO_WEBHOOK_SECRET,
 } from "../src/demo.js";
@@ -519,11 +531,23 @@ Dispatch expectedSeq optimistic concurrency (dispatch pins the history length th
   stale guard (DEMO-034): the same pinned 2-entry history; START_CAPTURE with expectedSeq 1 -> rejected: "dispatch conflict: expected seq 1 but task is at seq 2"; state after: ACCEPTED, history entries: 2 (the guard runs before every other dispatch check and changes nothing — no state move, no history entry — so a writer holding a stale snapshot fails loudly instead of advancing a state it never saw, and re-reading the task and retrying with the fresh seq works)
   empty history (DEMO-035): a fresh task (history entries: 0); PUBLISH with expectedSeq 0 -> OPEN, history entries: 1 (0 is the guard for an empty history — the seq is the history length, which is the last entry's seq once entries exist)
   illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got -1"; PUBLISH with expectedSeq 1.5 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5"; state after both: DRAFT, history entries: 0 (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)
-  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)`;
+  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)
+
+Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
+  fixed now: <timestamp> — patrol budgets: DRAFT 7 days, OPEN 7 days, PAID 7 days (IN_REVIEW has no budget; dwell from the last history entry, strictly past the budget)
+  DEMO-038: state OPEN, entered <timestamp>, dwell 21 days — stale: true
+  DEMO-039: state OPEN, entered <timestamp>, dwell 7 days — stale: false
+  DEMO-040: state PAID, entered <timestamp>, dwell 22 days — stale: false
+  DEMO-041: state DRAFT, no history (no measurable dwell) — stale: false
+  DEMO-042: state IN_REVIEW, entered <timestamp>, dwell 35 days — stale: false
+  staleTasks selection: [DEMO-038] — exactly-at-budget (DEMO-039), terminal (DEMO-040), no-history (DEMO-041) and unmapped-state (DEMO-042) tasks are not selected
+  actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted
+  DEMO-038: acted true — notified, task unchanged at OPEN
+  invalid patrol configuration fails fast: staleTasks with an unknown state name throws invalid maxAgeByState: unknown state "BOGUS" before any task is read`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 449);
+  assert.equal(lines.length, 461);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1968,7 +1992,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 449);
+  assert.equal(out.trimEnd().split("\n").length, 461);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5646,9 +5670,11 @@ test("demo shows the dispatch expectedSeq segment in-process: a correct guard ad
   ]) {
     assert.ok(text.includes(line), `missing expectedSeq line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)`,
+  assert.ok(
+    text.indexOf(
+      "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+    ) > expectedSeqAt,
+    "stale patrol segment must follow the expectedSeq segment",
   );
 });
 
@@ -5656,6 +5682,7 @@ test("demo dispatch expectedSeq segment is deterministic: two runs print byte-id
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):"),
+      ls.indexOf("Stale patrol (staleTasks / maxAgeByState screening, notify-only action):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -5684,5 +5711,171 @@ test("demo dispatch expectedSeq segment is deterministic: two runs print byte-id
   assert.deepEqual(
     a.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
     b.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
+  );
+});
+
+test("demo stale patrol selects only the long-stuck OPEN task and notifies it without dispatching", async () => {
+  const {
+    patrolTasks,
+    patrolStaleSelected,
+    patrolStaleActionResults,
+    patrolStaleNotifiedIds,
+    patrolStaleConfigError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // staleTasks docs in src/taskLifecycle.ts and
+  // test/staleTasks.test.ts, never derived from the demo's
+  // own screening.
+  assert.deepEqual(
+    patrolTasks.map((t) => t.id),
+    [
+      DEMO_PATROL_STALE_TASK_ID,
+      DEMO_PATROL_EXACT_TASK_ID,
+      DEMO_PATROL_TERMINAL_TASK_ID,
+      DEMO_PATROL_NO_HISTORY_TASK_ID,
+      DEMO_PATROL_UNMAPPED_TASK_ID,
+    ],
+  );
+  assert.deepEqual(
+    patrolTasks.map((t) => t.state),
+    ["OPEN", "OPEN", "PAID", "DRAFT", "IN_REVIEW"],
+  );
+  assert.deepEqual(
+    patrolTasks.map((t) => t.history.length),
+    [1, 1, 8, 0, 5],
+  );
+  assert.equal(patrolTasks[0].history[0].at, DEMO_PATROL_STALE_PUBLISH_AT);
+  assert.equal(patrolTasks[1].history[0].at, DEMO_PATROL_EXACT_PUBLISH_AT);
+  assert.equal(
+    patrolTasks[2].history[patrolTasks[2].history.length - 1].at,
+    DEMO_PATROL_TERMINAL_COMPLETE_AT,
+  );
+  assert.equal(
+    patrolTasks[4].history[patrolTasks[4].history.length - 1].at,
+    DEMO_PATROL_UNMAPPED_REVIEW_AT,
+  );
+  // Only the stale OPEN task is selected — exactly-at-budget,
+  // terminal, no-history and unmapped-state tasks are not.
+  assert.deepEqual(
+    patrolStaleSelected.map((t) => t.id),
+    [DEMO_PATROL_STALE_TASK_ID],
+  );
+  assert.equal(patrolStaleSelected[0], patrolTasks[0]);
+  // The notify-only disposition attempted exactly that one
+  // task, acted, and changed nothing.
+  assert.equal(patrolStaleActionResults.length, 1);
+  assert.equal(patrolStaleActionResults[0].task, patrolTasks[0]);
+  assert.equal(patrolStaleActionResults[0].acted, true);
+  assert.equal(patrolStaleActionResults[0].error, undefined);
+  assert.deepEqual(patrolStaleNotifiedIds, [DEMO_PATROL_STALE_TASK_ID]);
+  // The unknown-state configuration error is pinned verbatim.
+  assert.equal(patrolStaleConfigError, DEMO_PATROL_STALE_CONFIG_ERROR);
+  assert.equal(
+    patrolStaleConfigError,
+    'invalid maxAgeByState: unknown state "BOGUS"',
+  );
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the same five forms are rebuilt
+  // here on fresh tasks and screened with the library entry
+  // points directly.
+  const now = new Date(DEMO_PATROL_NOW);
+  const budgets = {
+    DRAFT: DEMO_PATROL_MAX_AGE_MS,
+    OPEN: DEMO_PATROL_MAX_AGE_MS,
+    PAID: DEMO_PATROL_MAX_AGE_MS,
+  };
+  const independentStale = new TaskLifecycle("TEST-PATROL-001");
+  independentStale.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_STALE_PUBLISH_AT,
+  });
+  const independentExact = new TaskLifecycle("TEST-PATROL-002");
+  independentExact.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_PATROL_EXACT_PUBLISH_AT,
+  });
+  const independentFresh = new TaskLifecycle("TEST-PATROL-003");
+  const independent = [independentStale, independentExact, independentFresh];
+  assert.deepEqual(
+    staleTasks(independent, budgets, now).map((t) => t.id),
+    ["TEST-PATROL-001"],
+  );
+  const independentNotified: string[] = [];
+  const independentResults = actOnStaleTasks(
+    independent,
+    (t) => {
+      independentNotified.push(t.id);
+    },
+    budgets,
+    now,
+  );
+  assert.equal(independentResults.length, 1);
+  assert.equal(independentResults[0].acted, true);
+  assert.deepEqual(independentNotified, ["TEST-PATROL-001"]);
+  assert.equal(independentStale.state, "OPEN");
+  assert.throws(
+    () => staleTasks(independent, { BOGUS: 1000 } as never, now),
+    (err: unknown) =>
+      err instanceof Error && err.message === patrolStaleConfigError,
+  );
+  // The segment closes the demo: it follows the expectedSeq
+  // segment, prints its lines verbatim, and its fail-fast
+  // line is the demo's last line.
+  const patrolAt = text.indexOf(
+    "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+  );
+  assert.ok(
+    patrolAt >
+      text.indexOf(
+        "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+      ),
+    "stale patrol segment must follow the expectedSeq segment",
+  );
+  for (const line of [
+    `  fixed now: ${DEMO_PATROL_NOW} — patrol budgets: DRAFT 7 days, OPEN 7 days, PAID 7 days (IN_REVIEW has no budget; dwell from the last history entry, strictly past the budget)`,
+    `  ${DEMO_PATROL_STALE_TASK_ID}: state OPEN, entered ${DEMO_PATROL_STALE_PUBLISH_AT}, dwell 21 days — stale: true`,
+    `  ${DEMO_PATROL_EXACT_TASK_ID}: state OPEN, entered ${DEMO_PATROL_EXACT_PUBLISH_AT}, dwell 7 days — stale: false`,
+    `  ${DEMO_PATROL_TERMINAL_TASK_ID}: state PAID, entered ${DEMO_PATROL_TERMINAL_COMPLETE_AT}, dwell 22 days — stale: false`,
+    `  ${DEMO_PATROL_NO_HISTORY_TASK_ID}: state DRAFT, no history (no measurable dwell) — stale: false`,
+    `  ${DEMO_PATROL_UNMAPPED_TASK_ID}: state IN_REVIEW, entered ${DEMO_PATROL_UNMAPPED_REVIEW_AT}, dwell 35 days — stale: false`,
+    `  staleTasks selection: [${DEMO_PATROL_STALE_TASK_ID}] — exactly-at-budget (${DEMO_PATROL_EXACT_TASK_ID}), terminal (${DEMO_PATROL_TERMINAL_TASK_ID}), no-history (${DEMO_PATROL_NO_HISTORY_TASK_ID}) and unmapped-state (${DEMO_PATROL_UNMAPPED_TASK_ID}) tasks are not selected`,
+    `  actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted`,
+    `  ${DEMO_PATROL_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN`,
+    `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${DEMO_PATROL_STALE_CONFIG_ERROR} before any task is read`,
+  ]) {
+    assert.ok(text.includes(line), `missing stale patrol line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${DEMO_PATROL_STALE_CONFIG_ERROR} before any task is read`,
+  );
+});
+
+test("demo stale patrol segment is deterministic: two runs print byte-identical patrol lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Stale patrol (staleTasks / maxAgeByState screening, notify-only action):"),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + fixed-now + five per-task lines + selection +
+  // attempted + acted + fail-fast lines; every value in the
+  // segment is a pinned literal (fixed timestamps, the pinned
+  // configuration error text), so no normalization is needed.
+  assert.equal(segA.length, 11);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(
+    a.patrolStaleSelected.map((t) => t.id),
+    b.patrolStaleSelected.map((t) => t.id),
+  );
+  assert.deepEqual(a.patrolStaleNotifiedIds, b.patrolStaleNotifiedIds);
+  assert.equal(a.patrolStaleConfigError, b.patrolStaleConfigError);
+  assert.deepEqual(
+    a.patrolTasks.map((t) => [t.state, t.history.length]),
+    b.patrolTasks.map((t) => [t.state, t.history.length]),
   );
 });

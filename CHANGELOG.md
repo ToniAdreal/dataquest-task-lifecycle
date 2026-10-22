@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A stale patrol CLI demo segment: `npm run demo` now
+  closes with five further tasks screened by
+  `staleTasks()` alone at the stale branches' fixed
+  `now` under a patrol budget map — the
+  `maxAgeByState` parameter itself (DRAFT / OPEN /
+  PAID at 7 days each, IN_REVIEW deliberately
+  absent), which the earlier stale branches only
+  ever passed under local names. Exactly one task
+  is stale (an OPEN task at 21 days of dwell); the
+  other four are each excluded for a different
+  pinned reason — exactly at the budget (7 days,
+  not strictly past), terminal (PAID, despite
+  carrying a patrol budget), no history (a fresh
+  DRAFT task has no measurable dwell) and unmapped
+  state (IN_REVIEW carries no budget) — with a
+  notify-only disposition through `actOnStaleTasks()`
+  that records the notified id and dispatches
+  nothing, and a fail-fast check pinning the exact
+  `invalid maxAgeByState: unknown state "BOGUS"`
+  configuration error. The demo tests gain two
+  cases for the segment (in-process verdicts with
+  independent reproduction, and byte-identical
+  determinism), for 582 tests in total.
 - A dispatch `expectedSeq` optimistic-concurrency
   CLI demo segment: `npm run demo` now closes with
   five dedicated tasks under fixed timestamps acting

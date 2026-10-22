@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 580 tests, all local
+npm test   # 582 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1202,7 +1202,7 @@ each restored the same snapshot from racing. Cross-process writers
 still need compare-and-swap in the durable store itself (e.g. a
 conditional update keyed on a version column).
 
-`npm run demo` closes with an `expectedSeq` segment: five
+`npm run demo` includes an `expectedSeq` segment: five
 dedicated tasks under fixed timestamps (no network, no
 randomness) act the guard out — a task driven to a pinned
 2-entry ACCEPTED history advances exactly one step under
@@ -1218,6 +1218,19 @@ errors and append nothing; and a task dispatched with no
 `expectedSeq` at all advances exactly as before the guard
 existed — the optimistic-concurrency guard, shown instead
 of only asserted by the expectedSeq tests.
+
+The demo then closes with a stale patrol segment: five
+further tasks screened by `staleTasks()` alone at the
+same fixed `now` under a patrol `maxAgeByState` map
+(DRAFT / OPEN / PAID at 7 days each, IN_REVIEW
+deliberately absent) — exactly one task is stale; the
+other four are each excluded for a different pinned
+reason (exactly at the budget, terminal, no history,
+unmapped state) — with a notify-only disposition
+through `actOnStaleTasks()` that dispatches nothing,
+and a fail-fast check pinning the exact
+`invalid maxAgeByState: unknown state "BOGUS"`
+configuration error an unknown state name throws.
 
 ## Retry budgets
 
@@ -1462,7 +1475,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 580 tests covering the happy path, reject→resubmit
+`npm test` runs 582 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
