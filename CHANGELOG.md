@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A policy snapshot round-trip benchmark path:
+  `npm run bench` now also times
+  `toJSON` → JSON text → `TaskLifecycle.fromJSON`
+  over a fixed 10-entry REJECTED snapshot that carries a
+  pinned `rolePolicy` (`DISPUTE`/`RESUBMIT` →
+  `["contributor"]`) and finite budgets (`maxResubmits` 1
+  with 1 of 1 used, `maxDisputes` 2 with 0 used) —
+  the persistence combination the plain snapshot row
+  never timed (its fixture deliberately carries no policy
+  and unlimited budgets). Every timed iteration exports
+  the envelope to JSON text and rehydrates it through the
+  strict reader, self-checking the restored state and the
+  full history entry for entry (hashes included), the
+  history-derived used counts, the envelope's
+  byte-identical policy and budget fields, and the
+  re-export fixed point. Outside the timed loop, an
+  unauthorized actor on the policy-covered `DISPUTE` is
+  pinned to the exact authorization wording and an
+  authorized `RESUBMIT` to the exact budget-exhaustion
+  wording — the budget is history-derived, so
+  persistence does not reset it — each leaving state and
+  history byte-identical. The README Benchmarks table is
+  refreshed from a single real run with the new row added.
+
 - A `listenerCount` lifecycle segment in the CLI demo: `npm run demo`
   now acts out the subscription registry's observable surface on a
   dedicated task (DEMO-043) — listenerCount pinned at 0 with no
