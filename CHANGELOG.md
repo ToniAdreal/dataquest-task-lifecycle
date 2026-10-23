@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch explicit-timestamp benchmark path:
+  `npm run bench` now also times
+  `dispatch("START_CAPTURE", { at })` with a pinned
+  canonical ISO-8601 timestamp — one timestamped dispatch
+  on a fresh task driven under fixed timestamps to a pinned
+  2-entry ACCEPTED history. The injected `at` lands verbatim
+  in the history entry, replacing the wall-clock read the
+  plain dispatch rows take; this core audit-determinism path
+  previously had only unit-test coverage
+  (`test/dispatchAt.test.ts`) and no benchmark number. Every
+  timed iteration rebuilds the fresh task, dispatches the
+  timestamped START_CAPTURE, and self-checks the CAPTURING
+  return, the exactly-3-entry history, and the last entry's
+  pinned step fields (seq 3, `START_CAPTURE`, `at`
+  byte-identical to the injected BASE + 2s value, actor
+  "reviewer"). Outside the timed loop, a non-canonical `at`
+  is pinned to the exact
+  `invalid dispatch options: at must be canonical ISO-8601, got not-a-date`
+  error with byte-identical state and history, cross-checking
+  the fail-fast rule the dispatchAt unit tests pin. The README
+  Benchmarks table is refreshed from a single real run with
+  the new row added (~47,114 ops/sec / 21.23 µs/op on this
+  machine — machine-local, not a guarantee).
+
 - A policy snapshot round-trip benchmark path:
   `npm run bench` now also times
   `toJSON` → JSON text → `TaskLifecycle.fromJSON`
