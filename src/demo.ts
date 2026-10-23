@@ -730,6 +730,20 @@ export const DEMO_CONSTRUCTOR_ID_ERROR =
 /** Task id the constructor guard segment uses for the legal construction. */
 export const DEMO_GUARD_TASK_ID = "DEMO-044";
 
+/**
+ * Task id the history immutability segment uses for its tamper probes.
+ * Next free DEMO number after the constructor-guard task.
+ */
+export const DEMO_HISTORY_TASK_ID = "DEMO-045";
+
+/**
+ * Fixed base instant the history immutability segment dispatches under.
+ * PUBLISH / ACCEPT / START_CAPTURE land at base, base + 1s, base + 2s,
+ * so the segment's printed lines never need timestamp normalization
+ * and double runs are byte-identical.
+ */
+export const DEMO_HISTORY_BASE_AT = "2026-03-23T10:00:00.000Z";
+
 const steps: Array<{
   event: TaskEvent;
   actor: string;
@@ -785,6 +799,24 @@ export interface SubscriptionNotification {
   from: TaskState;
   to: TaskState;
   seq: number;
+}
+
+/** Pinned verdicts of the history-getter immutability segment (DEMO-045). */
+export interface HistoryImmutabilityChecks {
+  /** Error name the snapshot `push` probe threw ("TypeError"). */
+  pushError: string;
+  /** Error name the snapshot `splice` probe threw ("TypeError"). */
+  spliceError: string;
+  /** Error name the snapshot entry-field-write probe threw ("TypeError"). */
+  entryWriteError: string;
+  /** Internal history length after all three probes (2, unchanged). */
+  internalLengthAfterProbes: number;
+  /** Whether the two getter snapshots are deep-equal but reference-independent. */
+  snapshotsDeepEqualButIndependent: boolean;
+  /** Entries in the snapshot taken before the later dispatch (2, detached). */
+  detachedSnapshotLengthAfterDispatch: number;
+  /** Entries in the live history after the later dispatch (3). */
+  liveLengthAfterDispatch: number;
 }
 
 export interface DemoResult {
@@ -1073,6 +1105,8 @@ export interface DemoResult {
   constructorGuardChecks: Array<{ input: string; error: string }>;
   /** Legal task of the closing constructor guard segment (DEMO-044). */
   constructorGuardTask: TaskLifecycle;
+  /** Pinned probe verdicts of the history immutability segment (DEMO-045). */
+  historyImmutabilityChecks: HistoryImmutabilityChecks;
   /** `parsePayoutRetryAfter` results for the fixed corpus, in corpus order. */
   retryAfterParsed: Array<number | undefined>;
   unreconciledTask: TaskLifecycle;
@@ -5355,6 +5389,117 @@ export async function runDemo(): Promise<DemoResult> {
     `  new TaskLifecycle("${DEMO_GUARD_TASK_ID}") constructs and dispatches PUBLISH → ${constructorGuardTask.state}`,
   );
 
+  // ---------------------------------------------------------------------------
+  // History getter immutability segment. The history getter returns an
+  // array+entry double-frozen detached snapshot — dispatch() is the only
+  // append path — so the audit trail cannot be rewritten at runtime, even
+  // by an accidental caller (pinned by test/historyFreeze.test.ts). The
+  // demo shows it instead of only asserting it: on DEMO-045, driven
+  // PUBLISH -> ACCEPT under fixed timestamps, the segment takes a
+  // snapshot and tries a push, a splice, and an entry.note rewrite — all
+  // three throw TypeError while the internal history stays at exactly 2
+  // entries and the first entry is byte-identical; two getter calls then
+  // return deep-equal but reference-independent snapshots; and a later
+  // START_CAPTURE dispatch leaves the earlier snapshot at 2 entries while
+  // the live history grows to 3 (detached semantics — the snapshot is a
+  // frozen copy of the past, never a live view). Fixed timestamps, zero
+  // network, zero randomness. Hand-written expectations — written out here
+  // from the historyFreeze tests' assertions and cross-checked against
+  // them, never derived from the getter itself. The segment asserts all
+  // of this here, outside the printed lines: a tamper probe that stopped
+  // throwing would fail the demo itself, not just a test. Honest limit,
+  // as in the getter's JSDoc: this is an in-process guard against
+  // accidental rewrites; callers holding the process's memory can still
+  // write through the live TaskLifecycle API, and durability across
+  // processes needs the append-only store underneath.
+  // ---------------------------------------------------------------------------
+  const historyImmutabilityTask = new TaskLifecycle(DEMO_HISTORY_TASK_ID);
+  historyImmutabilityTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_HISTORY_BASE_AT,
+  });
+  historyImmutabilityTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: new Date(Date.parse(DEMO_HISTORY_BASE_AT) + 1000).toISOString(),
+  });
+  const historyImmutabilitySnapshot = historyImmutabilityTask.history as unknown as TaskHistoryEntry[];
+  const forgedImmutabilityEntry: TaskHistoryEntry = {
+    seq: 99,
+    event: "PUBLISH",
+    from: "DRAFT",
+    to: "OPEN",
+    at: DEMO_HISTORY_BASE_AT,
+  };
+  let historyPushError = "no error";
+  try {
+    historyImmutabilitySnapshot.push(forgedImmutabilityEntry);
+  } catch (err) {
+    historyPushError = err instanceof Error ? err.name : "non-error";
+  }
+  let historySpliceError = "no error";
+  try {
+    historyImmutabilitySnapshot.splice(0, 1);
+  } catch (err) {
+    historySpliceError = err instanceof Error ? err.name : "non-error";
+  }
+  let historyEntryWriteError = "no error";
+  try {
+    historyImmutabilitySnapshot[0].note = "forged";
+  } catch (err) {
+    historyEntryWriteError = err instanceof Error ? err.name : "non-error";
+  }
+  const historyInternalLengthAfterProbes =
+    historyImmutabilityTask.history.length;
+  const historyInternalEntryUnchanged =
+    historyImmutabilityTask.history[0].to === "OPEN" &&
+    historyImmutabilityTask.history[0].note === undefined;
+  const historySnapshotA = historyImmutabilityTask.history;
+  const historySnapshotB = historyImmutabilityTask.history;
+  const historySnapshotsDeepEqualButIndependent =
+    historySnapshotA !== historySnapshotB &&
+    JSON.stringify(historySnapshotA) === JSON.stringify(historySnapshotB);
+  const historySnapshotBeforeDispatch = historyImmutabilityTask.history;
+  historyImmutabilityTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: new Date(Date.parse(DEMO_HISTORY_BASE_AT) + 2000).toISOString(),
+  });
+  const historyDetachedSnapshotLength = historySnapshotBeforeDispatch.length;
+  const historyLiveLength = historyImmutabilityTask.history.length;
+  const historyImmutabilityChecks: HistoryImmutabilityChecks = {
+    pushError: historyPushError,
+    spliceError: historySpliceError,
+    entryWriteError: historyEntryWriteError,
+    internalLengthAfterProbes: historyInternalLengthAfterProbes,
+    snapshotsDeepEqualButIndependent:
+      historySnapshotsDeepEqualButIndependent,
+    detachedSnapshotLengthAfterDispatch: historyDetachedSnapshotLength,
+    liveLengthAfterDispatch: historyLiveLength,
+  };
+  if (
+    historyPushError !== "TypeError" ||
+    historySpliceError !== "TypeError" ||
+    historyEntryWriteError !== "TypeError" ||
+    historyInternalLengthAfterProbes !== 2 ||
+    !historyInternalEntryUnchanged ||
+    !historySnapshotsDeepEqualButIndependent ||
+    historyDetachedSnapshotLength !== 2 ||
+    historyLiveLength !== 3 ||
+    historyImmutabilityTask.state !== "CAPTURING"
+  ) {
+    throw new Error(
+      "demo fixture broken: history immutability segment does not match the pinned contract (push, splice and entry-field writes on the returned snapshot must each throw TypeError and leave the internal history at exactly 2 unchanged entries; two getter calls must return deep-equal but reference-independent snapshots; a later dispatch must leave the earlier snapshot at 2 entries while the live history grows to 3)",
+    );
+  }
+  lines.push(
+    "",
+    "History getter immutability (the audit trail cannot be rewritten at runtime — fixed timestamps, no network):",
+    `  push a forged entry onto the history snapshot (${DEMO_HISTORY_TASK_ID}): throws ${historyPushError}; internal history still 2 entries`,
+    `  splice the history snapshot: throws ${historySpliceError}; internal history still 2 entries`,
+    `  rewrite entry.note on the history snapshot: throws ${historyEntryWriteError}; internal entry unchanged`,
+    "  two history getter calls return deep-equal but reference-independent snapshots (the array is never handed out twice)",
+    "  dispatch START_CAPTURE after the snapshot: the old snapshot stays at 2 entries, the live history grows to 3 — a frozen detached copy; dispatch() is the only append path",
+  );
+
   // `now` as the stale branches above, screened by `staleTasks`
   // ALONE under a patrol budget map — the `maxAgeByState`
   // parameter itself (DRAFT / OPEN / PAID at 7 days each;
@@ -5516,7 +5661,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${patrolStaleConfigError} before any task is read`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

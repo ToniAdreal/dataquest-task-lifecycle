@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 588 tests, all local
+npm test   # 590 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1223,6 +1223,18 @@ errors and append nothing; and a task dispatched with no
 existed — the optimistic-concurrency guard, shown instead
 of only asserted by the expectedSeq tests.
 
+`npm run demo` also includes a history immutability segment: a task
+(DEMO-045) driven PUBLISH -> ACCEPT under fixed timestamps has its
+returned history snapshot probed — a push of a forged entry, a splice,
+and an entry.note rewrite all throw TypeError while the internal
+history stays at exactly 2 unchanged entries; two getter calls return
+deep-equal but reference-independent snapshots (the array is never
+handed out twice); and a later START_CAPTURE dispatch leaves the
+earlier snapshot at 2 entries while the live history grows to 3 — a
+frozen detached copy, with dispatch() the only append path. The
+audit-trail immutability the historyFreeze tests pin, shown instead of
+only asserted.
+
 The demo then closes with a stale patrol segment: five
 further tasks screened by `staleTasks()` alone at the
 same fixed `now` under a patrol `maxAgeByState` map
@@ -1479,7 +1491,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 588 tests covering the happy path, reject→resubmit
+`npm test` runs 590 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

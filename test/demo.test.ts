@@ -10,6 +10,8 @@ import {
   DEMO_AUDIT_WRONG_SECRET,
   DEMO_CONSTRUCTOR_ID_ERROR,
   DEMO_GUARD_TASK_ID,
+  DEMO_HISTORY_BASE_AT,
+  DEMO_HISTORY_TASK_ID,
   DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
@@ -54,6 +56,7 @@ import {
   deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
   verifyPayoutWebhook,
+  type TaskHistoryEntry,
   type TaskState,
 } from "../src/index.js";
 
@@ -555,6 +558,13 @@ Constructor id fail-fast (the first door of the audit chain):
   new TaskLifecycle(123) throws: invalid task: id must be a non-empty string
   new TaskLifecycle("DEMO-044") constructs and dispatches PUBLISH → OPEN
 
+History getter immutability (the audit trail cannot be rewritten at runtime — fixed timestamps, no network):
+  push a forged entry onto the history snapshot (DEMO-045): throws TypeError; internal history still 2 entries
+  splice the history snapshot: throws TypeError; internal history still 2 entries
+  rewrite entry.note on the history snapshot: throws TypeError; internal entry unchanged
+  two history getter calls return deep-equal but reference-independent snapshots (the array is never handed out twice)
+  dispatch START_CAPTURE after the snapshot: the old snapshot stays at 2 entries, the live history grows to 3 — a frozen detached copy; dispatch() is the only append path
+
 Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
   fixed now: <timestamp> — patrol budgets: DRAFT 7 days, OPEN 7 days, PAID 7 days (IN_REVIEW has no budget; dwell from the last history entry, strictly past the budget)
   DEMO-038: state OPEN, entered <timestamp>, dwell 21 days — stale: true
@@ -569,7 +579,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 481);
+  assert.equal(lines.length, 488);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2087,7 +2097,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 481);
+  assert.equal(out.trimEnd().split("\n").length, 488);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -6037,7 +6047,7 @@ test("demo constructor guard segment is deterministic: two runs print byte-ident
         "Constructor id fail-fast (the first door of the audit chain):",
       ),
       ls.indexOf(
-        "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+        "History getter immutability (the audit trail cannot be rewritten at runtime \u2014 fixed timestamps, no network):",
       ),
     );
   const a = await runDemo();
@@ -6050,4 +6060,100 @@ test("demo constructor guard segment is deterministic: two runs print byte-ident
   assert.deepEqual(segA, segment(b.lines));
   assert.deepEqual(a.constructorGuardChecks, b.constructorGuardChecks);
   assert.equal(a.constructorGuardTask.id, b.constructorGuardTask.id);
+});
+
+test("demo shows the history getter immutability segment: push/splice/entry-write probes throw TypeError and the task is unchanged, then detachment is shown", async () => {
+  const { historyImmutabilityChecks, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the rules in
+  // test/historyFreeze.test.ts, cross-checked against the demo's own
+  // rendering rather than derived from it.
+  assert.equal(historyImmutabilityChecks.pushError, "TypeError");
+  assert.equal(historyImmutabilityChecks.spliceError, "TypeError");
+  assert.equal(historyImmutabilityChecks.entryWriteError, "TypeError");
+  assert.equal(historyImmutabilityChecks.internalLengthAfterProbes, 2);
+  assert.equal(historyImmutabilityChecks.snapshotsDeepEqualButIndependent, true);
+  assert.equal(
+    historyImmutabilityChecks.detachedSnapshotLengthAfterDispatch,
+    2,
+  );
+  assert.equal(historyImmutabilityChecks.liveLengthAfterDispatch, 3);
+
+  // The printed lines are pinned literals — every word derives from fixed
+  // inputs, so they are asserted verbatim.
+  assert.ok(
+    text.includes(
+      "History getter immutability (the audit trail cannot be rewritten at runtime \u2014 fixed timestamps, no network):",
+    ),
+  );
+  assert.ok(
+    text.includes(
+      `  push a forged entry onto the history snapshot (${DEMO_HISTORY_TASK_ID}): throws TypeError; internal history still 2 entries`,
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "  splice the history snapshot: throws TypeError; internal history still 2 entries",
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "  rewrite entry.note on the history snapshot: throws TypeError; internal entry unchanged",
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "  two history getter calls return deep-equal but reference-independent snapshots (the array is never handed out twice)",
+    ),
+  );
+  assert.ok(
+    text.includes(
+      "  dispatch START_CAPTURE after the snapshot: the old snapshot stays at 2 entries, the live history grows to 3 \u2014 a frozen detached copy; dispatch() is the only append path",
+    ),
+  );
+
+  // Independent cross-check: the same three probes throw on fresh library
+  // calls made directly through the library, not through the demo — the
+  // demo segment must agree with the library, not with itself.
+  const probe = new TaskLifecycle("freeze-probe-1");
+  probe.dispatch("PUBLISH");
+  probe.dispatch("ACCEPT");
+  const h = probe.history as unknown as TaskHistoryEntry[];
+  const forged: TaskHistoryEntry = {
+    seq: 99,
+    event: "PUBLISH",
+    from: "DRAFT",
+    to: "OPEN",
+    at: DEMO_HISTORY_BASE_AT,
+  };
+  assert.throws(() => h.push(forged), TypeError);
+  assert.throws(() => h.splice(0, 1), TypeError);
+  assert.throws(() => {
+    h[0].note = "forged";
+  }, TypeError);
+  assert.equal(probe.history.length, 2);
+  assert.equal(probe.history[0].to, "OPEN");
+  assert.equal(probe.history[0].note, undefined);
+});
+
+test("demo history immutability segment is deterministic: two runs print byte-identical segment lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "History getter immutability (the audit trail cannot be rewritten at runtime \u2014 fixed timestamps, no network):",
+      ) - 1,
+      ls.indexOf(
+        "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Blank line + header + five probe lines + the blank line before the
+  // stale patrol; every value is a pinned literal (fixed inputs, the
+  // pinned TypeError name, pinned counts), so no normalization is needed.
+  assert.equal(segA.length, 8);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.historyImmutabilityChecks, b.historyImmutabilityChecks);
 });

@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A history getter immutability segment in `npm run demo` (backlog #537):
+  the demo now shows the audit trail cannot be rewritten at runtime —
+  on a task (DEMO-045) driven PUBLISH -> ACCEPT under fixed timestamps,
+  a push of a forged entry, a splice, and an entry.note rewrite on the
+  returned snapshot all throw TypeError while the internal history stays
+  at exactly 2 unchanged entries; two getter calls return deep-equal but
+  reference-independent snapshots; and a later START_CAPTURE dispatch
+  leaves the earlier snapshot at 2 entries while the live history grows
+  to 3 — the frozen detached copy, with dispatch() the only append path
+  (the historyFreeze tests' assertions, shown instead of only asserted).
+  The segment is pinned by two new demo tests (structure + print-line
+  determinism) plus a mutation check (the getter temporarily returning
+  the internal reference turns the new segment test red, restored green),
+  and the demo golden output gains seven lines (481 → 488).
 - A constructor id fail-fast segment in `npm run demo` (backlog #534):
   the demo now shows the first door of the audit chain — constructing
   `TaskLifecycle` with `""`, `undefined`, or `123` is rejected with the
