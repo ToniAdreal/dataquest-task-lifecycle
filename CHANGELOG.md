@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A `listenerCount` lifecycle segment in the CLI demo: `npm run demo`
+  now acts out the subscription registry's observable surface on a
+  dedicated task (DEMO-043) — listenerCount pinned at 0 with no
+  subscriptions, 2 after two collectors subscribe, 1 after one
+  unsubscribes, 0 after the survivor unsubscribes, and still 0 after a
+  second call of the same unsubscribe (idempotent). Between the two
+  unsubscribes, one fixed-timestamp PUBLISH proves the surviving
+  listener still receives its notification while the departed
+  collector stays silent. The demo's `DemoResult` carries the new
+  task, the pinned timeline, and both collectors' notifications; the
+  demo test suite pins the timeline, the notifications, and the
+  segment's printed lines verbatim, and the golden demo output and
+  README test count are refreshed to match.
+
 - A dispatch `maxResubmits` retry-budget benchmark
   path: `npm run bench` now also times
   `dispatch("RESUBMIT")` on a fresh task constructed

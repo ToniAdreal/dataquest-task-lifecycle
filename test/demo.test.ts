@@ -239,6 +239,18 @@ Task DEMO-006: DRAFT
 
 Final state (subscription branch): SUBMITTED (terminal: false)
 
+listenerCount lifecycle (subscription registry observability):
+Task DEMO-043: DRAFT
+  listenerCount with no subscriptions: 0
+  subscribed: 2 collecting listeners (listenerCount 2)
+  unsubscribed one listener (listenerCount 1)
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  surviving listener heard 1 notification(s): PUBLISH DRAFT -> OPEN (entry seq 1); departed listener heard 0
+  unsubscribed the survivor (listenerCount 0)
+  second call of the same unsubscribe is idempotent (listenerCount 0)
+
+Final state (listenerCount branch): OPEN (listenerCount 0)
+
 Stale-task dwell screening branch (three more tasks, dwell vs deadline):
   screened at: <timestamp> (fixed now; no wall clock)
   budgets: OPEN 604800000 ms (7 days), IN_REVIEW 432000000 ms (5 days) — dwell is now minus the last history entry's at
@@ -547,7 +559,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 461);
+  assert.equal(lines.length, 473);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1091,11 +1103,62 @@ test("demo subscription segment is deterministic: two runs print byte-identical 
   const b = subLines((await runDemo()).lines);
   // Header + task header + subscribed line + received header + 3
   // notification lines + match line + unsubscribed line + SUBMIT
-  // line + after-unsubscribe line + blank + final-state line;
-  // every timestamp in the segment is a fixed literal that never
-  // reaches the printed lines, so no normalization is needed.
-  assert.equal(a.length, 13);
+  // line + after-unsubscribe line + blank + final-state line + the
+  // listenerCount lifecycle segment (blank + header + task header +
+  // 7 action lines + blank + final-state line); every timestamp in
+  // the segment is a fixed literal that never reaches the printed
+  // lines, so no normalization is needed.
+  assert.equal(a.length, 25);
   assert.deepEqual(a, b);
+});
+
+test("demo listenerCount lifecycle branch: the registry count pins the subscribe/unsubscribe lifecycle", async () => {
+  const {
+    listenerCountTask,
+    listenerCountTimeline,
+    listenerCountKept,
+    listenerCountDropped,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // DEMO-043 ends in OPEN with a single PUBLISH entry; the registry
+  // is empty again after the pinned 0 -> 2 -> 1 -> 0 -> 0 walk.
+  assert.equal(listenerCountTask.id, "DEMO-043");
+  assert.equal(listenerCountTask.state, "OPEN");
+  assert.equal(listenerCountTask.listenerCount, 0);
+  assert.deepEqual(listenerCountTimeline, [0, 2, 1, 0, 0]);
+  assert.deepEqual(
+    listenerCountTask.history.map((h) => [h.event, h.from, h.to, h.actor, h.at]),
+    [["PUBLISH", "DRAFT", "OPEN", "researcher", "2026-03-19T09:30:00.000Z"]],
+  );
+  // Between the two unsubscribes, the survivor heard exactly the
+  // one PUBLISH while the departed collector stayed silent.
+  assert.deepEqual(listenerCountKept, [
+    { event: "PUBLISH", from: "DRAFT", to: "OPEN", seq: 1 },
+  ]);
+  assert.deepEqual(listenerCountDropped, []);
+  // The branch is printed between the subscription branch and the
+  // stale-task branch, with its lines verbatim.
+  const lcAt = text.indexOf("listenerCount lifecycle (subscription registry observability):");
+  assert.ok(
+    lcAt > text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):"),
+    "listenerCount branch must follow the subscription branch",
+  );
+  assert.ok(
+    text.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):") > lcAt,
+    "stale-task branch must follow the listenerCount branch",
+  );
+  assert.match(text, /  listenerCount with no subscriptions: 0/);
+  assert.match(text, /  subscribed: 2 collecting listeners \(listenerCount 2\)/);
+  assert.match(text, /  unsubscribed one listener \(listenerCount 1\)/);
+  assert.match(
+    text,
+    /  surviving listener heard 1 notification\(s\): PUBLISH DRAFT -> OPEN \(entry seq 1\); departed listener heard 0/,
+  );
+  assert.match(text, /  unsubscribed the survivor \(listenerCount 0\)/);
+  assert.match(text, /  second call of the same unsubscribe is idempotent \(listenerCount 0\)/);
+  assert.match(text, /Final state \(listenerCount branch\): OPEN \(listenerCount 0\)/);
 });
 
 test("demo shows the stale-task dwell screening branch in-process: stale and overdue subsets disagree on the same batch", async () => {
@@ -1992,7 +2055,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 461);
+  assert.equal(out.trimEnd().split("\n").length, 473);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
