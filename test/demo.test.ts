@@ -337,6 +337,8 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   historyFromNdjson: 12 entries parsed back
   TaskLifecycle.fromHistory(DEMO-001, entries): state PAID, 12 history entries
   replay matches the original (state + full history): true — last entry seq 12 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID
+  replay(parsedEntries): pure function derives final state PAID — matches task.state (PAID) and fromHistory state (PAID): true
+  replay([]): empty history replays to the DRAFT sentinel (no events yet)
 
 Allowed events by state (allowedEvents over all 13 states):
   DRAFT           -> PUBLISH
@@ -559,7 +561,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 473);
+  assert.equal(lines.length, 475);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1355,6 +1357,27 @@ test("demo shows the event-sourcing replay segment in-process: NDJSON export par
   );
 });
 
+test("demo shows the pure replay() terminal-state derivation: the NDJSON round-tripped history feeds replay() and the three derivations agree", async () => {
+  const { task, replayedTask, replayDerivedState, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // The pure function derives the terminal state with no instance
+  // and no snapshot envelope: the hand-written expectation is PAID.
+  assert.equal(replayDerivedState, "PAID");
+  // Three-way cross-check: the pure function's derivation, the live
+  // task's state, and the fromHistory-rebuilt task's state agree —
+  // mutating any one of them turns this test red.
+  assert.equal(replayDerivedState, task.state);
+  assert.equal(replayDerivedState, replayedTask.state);
+  // The derivation lines are printed verbatim, pinning the
+  // three-way agreement and the empty-history DRAFT sentinel.
+  assert.match(
+    text,
+    /replay\(parsedEntries\): pure function derives final state PAID — matches task\.state \(PAID\) and fromHistory state \(PAID\): true/,
+  );
+  assert.match(text, /replay\(\[\]\): empty history replays to the DRAFT sentinel \(no events yet\)/);
+});
+
 test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
@@ -1365,8 +1388,9 @@ test("demo event-sourcing segment agrees across two runs once the main task's ow
   const b = await runDemo();
   const segA = segment(a.lines);
   // Blank separator + header + intro line + 12 NDJSON lines + the
-  // parsed-count, fromHistory, and match lines.
-  assert.equal(segA.length, 18);
+  // parsed-count, fromHistory, match, replay-derivation, and
+  // replay-sentinel lines.
+  assert.equal(segA.length, 20);
   // The only varying values are the ones the main task already
   // varied on between any two runs: its wall-clock history
   // timestamps and the hash-chain links derived from them, both
@@ -2055,7 +2079,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 473);
+  assert.equal(out.trimEnd().split("\n").length, 475);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

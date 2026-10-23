@@ -1985,6 +1985,20 @@ change type; no entry describes a feature that is not in the history.
   `keywords` (`task-lifecycle`, `state-machine`, `event-sourcing`,
   `sla`, `webhooks`, `payments`, `typescript`, `zero-dependency`).
 
+- A pure `replay()` terminal-state derivation in the CLI demo:
+  `npm run demo`'s closing event-sourcing replay segment now also
+  feeds the NDJSON round-tripped DEMO-001 history to the stateless
+  `replay()` function (no instance, no snapshot envelope), prints
+  the derived final state (`PAID`), and cross-checks it three ways
+  — `replay()` vs the live task's `state` vs the
+  `TaskLifecycle.fromHistory()` instance's state — plus pins the
+  empty-history `DRAFT` sentinel. The demo's `DemoResult` carries
+  the new `replayDerivedState` field; the demo test suite pins the
+  derivation, the three-way agreement, and both printed lines
+  verbatim (a mutated expectation turns the test red); the golden
+  demo output and the README demo description and test count are
+  refreshed to match.
+
 ### Fixed
 
 - De-flaked the history parser fuzz timing guard: the per-call 50ms
