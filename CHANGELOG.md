@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A history getter defensive-copy benchmark path (backlog #539):
+  `npm run bench` now also times one `get history()` call per
+  iteration on a fixed task (BENCH-HG) with a pinned 64-entry
+  hash-chained history (PUBLISH / ACCEPT / START_CAPTURE / SUBMIT /
+  BEGIN_REVIEW / REJECT, then 14 RESUBMIT rounds of RESUBMIT / SUBMIT /
+  BEGIN_REVIEW / REJECT, then a final RESUBMIT / SUBMIT, ending in
+  SUBMITTED) — the O(n) copy + per-entry Object.freeze tax the
+  audit-immutability guarantee costs on every read, previously
+  invisible inside the subscribe / replay / snapshot rows, which
+  never isolated the getter itself. Per-iteration self-checks pin
+  exactly 64 entries, the frozen array and frozen entries, content
+  byte-identical to the fixture baseline, and consecutive calls never
+  sharing entry references; one-off push / splice / entry-field-write
+  probes are pinned to throw (and to leave the internal history
+  untouched) outside the timed loop, and a mutation check pins that a
+  broken expected entry count exits the bench with code 1. The README
+  Benchmarks table is refreshed to this run's real numbers, with the
+  honest note that immutability is not free.
 - A history getter immutability segment in `npm run demo` (backlog #537):
   the demo now shows the audit trail cannot be rewritten at runtime —
   on a task (DEMO-045) driven PUBLISH -> ACCEPT under fixed timestamps,

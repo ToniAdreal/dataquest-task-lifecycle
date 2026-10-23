@@ -617,6 +617,14 @@ before this feature (no hash fields) still parse — `fromJSON()` /
 `fromHistory()` chain them deterministically on rehydration, so the live
 history is always fully chained.
 
+Immutability is not free at read time: `get history()` returns a
+frozen array of frozen entry copies, so the runtime guarantee that
+the append-only log cannot be rewritten costs an O(n) copy plus one
+`Object.freeze` per entry on *every* read — a polling UI or audit
+exporter looking at the trail pays this on every poll. The
+Benchmarks section times exactly this path (`history getter
+(defensive copy, 64 entries)`).
+
 Verify a log without rehydrating:
 
 ```ts
@@ -1635,7 +1643,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the fifty-six hot
+`npm run bench` measures locally-observed throughput for the fifty-seven hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2389,67 +2397,87 @@ hook is swallowed too, and the non-function `onError` rejection
 is pinned to its exact message
 (`invalid subscribe: onError must be a function, got string`,
 registering nothing); one timed pass is one full subscribed
-lifecycle of 8 dispatches + 8 routed error reports. One real run on
+lifecycle of 8 dispatches + 8 routed error reports. The
+`history getter` path calls `get history()` on a fixed task
+carrying a pinned 64-entry hash-chained history on every
+iteration (no network, no randomness, no wall clock): the O(n)
+copy plus per-entry `Object.freeze` the audit-immutability
+guarantee costs on every read — the price every polling UI or
+audit exporter pays when it looks at the trail, previously
+invisible inside the subscribe / replay / snapshot rows, which
+never isolated the getter itself. Its per-iteration self-check
+pins exactly 64 entries, the frozen array and frozen entries,
+content byte-identical to the fixture baseline, and consecutive
+calls never sharing entry references (detached copies); outside
+the timed loop, one-off probes pin that a push, a splice, and
+an entry-field write on the returned snapshot all throw and
+leave the internal history untouched — the same assertions
+`test/historyFreeze.test.ts` pins; one timed pass is one
+getter call over 64 entries. Immutability is not free: the
+getter trades read throughput for a runtime guarantee that the
+append-only audit log cannot be rewritten, even by accident —
+see the throughput row below. One real run on
 2026-10-23:
 
 | path | throughput |
 |------|------------|
-| dispatch (full lifecycle, 8 dispatches) | ~5,966 ops/sec (167.62 µs/op) |
-| dispatch idempotency dedupe (keyed dispatch + duplicate) | ~76,188 ops/sec (13.13 µs/op) |
-| dispatch requirePayoutRef (with payoutRef) | ~11,367 ops/sec (87.98 µs/op) |
-| dispatch expectedSeq (optimistic concurrency guard) | ~11,050 ops/sec (90.50 µs/op) |
-| dispatch maxDisputes (dispute budget, 1 DISPUTE) | ~11,454 ops/sec (87.31 µs/op) |
-| dispatch maxResubmits (retry budget, 1 RESUBMIT) | ~10,467 ops/sec (95.54 µs/op) |
-| dispatch rolePolicy (authorized ACCEPT dispatch) | ~12,305 ops/sec (81.27 µs/op) |
-| dispatch {at} (explicit timestamp) | ~47,114 ops/sec (21.23 µs/op) |
-| replay (8-entry history) | ~13,110 ops/sec (76.28 µs/op) |
-| fromHistory (8-entry history) | ~4,323 ops/sec (231.32 µs/op) |
-| verifyHistoryChain (8 entries) | ~22,752 ops/sec (43.95 µs/op) |
-| verifyHistoryChain auditSecret (8 entries, keyed) | ~16,089 ops/sec (62.15 µs/op) |
-| buildPayoutWebhook (sign) | ~83,534 ops/sec (11.97 µs/op) |
-| verifyPayoutWebhook | ~163,069 ops/sec (6.13 µs/op) |
-| verifyPayoutWebhook (secrets rotation, 2 candidates) | ~57,659 ops/sec (17.34 µs/op) |
-| verifyPayoutWebhook maxAgeMs freshness window | ~79,258 ops/sec (12.62 µs/op) |
-| verifyPayoutWebhook maxFutureSkewMs future-skew window | ~38,869 ops/sec (25.73 µs/op) |
-| historyToNdjson (8 entries) | ~14,809 ops/sec (67.53 µs/op) |
-| historyFromNdjson (8 entries, chain re-verify) | ~13,308 ops/sec (75.14 µs/op) |
-| mismatchedPayouts (12 PAID tasks) | ~23,654 ops/sec (42.28 µs/op) |
-| unreconciledPayouts (12 PAID tasks) | ~24,701 ops/sec (40.48 µs/op) |
-| totalPaidOut (12 PAID tasks) | ~21,664 ops/sec (46.16 µs/op) |
-| deliverPayoutWebhookToMany (4 endpoints) | ~4,816 ops/sec (207.65 µs/op) |
-| deliverPayoutWebhook (single endpoint) | ~63,391 ops/sec (15.78 µs/op) |
-| deliverPayoutWebhook maxRetryDelayMs cap | ~43,567 ops/sec (22.95 µs/op) |
-| deliverPayoutWebhook AbortSignal pre-abort | ~854,424 ops/sec (1.17 µs/op) |
-| deliverPayoutWebhook timeoutMs timeout | ~96.7 ops/sec (10343.01 µs/op) |
-| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,899,477 ops/sec (0.26 µs/op) |
-| PayoutEventDedupe.restore (1,000-entry snapshot) | ~2,633 ops/sec (379.77 µs/op) |
-| PayoutEventDedupe.exportSnapshot (5 live entries, 1 expired) | ~447,922 ops/sec (2.23 µs/op) |
-| PayoutEventDedupe.clear (1,000 recorded ids, fresh fixture) | ~4,830 ops/sec (207.06 µs/op) |
-| PayoutEventDedupe.stats (5 live entries, 1 expired) | ~3,308,333 ops/sec (0.30 µs/op) |
-| PayoutEventDedupe checkAndRecord (miss/evict, 250 new ids, capacity 100) | ~3,673 ops/sec (272.23 µs/op) |
-| buildPayoutWebhooks (batch of 12 PAID tasks) | ~5,801 ops/sec (172.40 µs/op) |
-| expiredTasks (12 mixed-state tasks) | ~255,507 ops/sec (3.91 µs/op) |
-| staleTasks (12 mixed-state tasks) | ~44,388 ops/sec (22.53 µs/op) |
-| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~1,737 ops/sec (575.58 µs/op) |
-| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~1,131 ops/sec (883.95 µs/op) |
-| parsePayoutRetryAfter (11-value corpus) | ~230,362 ops/sec (4.34 µs/op) |
-| payoutMismatch (5-task set) | ~38,037 ops/sec (26.29 µs/op) |
-| allowedEvents (13 states) | ~211,548 ops/sec (4.73 µs/op) |
-| parseHistory (8-entry history) | ~17,913 ops/sec (55.83 µs/op) |
-| isTerminal (13 states) | ~311,496 ops/sec (3.21 µs/op) |
-| transitionTableJson (19 edges) | ~41,271 ops/sec (24.23 µs/op) |
-| transitionTable (19 edges) | ~59,659 ops/sec (16.76 µs/op) |
-| stateDiagram (19 edges) | ~69,615 ops/sec (14.36 µs/op) |
-| readmeDiagramInSync (README file read) | ~1,541 ops/sec (649.11 µs/op) |
-| isOverdue (4-task corpus) | ~827,188 ops/sec (1.21 µs/op) |
-| subscribe (full lifecycle, 1 collecting listener) | ~9,724 ops/sec (102.84 µs/op) |
-| subscribe onError (full lifecycle, 1 throwing listener) | ~633.0 ops/sec (1579.79 µs/op) |
-| toJSON + fromJSON snapshot round-trip (8 entries) | ~5,244 ops/sec (190.69 µs/op) |
-| toJSON + fromJSON policy snapshot round-trip (10 entries, rolePolicy + budgets) | ~5,005 ops/sec (199.79 µs/op) |
-| getSlaDeadline (13 states, 2 set) | ~1,890,823 ops/sec (0.53 µs/op) |
-| MAX_NOTE_LENGTH note guard (2-case corpus) | ~2,722 ops/sec (367.37 µs/op) |
-| setSlaDeadline + clearSlaDeadline (OPEN task write cycle) | ~190,993 ops/sec (5.24 µs/op) |
-| benchTransition (single step, snapshot restore) | ~25,075 ops/sec (39.88 µs/op) |
+| dispatch (full lifecycle, 8 dispatches) | ~9,307 ops/sec (107.44 µs/op) |
+| dispatch idempotency dedupe (keyed dispatch + duplicate) | ~27,882 ops/sec (35.87 µs/op) |
+| dispatch requirePayoutRef (with payoutRef) | ~5,949 ops/sec (168.10 µs/op) |
+| dispatch expectedSeq (optimistic concurrency guard) | ~25,775 ops/sec (38.80 µs/op) |
+| dispatch maxDisputes (dispute budget, 1 DISPUTE) | ~7,694 ops/sec (129.97 µs/op) |
+| dispatch maxResubmits (retry budget, 1 RESUBMIT) | ~9,350 ops/sec (106.96 µs/op) |
+| dispatch rolePolicy (authorized ACCEPT dispatch) | ~30,117 ops/sec (33.20 µs/op) |
+| dispatch {at} (explicit timestamp) | ~29,460 ops/sec (33.94 µs/op) |
+| replay (8-entry history) | ~6,072 ops/sec (164.70 µs/op) |
+| fromHistory (8-entry history) | ~2,169 ops/sec (461.03 µs/op) |
+| verifyHistoryChain (8 entries) | ~29,073 ops/sec (34.40 µs/op) |
+| verifyHistoryChain auditSecret (8 entries, keyed) | ~8,064 ops/sec (124.01 µs/op) |
+| buildPayoutWebhook (sign) | ~62,749 ops/sec (15.94 µs/op) |
+| verifyPayoutWebhook | ~85,579 ops/sec (11.69 µs/op) |
+| verifyPayoutWebhook (secrets rotation, 2 candidates) | ~70,147 ops/sec (14.26 µs/op) |
+| verifyPayoutWebhook maxAgeMs freshness window | ~25,239 ops/sec (39.62 µs/op) |
+| verifyPayoutWebhook maxFutureSkewMs future-skew window | ~43,683 ops/sec (22.89 µs/op) |
+| historyToNdjson (8 entries) | ~13,682 ops/sec (73.09 µs/op) |
+| historyFromNdjson (8 entries, chain re-verify) | ~12,631 ops/sec (79.17 µs/op) |
+| mismatchedPayouts (12 PAID tasks) | ~22,040 ops/sec (45.37 µs/op) |
+| unreconciledPayouts (12 PAID tasks) | ~12,933 ops/sec (77.32 µs/op) |
+| totalPaidOut (12 PAID tasks) | ~26,826 ops/sec (37.28 µs/op) |
+| deliverPayoutWebhookToMany (4 endpoints) | ~4,200 ops/sec (238.08 µs/op) |
+| deliverPayoutWebhook (single endpoint) | ~33,608 ops/sec (29.75 µs/op) |
+| deliverPayoutWebhook maxRetryDelayMs cap | ~22,184 ops/sec (45.08 µs/op) |
+| deliverPayoutWebhook AbortSignal pre-abort | ~806,389 ops/sec (1.24 µs/op) |
+| deliverPayoutWebhook timeoutMs timeout | ~82.3 ops/sec (12149.79 µs/op) |
+| PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~2,968,927 ops/sec (0.34 µs/op) |
+| PayoutEventDedupe.restore (1,000-entry snapshot) | ~1,134 ops/sec (881.66 µs/op) |
+| PayoutEventDedupe.exportSnapshot (5 live entries, 1 expired) | ~218,701 ops/sec (4.57 µs/op) |
+| PayoutEventDedupe.clear (1,000 recorded ids, fresh fixture) | ~4,203 ops/sec (237.95 µs/op) |
+| PayoutEventDedupe.stats (5 live entries, 1 expired) | ~2,689,054 ops/sec (0.37 µs/op) |
+| PayoutEventDedupe checkAndRecord (miss/evict, 250 new ids, capacity 100) | ~1,655 ops/sec (604.15 µs/op) |
+| buildPayoutWebhooks (batch of 12 PAID tasks) | ~5,526 ops/sec (180.98 µs/op) |
+| expiredTasks (12 mixed-state tasks) | ~269,007 ops/sec (3.72 µs/op) |
+| staleTasks (12 mixed-state tasks) | ~94,933 ops/sec (10.53 µs/op) |
+| expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~2,552 ops/sec (391.84 µs/op) |
+| actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~797.5 ops/sec (1253.96 µs/op) |
+| parsePayoutRetryAfter (11-value corpus) | ~120,008 ops/sec (8.33 µs/op) |
+| payoutMismatch (5-task set) | ~67,519 ops/sec (14.81 µs/op) |
+| allowedEvents (13 states) | ~203,986 ops/sec (4.90 µs/op) |
+| parseHistory (8-entry history) | ~17,030 ops/sec (58.72 µs/op) |
+| isTerminal (13 states) | ~196,023 ops/sec (5.10 µs/op) |
+| transitionTableJson (19 edges) | ~12,552 ops/sec (79.67 µs/op) |
+| transitionTable (19 edges) | ~29,167 ops/sec (34.29 µs/op) |
+| stateDiagram (19 edges) | ~20,219 ops/sec (49.46 µs/op) |
+| readmeDiagramInSync (README file read) | ~718.9 ops/sec (1391.02 µs/op) |
+| isOverdue (4-task corpus) | ~870,041 ops/sec (1.15 µs/op) |
+| subscribe (full lifecycle, 1 collecting listener) | ~6,945 ops/sec (143.99 µs/op) |
+| subscribe onError (full lifecycle, 1 throwing listener) | ~713.2 ops/sec (1402.22 µs/op) |
+| toJSON + fromJSON snapshot round-trip (8 entries) | ~4,218 ops/sec (237.09 µs/op) |
+| toJSON + fromJSON policy snapshot round-trip (10 entries, rolePolicy + budgets) | ~2,775 ops/sec (360.34 µs/op) |
+| getSlaDeadline (13 states, 2 set) | ~318,948 ops/sec (3.14 µs/op) |
+| MAX_NOTE_LENGTH note guard (2-case corpus) | ~977.8 ops/sec (1022.74 µs/op) |
+| setSlaDeadline + clearSlaDeadline (OPEN task write cycle) | ~12,245 ops/sec (81.67 µs/op) |
+| benchTransition (single step, snapshot restore) | ~4,537 ops/sec (220.42 µs/op) |
+| history getter (defensive copy, 64 entries) | ~10,242 ops/sec (97.64 µs/op) |
 
 Environment: Node v24.22.1, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host under load, so numbers vary run to run — several paths
