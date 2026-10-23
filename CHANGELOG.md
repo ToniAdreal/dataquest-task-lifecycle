@@ -11,6 +11,44 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch `maxResubmits` retry-budget benchmark
+  path: `npm run bench` now also times
+  `dispatch("RESUBMIT")` on a fresh task constructed
+  with `maxResubmits: 2` and driven through
+  `PUBLISH` → `ACCEPT` → `START_CAPTURE` → `SUBMIT` →
+  `BEGIN_REVIEW` → `REJECT` to a pinned 6-entry
+  REJECTED history under fixed timestamps — the
+  history-derived retry cap every resubmit cycle pays
+  (transition check first, then the budget gates the
+  RESUBMIT before any history is appended),
+  previously invisible inside the plain dispatch row,
+  whose tasks carry no budget, and inside the snapshot
+  row, where `maxResubmits` appears only as a fixture
+  field. Every timed iteration rebuilds a fresh
+  budgeted task (the RESUBMIT dispatch spends one
+  budget unit and advances the task to CAPTURING, so
+  the rebuild cost is inside the timed region) and
+  checks the return is CAPTURING, the history grew by
+  exactly one entry to 7, and the last entry is the
+  pinned step (seq 7, `RESUBMIT`, REJECTED →
+  CAPTURING, at BASE + 6s, actor "contributor").
+  Outside the timed loop, a third RESUBMIT after two
+  full resubmit rounds is pinned to throw exactly
+  `resubmit budget exhausted: 2 of 2 RESUBMITs already
+  used` and to leave state and history byte-identical
+  (compared through the canonical NDJSON serializer),
+  a budget of 0 is pinned to make the first RESUBMIT
+  throw at once, a task built without the option is
+  pinned to run repeated resubmit rounds (the
+  pre-budget default), and illegal budgets (-1 and 1.5)
+  are pinned to throw their exact `invalid option`
+  errors at construction, with an illegal snapshot
+  budget pinned to its exact `invalid snapshot` error.
+  The README Benchmarks table is refreshed from one
+  real run (the new path measured 11,258 ops/sec on
+  2026-10-23). No network and no randomness. Bench
+  only; no library behavior change.
+
 - A dispatch `rolePolicy` authorization benchmark
   path: `npm run bench` now also times
   `dispatch("ACCEPT")` on a fresh task constructed
