@@ -18,7 +18,7 @@ import type { PayoutWebhookFetchImpl } from "../src/index.js";
  *    with that endpoint's own secret, under ONE shared eventId and `at`
  *  - results come back in input order with aggregate delivered/failed
  *    counts; one endpoint's failure (retries exhausted, network error,
- *    invalid URL) never blocks or fails the others
+ *    invalid URL, empty secret) never blocks or fails the others
  *  - retry budgets are counted per endpoint independently
  *  - call-level configuration errors throw before any request: empty /
  *    non-array endpoints, invalid global delivery options
@@ -307,6 +307,56 @@ test("invalid global delivery options throw a configuration error before any req
     /cannot deliver payout webhook: maxAttempts must be a positive integer/,
   );
   assert.equal(calls.length, 0, "global config errors are not per-endpoint outcomes");
+});
+
+test("empty-secret endpoint fails only itself: sibling endpoint is unaffected and the call never throws", async () => {
+  const { fetchImpl, callsTo } = routerFetch({ [URL_B]: [res(200)] });
+  const out = await deliverPayoutWebhookToMany(
+    paidTask(),
+    [
+      { url: URL_A, secret: "" },
+      { url: URL_B, secret: SECRET_B },
+    ],
+    { fetchImpl, sleepImpl: noSleep, now: NOW },
+  );
+  // Documented promise: per-endpoint configuration problems are reported
+  // as that endpoint's { ok: false, attempts: 0, error } result and never
+  // block or fail the other endpoints.
+  assert.equal(out.results[0].ok, false);
+  assert.equal(out.results[0].attempts, 0, "no request was attempted");
+  assert.match(
+    out.results[0].error ?? "",
+    /cannot build payout webhook: signing secret must not be empty/,
+  );
+  assert.deepEqual(out.results[1], { ok: true, attempts: 1, status: 200 });
+  assert.equal(out.delivered, 1);
+  assert.equal(out.failed, 1);
+  assert.equal(callsTo(URL_A).length, 0, "bad-secret endpoint never hit the network");
+  assert.equal(callsTo(URL_B).length, 1);
+});
+
+test("every endpoint with an empty secret fails per endpoint; the call itself does not throw", async () => {
+  const { fetchImpl, calls } = routerFetch({});
+  const out = await deliverPayoutWebhookToMany(
+    paidTask(),
+    [
+      { url: URL_A, secret: "" },
+      { url: URL_B, secret: "" },
+    ],
+    { fetchImpl, sleepImpl: noSleep, now: NOW },
+  );
+  assert.equal(out.results.length, 2);
+  for (const result of out.results) {
+    assert.equal(result.ok, false);
+    assert.equal(result.attempts, 0);
+    assert.match(
+      result.error ?? "",
+      /cannot build payout webhook: signing secret must not be empty/,
+    );
+  }
+  assert.equal(out.delivered, 0);
+  assert.equal(out.failed, 2);
+  assert.equal(calls.length, 0, "no network traffic at all");
 });
 
 test("per-endpoint fetchImpl override is used instead of the global fetch", async () => {
