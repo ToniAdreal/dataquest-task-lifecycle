@@ -11,6 +11,42 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A dispatch `rolePolicy` authorization benchmark
+  path: `npm run bench` now also times
+  `dispatch("ACCEPT")` on a fresh task constructed
+  with `rolePolicy: { ACCEPT: ["reviewer"] }` and
+  driven through `PUBLISH` to a pinned 1-entry OPEN
+  history under fixed timestamps — the event-level
+  RBAC check every dispatch into a policy-covered
+  event pays (transition check first, then the
+  allowlist gates the actor before any history is
+  appended), previously invisible inside the plain
+  dispatch row, whose tasks carry no policy, and
+  inside the snapshot row, where `rolePolicy`
+  appears only as a fixture field. Every timed
+  iteration rebuilds a fresh policy-carrying task
+  (the ACCEPT dispatch advances it, so the rebuild
+  cost is inside the timed region) and checks the
+  return is ACCEPTED, the history grew by exactly
+  one entry to 2, and the last entry is the pinned
+  step (seq 2, `ACCEPT`, at BASE + 1s, actor
+  "reviewer"). Outside the timed loop, an
+  unauthorized actor ("viewer") is pinned to throw
+  exactly
+  `actor not authorized for ACCEPT: "viewer" is not in [reviewer]`
+  and to leave state and history byte-identical
+  (compared through the canonical NDJSON
+  serializer), a missing actor is pinned to throw
+  exactly
+  `actor not authorized for ACCEPT: policy requires an actor in [reviewer]`
+  the same untouched way, and a task built without
+  a policy is pinned to advance the same actorless
+  ACCEPT with no authorization check (the
+  pre-RBAC default). The README Benchmarks table is
+  refreshed from one real run (the new path measured
+  66,701 ops/sec on 2026-10-23). No network and no
+  randomness. Bench only; no library behavior change.
+
 - A stale patrol CLI demo segment: `npm run demo` now
   closes with five further tasks screened by
   `staleTasks()` alone at the stale branches' fixed
