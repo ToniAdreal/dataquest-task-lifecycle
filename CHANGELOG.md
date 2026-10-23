@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A constructor id fail-fast segment in `npm run demo` (backlog #534):
+  the demo now shows the first door of the audit chain — constructing
+  `TaskLifecycle` with `""`, `undefined`, or `123` is rejected with the
+  pinned `invalid task: id must be a non-empty string` error (the same
+  wording `test/constructorId.test.ts` pins), and a legal id (`DEMO-044`)
+  then constructs and dispatches `PUBLISH` normally. The segment is
+  pinned by two new demo tests (structure + print-line determinism),
+  and the demo golden output gains six lines (475 → 481).
 - A dispatch explicit-timestamp benchmark path:
   `npm run bench` now also times
   `dispatch("START_CAPTURE", { at })` with a pinned

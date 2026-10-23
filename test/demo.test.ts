@@ -8,6 +8,8 @@ import {
   runDemo,
   DEMO_AUDIT_SECRET,
   DEMO_AUDIT_WRONG_SECRET,
+  DEMO_CONSTRUCTOR_ID_ERROR,
+  DEMO_GUARD_TASK_ID,
   DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
@@ -547,6 +549,12 @@ Dispatch expectedSeq optimistic concurrency (dispatch pins the history length th
   illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got -1"; PUBLISH with expectedSeq 1.5 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5"; state after both: DRAFT, history entries: 0 (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)
   no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)
 
+Constructor id fail-fast (the first door of the audit chain):
+  new TaskLifecycle("") throws: invalid task: id must be a non-empty string
+  new TaskLifecycle(undefined) throws: invalid task: id must be a non-empty string
+  new TaskLifecycle(123) throws: invalid task: id must be a non-empty string
+  new TaskLifecycle("DEMO-044") constructs and dispatches PUBLISH → OPEN
+
 Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
   fixed now: <timestamp> — patrol budgets: DRAFT 7 days, OPEN 7 days, PAID 7 days (IN_REVIEW has no budget; dwell from the last history entry, strictly past the budget)
   DEMO-038: state OPEN, entered <timestamp>, dwell 21 days — stale: true
@@ -561,7 +569,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 475);
+  assert.equal(lines.length, 481);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2079,7 +2087,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 475);
+  assert.equal(out.trimEnd().split("\n").length, 481);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5769,7 +5777,7 @@ test("demo dispatch expectedSeq segment is deterministic: two runs print byte-id
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):"),
-      ls.indexOf("Stale patrol (staleTasks / maxAgeByState screening, notify-only action):") - 1,
+      ls.indexOf("Constructor id fail-fast (the first door of the audit chain):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -5965,4 +5973,81 @@ test("demo stale patrol segment is deterministic: two runs print byte-identical 
     a.patrolTasks.map((t) => [t.state, t.history.length]),
     b.patrolTasks.map((t) => [t.state, t.history.length]),
   );
+});
+
+test("demo shows the constructor id fail-fast segment: three bad ids are rejected with the pinned wording and a legal id dispatches normally", async () => {
+  const { constructorGuardChecks, constructorGuardTask, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the rules in
+  // test/constructorId.test.ts, cross-checked against the demo's own
+  // rendering rather than derived from it.
+  assert.equal(constructorGuardChecks.length, 3);
+  assert.deepEqual(
+    constructorGuardChecks.map((check) => check.input),
+    ['""', "undefined", "123"],
+  );
+  for (const check of constructorGuardChecks) {
+    assert.equal(check.error, DEMO_CONSTRUCTOR_ID_ERROR);
+    assert.equal(check.error, "invalid task: id must be a non-empty string");
+  }
+  assert.equal(constructorGuardTask.id, DEMO_GUARD_TASK_ID);
+  assert.equal(constructorGuardTask.state, "OPEN");
+  assert.equal(constructorGuardTask.history.length, 1);
+  assert.equal(constructorGuardTask.history[0].event, "PUBLISH");
+
+  // The printed lines are pinned literals — every word derives from fixed
+  // inputs, so they are asserted verbatim.
+  assert.ok(
+    text.includes(
+      "Constructor id fail-fast (the first door of the audit chain):",
+    ),
+  );
+  for (const check of constructorGuardChecks) {
+    assert.ok(
+      text.includes(
+        `  new TaskLifecycle(${check.input}) throws: ${check.error}`,
+      ),
+    );
+  }
+  assert.ok(
+    text.includes(
+      `  new TaskLifecycle("${DEMO_GUARD_TASK_ID}") constructs and dispatches PUBLISH → OPEN`,
+    ),
+  );
+
+  // Independent cross-check: the same three bad ids are rejected on fresh
+  // construction calls made directly through the library, not through the
+  // demo — the demo segment must agree with the library, not with itself.
+  for (const bad of ["", undefined, 123] as const) {
+    assert.throws(
+      // @ts-expect-error intentional misuse under test
+      () => new TaskLifecycle(bad),
+      /invalid task: id must be a non-empty string/,
+      `expected rejection for ${String(bad)}`,
+    );
+  }
+});
+
+test("demo constructor guard segment is deterministic: two runs print byte-identical guard lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Constructor id fail-fast (the first door of the audit chain):",
+      ),
+      ls.indexOf(
+        "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Blank line + header + three rejection lines + legal-construction line;
+  // every value is a pinned literal (fixed inputs, the pinned error
+  // wording, a fixed task id), so no normalization is needed.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.constructorGuardChecks, b.constructorGuardChecks);
+  assert.equal(a.constructorGuardTask.id, b.constructorGuardTask.id);
 });
