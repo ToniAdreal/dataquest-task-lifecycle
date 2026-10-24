@@ -2127,6 +2127,17 @@ change type; no entry describes a feature that is not in the history.
   setup, the build-then-test flow, the demo/diagram/bench entry
   points, the repository's hard rules, and the pre-submit checks.
 
+### Changed
+
+- `expireOverdueTasks()` now signs its EXPIRE dispatches with the
+  `system` actor (backlog #550). The watchdog's audit entries were
+  previously anonymous, so a later reader could not tell a
+  watchdog-driven expiry apart from a human-driven one; the entries
+  now carry the same `system` attribution that `actOnStaleTasks` uses
+  for its default ABANDON action. This is a behavior change: any
+  reader that pinned `actor === undefined` on executor-produced EXPIRE
+  entries must expect `"system"` instead.
+
 ## [0.1.0]
 
 The only version declared in `package.json`. Entries cover the commit

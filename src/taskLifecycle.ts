@@ -236,6 +236,11 @@ export interface ExpireOverdueResult {
  * operations report (which task, from which state, when) without
  * re-reading the task's history; failures omit it.
  *
+ * Attribution: every successful EXPIRE dispatch is signed with the
+ * `system` actor, exactly like {@link actOnStaleTasks}'s default ABANDON
+ * action, so a later auditor can tell a watchdog-driven expiry apart
+ * from a human-driven EXPIRE dispatch in the append-only history.
+ *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
  * append-only history. Only overdue (non-terminal, past deadline) tasks
@@ -248,7 +253,10 @@ export function expireOverdueTasks(
 ): ExpireOverdueResult[] {
   return expiredTasks(tasks, now).map((task) => {
     try {
-      task.dispatch("EXPIRE");
+      // Attributed to the `system` actor, like actOnStaleTasks' default
+      // action: watchdog-driven expiry must stay distinguishable from a
+      // human-driven EXPIRE dispatch in the append-only audit trail.
+      task.dispatch("EXPIRE", { actor: "system" });
       // The history getter returns frozen detached copies, so the last
       // entry is already the immutable audit record of this dispatch.
       const history = task.history;

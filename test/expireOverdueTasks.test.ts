@@ -141,6 +141,7 @@ describe("expireOverdueTasks", () => {
     assert.equal(last.event, "EXPIRE");
     assert.equal(last.from, "OPEN");
     assert.equal(last.to, "EXPIRED");
+    assert.equal(last.actor, "system");
     assert.equal(last.seq, historyBefore + 1);
     // hash chain covers the new entry (tamper evidence survives the watchdog)
     assert.match(last.hash ?? "", /^[0-9a-f]{64}$/);

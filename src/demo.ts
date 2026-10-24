@@ -2204,8 +2204,8 @@ export async function runDemo(): Promise<DemoResult> {
   // per screened task, both expired=true and now EXPIRED, so the
   // screening subset and the execution's acted set agree.
   // Honest limit: `expireOverdueTasks()` takes no action
-  // callback, so its EXPIRE dispatches carry the library defaults
-  // (no actor, a wall-clock audit timestamp) — this segment
+  // callback, so its EXPIRE dispatches are library-attributed
+  // (`actor: "system"`, a wall-clock audit timestamp) — this segment
   // prints no history for the rebuilt tasks and no timestamp
   // from those entries, so every printed line below is a fixed
   // literal or derived from one; the demo tests pin the states

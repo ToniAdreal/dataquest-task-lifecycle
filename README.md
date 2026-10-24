@@ -485,6 +485,11 @@ can cite the outcome per task without re-reading `task.history`
 dispatches omit the field entirely, so the `{ task, expired: false, error }`
 failure shape is unchanged and backward compatible.
 
+Every successful EXPIRE dispatch is signed with the `system` actor —
+the same attribution `actOnStaleTasks` uses for its default ABANDON
+action — so a watchdog-driven expiry stays distinguishable from a
+human one in the append-only history.
+
 Why the executor exists instead of a hand-written loop: `expiredTasks()`
 only checks the deadline and the terminal flag, but `EXPIRE` is **not** a
 legal event from every non-terminal state — the transition table only has
@@ -1513,7 +1518,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 590 tests covering the happy path, reject→resubmit
+`npm test` runs 615 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -1523,7 +1528,8 @@ re-attachment, and independence from the RESUBMIT budget),
 dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
-deadlines and overdue checks, JSON snapshot persistence
+deadlines and overdue checks (including the `system`-actor attribution
+the two watchdog executors share), JSON snapshot persistence
 (round-trip, detached copies, rejection of 18 malformed-snapshot
 shapes, and the snapshot schema-version gate: `v: 1` always written,
 legacy snapshots without `v` still accepted, any other `v` rejected

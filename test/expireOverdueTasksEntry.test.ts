@@ -65,6 +65,7 @@ describe("expireOverdueTasks entry (auditable watchdog report)", () => {
     assert.equal(result.entry?.event, "EXPIRE");
     assert.equal(result.entry?.from, "OPEN");
     assert.equal(result.entry?.to, "EXPIRED");
+    assert.equal(result.entry?.actor, "system");
   });
 
   it("omits the entry field entirely on a failed dispatch", () => {

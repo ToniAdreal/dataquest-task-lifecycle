@@ -2268,17 +2268,18 @@ test("demo shows the SLA watchdog batch execution branch in-process: screening s
       ["DEMO-016", "ACCEPTED", 2],
     ],
   );
-  // The executor's EXPIRE entries carry the library defaults —
-  // no actor is recorded — so the test pins event/from/to only,
-  // never those entries' wall-clock `at`.
+  // The executor's EXPIRE entries carry the library defaults for `at`
+  // (wall-clock) but are always signed `actor: "system"` — watchdog-driven
+  // expiry must stay distinguishable from a human one — so the test pins
+  // event/from/to/actor, never those entries' wall-clock `at`.
   assert.deepEqual(
     expireExecutionTasks.slice(0, 2).map((t) => {
       const last = t.history.at(-1)!;
       return [last.event, last.from, last.to, last.actor];
     }),
     [
-      ["EXPIRE", "ACCEPTED", "EXPIRED", undefined],
-      ["EXPIRE", "OPEN", "EXPIRED", undefined],
+      ["EXPIRE", "ACCEPTED", "EXPIRED", "system"],
+      ["EXPIRE", "OPEN", "EXPIRED", "system"],
     ],
   );
   assert.equal(
