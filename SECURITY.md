@@ -89,7 +89,9 @@ webhook signatures (`src/settlementWebhook.ts`).
   does not verify without the secret or with the wrong one, and an
   unkeyed chain does not verify when a secret is supplied. An empty or
   non-string/non-`Buffer` secret is a configuration error
-  (`assertAuditSecret` in `src/taskLifecycle.ts`).
+  (`assertAuditSecret` in `src/taskLifecycle.ts`). The MAC comparison
+  itself runs in constant time (`timingSafeEqual` after a length guard),
+  so an online verifier exposes no per-byte timing oracle.
 - **Strict snapshot and history validation.** `TaskLifecycle.fromJSON`
   runs `parseSnapshot` (`src/taskLifecycle.ts`) on untrusted input:
   the schema-version gate (`v`, when present, must be exactly

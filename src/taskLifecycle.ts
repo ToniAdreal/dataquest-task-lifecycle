@@ -11,7 +11,7 @@
  * Researcher/Admin (publishes tasks).
  */
 
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 /**
  * Maximum note length accepted by dispatch() and parseHistory().
@@ -1180,6 +1180,21 @@ function canonicalHistoryEntry(
   return JSON.stringify(obj);
 }
 
+/**
+ * Compare a keyed (HMAC-SHA256) audit-chain link in constant time.
+ *
+ * `timingSafeEqual` throws on length mismatch, and `parseHistory` only
+ * requires `hash` to be a non-empty string — so guard the decoded length
+ * first: a forged or truncated digest is a mismatch, never a throw.
+ * Mirrors the comparison discipline in `verifyPayoutWebhook`
+ * (src/settlementWebhook.ts).
+ */
+function constantTimeHexEqual(expected: string, actual: string): boolean {
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(actual, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 function hashHistoryEntry(
   canonical: string,
   prevHash: string,
@@ -1213,6 +1228,12 @@ function hashHistoryEntry(
  * (empty, or not a string/Buffer) is a caller configuration error and
  * throws, mirroring the constructor.
  *
+ * On the keyed path the recomputed MAC is compared with the stored
+ * digest in constant time (`timingSafeEqual` after a length guard), so
+ * an online verifier exposes no per-byte timing oracle; the unkeyed
+ * chain compares digests with plain equality (its digests are not
+ * keyed secrets, so there is no oracle to protect).
+ *
  * Note: this checks integrity only, not structure. A re-sequenced or
  * structurally invalid history still needs parseHistory (via
  * {@link TaskLifecycle.fromJSON} / {@link replay}) for the seq/edge/
@@ -1234,10 +1255,20 @@ export function verifyHistoryChain(
   for (const entry of history) {
     if (entry.prevHash !== expectedPrev) return false;
     const canonical = canonicalHistoryEntry(entry);
-    if (hashHistoryEntry(canonical, entry.prevHash!, secret) !== entry.hash) {
+    const recomputed = hashHistoryEntry(canonical, entry.prevHash!, secret);
+    if (typeof entry.hash !== "string") return false;
+    // Keyed links are MACs: compare in constant time so an online
+    // verifier gives no per-byte timing oracle. The unkeyed chain is
+    // tamper-evidence only (its digests are not keyed secrets), so its
+    // comparison stays a plain equality — semantics unchanged.
+    const intact =
+      secret === undefined
+        ? recomputed === entry.hash
+        : constantTimeHexEqual(recomputed, entry.hash);
+    if (!intact) {
       return false;
     }
-    expectedPrev = entry.hash!;
+    expectedPrev = entry.hash;
   }
   return true;
 }
