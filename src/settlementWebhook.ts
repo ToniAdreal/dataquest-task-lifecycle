@@ -12,7 +12,8 @@
  *
  * Scope honesty (what this is NOT):
  * - Delivery IS included via {@link deliverPayoutWebhook}: a single-endpoint
- *   HTTP POST of the signed payload with the `X-Hub-Signature-256` header, a
+ *   HTTP POST of the signed payload with the `X-Hub-Signature-256` header
+ *   plus an `Idempotency-Key` header carrying the payload `eventId`, a
  *   per-attempt timeout, and exponential-backoff retries on 429, 5xx, and
  *   network errors (a 429 `Retry-After` hint is honored, clamped to
  *   `maxRetryDelayMs`). Both delivery entry points also accept an
@@ -1159,7 +1160,15 @@ function defaultSleep(ms: number): Promise<void> {
 
 /**
  * POST a signed payout webhook to `url` as JSON with the
- * `X-Hub-Signature-256: <signature>` header. The request body is
+ * `X-Hub-Signature-256: <signature>` header. Every attempt also carries
+ * an `Idempotency-Key: <payload eventId>` header (the same value as the
+ * body's `eventId`, retries included, with no opt-out), so a receiver
+ * that deduplicates on the `Idempotency-Key` header can do so without
+ * parsing the body first. The header is a transport-layer idempotency
+ * hint only: it is NOT covered by the signature, so a receiver must
+ * still verify the signature over the raw body and then deduplicate on
+ * the verified body's `eventId` — a header value that disagrees with
+ * the verified body is untrusted. The request body is
  * byte-identical to what {@link buildPayoutWebhook} signed, so the
  * receiver can verify it over the raw bytes.
  *
@@ -1382,6 +1391,7 @@ export async function deliverPayoutWebhook(
         fetchImpl,
         target,
         webhook.signature,
+        webhook.payload.eventId,
         body,
         timeoutMs,
         signal,
@@ -1564,6 +1574,13 @@ export interface DeliverPayoutWebhookToManyResult {
  *   single-endpoint delivery. Two separate calls (two settlements, or
  *   a caller re-fan-out) get different `eventId`s unless the caller
  *   pins one via `opts.eventId`.
+ * - Every endpoint's request independently carries an
+ *   `Idempotency-Key` header with that shared `eventId` (one request
+ *   per endpoint, each with its own header value equal to the shared
+ *   `eventId` — the endpoints do not get different ids, because they
+ *   receive the same logical event). The header is a transport-layer
+ *   hint, not part of the signature: receivers verify the body first
+ *   and deduplicate on the verified body's `eventId`.
  * - The call-level `signal` is passed through to every endpoint's
  *   delivery, and an endpoint may override it with its own `signal`.
  *   Aborting stops that endpoint's delivery exactly as in a
@@ -1805,6 +1822,7 @@ async function postOnce(
   fetchImpl: PayoutWebhookFetchImpl,
   target: URL,
   signature: string,
+  eventId: string,
   body: string,
   timeoutMs: number,
   externalSignal?: AbortSignal,
@@ -1836,6 +1854,10 @@ async function postOnce(
       headers: {
         "content-type": "application/json",
         "X-Hub-Signature-256": signature,
+        // Transport-layer idempotency hint only: the signature covers
+        // the body, not this header, so receivers must verify the body
+        // and deduplicate on the verified body's eventId.
+        "Idempotency-Key": eventId,
       },
       body,
       signal: controller.signal,

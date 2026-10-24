@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An `Idempotency-Key` header on payout webhook delivery (backlog
+  #568): every `deliverPayoutWebhook` attempt — and every endpoint in
+  a `deliverPayoutWebhookToMany` fan-out — carries
+  `Idempotency-Key: <payload eventId>` (retries reuse the same value;
+  fan-out endpoints share the one logical event's id, so they carry
+  the same value). The header is a transport-layer idempotency hint
+  only: it is not covered by the signature, so receivers must verify
+  the signature over the raw body and deduplicate on the verified
+  body's `eventId`, never on the header alone.
 - An SLA warning-window filter (backlog #565):
   `tasksApproachingDeadline(tasks, withinMs, now)` returns the
   non-terminal tasks whose current-state SLA deadline falls inside the
