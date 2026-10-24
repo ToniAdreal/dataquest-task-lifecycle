@@ -196,6 +196,38 @@ export function expiredTasks(
 }
 
 /**
+ * Batch filter: from a batch of tasks, return the ones currently in the
+ * given state, in input order.
+ *
+ * This is the generic counterpart to the watchdog screens: `expiredTasks()`
+ * answers "past an absolute SLA deadline" and `staleTasks()` answers
+ * "stuck in this state too long", but a caller that simply wants to list
+ * every IN_REVIEW task had to hand-write the same filter — and a
+ * hand-written filter has no shared answer for an unknown state string.
+ * This helper gives that listing one shared, pure entry point:
+ *
+ *   const inReview = tasksByState(allTasks, "IN_REVIEW");
+ *
+ * Pure: reads the tasks' current states, never mutates, dispatches, or
+ * copies the tasks — the returned array holds the same task objects, in
+ * input order, so callers can act on them directly. An unknown state
+ * (anything outside the TaskState set) fails fast instead of silently
+ * returning an empty list, so a typo ("in_review", "OPENN") cannot masquerade
+ * as "no tasks in this state". Terminal states filter exactly like any
+ * other state — unlike the watchdog screens, this helper has no
+ * terminal exclusion to apply.
+ */
+export function tasksByState(
+  tasks: readonly TaskLifecycle[],
+  state: TaskState,
+): TaskLifecycle[] {
+  if (!STATES.has(state)) {
+    throw new Error(`invalid tasksByState: unknown state "${String(state)}"`);
+  }
+  return tasks.filter((task) => task.state === state);
+}
+
+/**
  * Per-task outcome of {@link expireOverdueTasks}.
  */
 export interface ExpireOverdueResult {

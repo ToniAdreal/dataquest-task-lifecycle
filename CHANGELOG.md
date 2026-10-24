@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A generic batch filter (backlog #562): `tasksByState(tasks, state)`
+  returns the tasks currently in the given state, in input order.
+  It is the generic counterpart to the watchdog screens (`expiredTasks`
+  for past-deadline tasks, `staleTasks` for stuck tasks): terminal
+  states filter exactly like any other state, the result holds the same
+  task objects (not copies), the call is pure (no mutation or dispatch),
+  and an unknown state fails fast with an explicit error instead of
+  silently returning an empty list.
 - Fan-out limits on payout webhook delivery (backlog #559):
   `DeliverPayoutWebhookToManyOptions.maxEndpoints` (a positive
   integer; exceeding it throws a caller configuration error before
