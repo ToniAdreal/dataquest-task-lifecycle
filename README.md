@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 640 tests, all local
+npm test   # 649 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -468,6 +468,18 @@ For batch polling there is a dedicated helper — `expiredTasks(tasks, now)`
 returns the "non-terminal and past deadline" subset of a task list. It is a
 pure filter (it never mutates or dispatches); the watchdog executor
 `expireOverdueTasks(tasks, now)` does the dispatch for you, one line:
+
+The "warn before it is too late" counterpart is
+`tasksApproachingDeadline(tasks, withinMs, now)` — it returns the
+non-terminal tasks whose current-state SLA deadline falls inside the
+half-open window `(now, now + withinMs]`. A task already past its
+deadline is never reported here (that is `expiredTasks`' job, so no task
+is reported twice), and a deadline landing exactly on `now + withinMs`
+counts as "within". Tasks with no deadline for their current state and
+terminal tasks are never selected; an invalid `withinMs` (negative,
+non-finite, non-number) fails fast instead of silently returning an
+empty list. Like `expiredTasks`, it is a pure filter — a watchdog uses
+it to nudge or reassign before the deadline passes, not to expire.
 
 ```ts
 import { expireOverdueTasks, TaskLifecycle } from "./src/index.js";
@@ -1537,7 +1549,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 640 tests covering the happy path, reject→resubmit
+`npm test` runs 649 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

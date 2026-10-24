@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An SLA warning-window filter (backlog #565):
+  `tasksApproachingDeadline(tasks, withinMs, now)` returns the
+  non-terminal tasks whose current-state SLA deadline falls inside the
+  half-open window `(now, now + withinMs]`. It is the "warn before it
+  is too late" counterpart to `expiredTasks`: a task already past its
+  deadline is never reported here (so no task is reported twice), a
+  deadline exactly on `now + withinMs` counts as within, and tasks with
+  no deadline for their current state or in a terminal state are never
+  selected. The call is pure (no mutation or dispatch) and an invalid
+  `withinMs` fails fast with an explicit error.
 - A generic batch filter (backlog #562): `tasksByState(tasks, state)`
   returns the tasks currently in the given state, in input order.
   It is the generic counterpart to the watchdog screens (`expiredTasks`

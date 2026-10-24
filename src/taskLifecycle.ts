@@ -196,6 +196,62 @@ export function expiredTasks(
 }
 
 /**
+ * Watchdog helper: from a batch of tasks, return the ones whose SLA
+ * deadline is coming up — non-terminal AND with a deadline inside the
+ * half-open window `(now, now + withinMs]`.
+ *
+ * This is the "warn before it is too late" counterpart to
+ * {@link expiredTasks}: an overdue task (deadline at or before `now`)
+ * belongs to `expiredTasks`, not here — the window's lower bound is
+ * exclusive, so a task that just crossed its deadline is never reported
+ * twice, once by each helper. A task whose deadline lands exactly on
+ * `now + withinMs` is included (the upper bound is inclusive: a
+ * deadline "within 24 hours" includes one exactly 24 hours out).
+ *
+ * The deadline read is the one attached to the task's CURRENT state
+ * (see {@link isOverdue}) — a deadline set for a state the task has
+ * already left does not count, and a task with no deadline for its
+ * current state is never selected. Terminal states are never selected,
+ * even when a deadline for the terminal state falls inside the window.
+ *
+ * Pure: reads the tasks, never mutates or dispatches. The `now`
+ * default is the real clock, so unit tests pin it to a fixed date.
+ * `withinMs` must be a non-negative finite number of milliseconds;
+ * an invalid value (or an invalid `now`) fails fast instead of
+ * silently returning an empty list.
+ *
+ *   const atRisk = tasksApproachingDeadline(allTasks, 24 * 3600_000, now);
+ *   // nudge the assignee / reassign, before the deadline passes
+ */
+export function tasksApproachingDeadline(
+  tasks: readonly TaskLifecycle[],
+  withinMs: number,
+  now: Date = new Date(),
+): TaskLifecycle[] {
+  if (
+    typeof withinMs !== "number" ||
+    !Number.isFinite(withinMs) ||
+    withinMs < 0
+  ) {
+    throw new Error(
+      "invalid tasksApproachingDeadline: withinMs must be a non-negative finite number of milliseconds",
+    );
+  }
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  return tasks.filter((task) => {
+    if (task.isTerminal) return false;
+    const deadline = task.getSlaDeadline(task.state);
+    if (deadline === undefined) return false;
+    const deadlineMs = Date.parse(deadline);
+    if (!Number.isFinite(deadlineMs)) return false;
+    return deadlineMs > nowMs && deadlineMs <= nowMs + withinMs;
+  });
+}
+
+/**
  * Batch filter: from a batch of tasks, return the ones currently in the
  * given state, in input order.
  *

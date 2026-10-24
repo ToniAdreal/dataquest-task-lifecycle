@@ -16,6 +16,7 @@ export {
   SNAPSHOT_VERSION,
   staleTasks,
   stateDiagram,
+  tasksApproachingDeadline,
   tasksByState,
   totalPaidOut,
   toMinorUnits,
