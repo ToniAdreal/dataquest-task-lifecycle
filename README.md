@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 611 tests, all local
+npm test   # 623 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -794,8 +794,9 @@ task.dispatch("PAYOUT_COMPLETE", {
 task.history[8].payoutAmount; // => 10098.5
 ```
 
-`payoutAmount` must be a finite number ≥ 0; anything else throws
-`invalid dispatch options: …` before the entry is appended, like
+`payoutAmount` must be a finite number ≥ 0 with at most 2 decimal
+places — exactly representable in integer minor units; a sub-cent value
+throws `invalid dispatch options: …` before the entry is appended, like
 payoutRef. It is generic audit metadata (accepted on any event), but
 intended for `PAYOUT_COMPLETE`; it survives `toJSON()` / `fromJSON()` and
 NDJSON round-trips, is committed into the audit-history hash chain, and
@@ -811,10 +812,18 @@ totalPaidOut(allTasks); // => 20630.0 — sum of recorded PAYOUT_COMPLETE amount
 
 Honest accounting rules: only `PAID` tasks contribute; a `PAID` task
 whose `PAYOUT_COMPLETE` entry carries no `payoutAmount` contributes 0 —
-this sums only what was recorded, not what was owed; the returned total
-is rounded to cents (`Math.round(x * 100) / 100`, the same money
-convention as the sibling escrow-state-machine-ts) while per-entry
-amounts are stored verbatim.
+this sums only what was recorded, not what was owed; the total is
+accumulated in integer minor units (`toMinorUnits`, exported for
+callers that hold cents) and returned in major units, so no float error
+can accumulate across the batch, while per-entry amounts are stored
+verbatim after the dispatch gate.
+
+Migration note: the stored fields stay major-unit numbers — no field
+is renamed and no existing amount changes meaning. Only new
+`dispatch()` writes are gated; a legacy snapshot or webhook payload
+carrying a float amount still parses, builds, and verifies (the
+`verifyPayoutWebhook` path is untouched). Callers holding integer cents
+convert with the exported `fromMinorUnits` / `toMinorUnits` helpers.
 
 The owed half of that comparison is `quotedAmount`: the amount the task
 was agreed to pay, recorded with `dispatch(event, { quotedAmount })` —
@@ -1518,7 +1527,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 615 tests covering the happy path, reject→resubmit
+`npm test` runs 623 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -2084,6 +2084,20 @@ change type; no entry describes a feature that is not in the history.
   verbatim (a mutated expectation turns the test red); the golden
   demo output and the README demo description and test count are
   refreshed to match.
+- Integer minor-unit denomination for payout amounts (backlog #558):
+  `dispatch()` now rejects `payoutAmount`/`quotedAmount` values with
+  more than 2 decimal places — a sub-cent value throws
+  `invalid dispatch options: … must be a minor-unit amount (at most 2
+  decimal places)` before anything is appended, so no amount that
+  cannot be stored as integer cents enters the audit trail.
+  `totalPaidOut()` accumulates integer minor units via the new exported
+  `toMinorUnits()` helper (with `fromMinorUnits()` as its inverse) and
+  returns the total in major units, so binary-float error cannot
+  accumulate across a batch. Only new writes are gated: the parse side
+  deliberately still accepts legacy sub-cent amounts, and a legacy
+  webhook payload carrying a float amount still builds and verifies
+  (the verify path is untouched); stored fields stay major-unit
+  numbers, so no existing amount changes meaning.
 
 ### Fixed
 

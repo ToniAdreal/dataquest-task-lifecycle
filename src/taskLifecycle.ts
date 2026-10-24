@@ -480,11 +480,42 @@ export function unreconciledPayouts(
 }
 
 /**
+ * Convert a major-unit amount to integer minor units (cents), rounding
+ * to the nearest cent. This is the single conversion the money helpers
+ * use: amounts `dispatch()` writes are guaranteed to be exactly
+ * representable in minor units (see {@link DispatchOptions}), so for
+ * them the conversion is exact; for a legacy amount read from an old
+ * snapshot (sub-cent precision, see {@link TaskHistoryEntry.payoutAmount})
+ * it rounds to the nearest cent per entry, never at the batch total.
+ */
+export function toMinorUnits(amount: number): number {
+  return Math.round(amount * 100);
+}
+
+/**
+ * Convert integer minor units (cents) back to a major-unit amount. The
+ * input must be an integer — a fractional "minor unit" is a caller
+ * error, not a representable amount — so anything else throws.
+ */
+export function fromMinorUnits(minorUnits: number): number {
+  if (!Number.isInteger(minorUnits)) {
+    throw new Error(
+      `minor units must be an integer, got ${String(minorUnits)}`,
+    );
+  }
+  return minorUnits / 100;
+}
+
+/**
  * Reconciliation helper: sum the actual settled payout amounts across a
  * batch of `PAID` tasks. For each task it reads the `payoutAmount`
  * recorded on its `PAYOUT_COMPLETE` entry (see {@link DispatchOptions})
- * and returns the total rounded to cents (same `Math.round(x * 100) / 100`
- * convention as the sibling escrow-state-machine-ts money math).
+ * and accumulates the sum in integer minor units
+ * ({@link toMinorUnits}), returning the total in major units — so no
+ * binary-float error can accumulate across the batch, however many
+ * tasks it holds (the same money convention as the sibling
+ * escrow-state-machine-ts, applied per entry instead of once at the
+ * total).
  *
  * Honest accounting rules, all deliberate:
  *  - only `PAID` tasks contribute; in-flight or otherwise-terminated
@@ -492,16 +523,17 @@ export function unreconciledPayouts(
  *  - a `PAID` task whose `PAYOUT_COMPLETE` entry carries no `payoutAmount`
  *    contributes 0 — the library cannot observe the external payment, so
  *    this sums only what was recorded, not what was owed;
- *  - per-entry amounts are stored verbatim; only the returned total is
- *    cent-rounded (a per-entry amount with more than 2 decimals is the
- *    caller's representation choice, see
+ *  - per-entry amounts are stored verbatim after `dispatch()` validates
+ *    them as minor-unit amounts (at most 2 decimal places); a legacy
+ *    entry read from an old snapshot with sub-cent precision is rounded
+ *    to the nearest cent per entry by {@link toMinorUnits} (see
  *    {@link TaskHistoryEntry.payoutAmount});
  *  - empty input returns 0.
  *
  * Pure: reads the tasks, never mutates or dispatches.
  */
 export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
-  let total = 0;
+  let totalMinorUnits = 0;
   for (const task of tasks) {
     if (task.state !== "PAID") continue;
     let complete: TaskHistoryEntry | undefined;
@@ -509,10 +541,10 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
       if (entry.event === "PAYOUT_COMPLETE") complete = entry;
     }
     if (complete?.payoutAmount !== undefined) {
-      total += complete.payoutAmount;
+      totalMinorUnits += toMinorUnits(complete.payoutAmount);
     }
   }
-  return Math.round(total * 100) / 100;
+  return totalMinorUnits / 100;
 }
 
 /**
@@ -617,8 +649,13 @@ export interface TaskHistoryEntry {
    * observe the external payment — and counts as 0 in
    * {@link totalPaidOut} (documented as "sums only what was recorded").
    *
-   * Stored verbatim on the audit entry (no rounding at write time); the
-   * {@link totalPaidOut} helper rounds the summed total to cents.
+   * Stored verbatim on the audit entry once `dispatch()` has validated
+   * it as a minor-unit amount (at most 2 decimal places, see
+   * {@link DispatchOptions}); the {@link totalPaidOut} helper
+   * accumulates such amounts in integer minor units. A legacy entry
+   * read from an old snapshot may still carry sub-cent precision —
+   * `parseHistory` deliberately does not reject it, so old audit logs
+   * stay readable; only new `dispatch()` writes are gated.
    */
   payoutAmount?: number;
   /**
@@ -629,10 +666,13 @@ export interface TaskHistoryEntry {
    * the price is agreed. A task without one simply has no recorded
    * quote — the library cannot invent what was owed.
    *
-   * Stored verbatim on the audit entry (no rounding at write time),
-   * exactly like `payoutAmount`. The {@link payoutMismatch} helper
-   * compares the last `ACCEPT` quote against the `PAYOUT_COMPLETE`
-   * settled amount for settlement reconciliation.
+   * Stored verbatim on the audit entry once `dispatch()` has validated
+   * it as a minor-unit amount (at most 2 decimal places), exactly like
+   * `payoutAmount` — and, like `payoutAmount`, a legacy entry read from
+   * an old snapshot may still carry sub-cent precision without being
+   * rejected. The {@link payoutMismatch} helper compares the last
+   * `ACCEPT` quote against the `PAYOUT_COMPLETE` settled amount for
+   * settlement reconciliation.
    */
   quotedAmount?: number;
   /**
@@ -930,15 +970,19 @@ export interface DispatchOptions {
   /**
    * Actual settled amount recorded on the audit entry
    * ({@link TaskHistoryEntry.payoutAmount}). Must be a finite number ≥ 0
-   * when provided; an invalid value throws
-   * `invalid dispatch options: …` up front, before anything mutates.
+   * with at most 2 decimal places — exactly representable in integer
+   * minor units (see {@link toMinorUnits}) — when provided; an invalid
+   * value throws `invalid dispatch options: …` up front, before
+   * anything mutates.
    */
   payoutAmount?: number;
   /**
    * Quoted (owed) amount recorded on the audit entry
    * ({@link TaskHistoryEntry.quotedAmount}). Must be a finite number ≥ 0
-   * when provided; an invalid value throws
-   * `invalid dispatch options: …` up front, before anything mutates.
+   * with at most 2 decimal places — exactly representable in integer
+   * minor units (see {@link toMinorUnits}) — when provided; an invalid
+   * value throws `invalid dispatch options: …` up front, before
+   * anything mutates.
    * Conventionally attached to `ACCEPT`, the moment the price is agreed.
    */
   quotedAmount?: number;
@@ -1456,9 +1500,12 @@ export function parseHistory(
       entry.payoutRef = raw.payoutRef;
     }
     if (raw.payoutAmount !== undefined) {
-      // dispatch() only ever writes finite, non-negative amounts, so a
-      // negative, NaN/Infinity, or non-number payoutAmount in an untrusted
-      // log is malformed (an unrecorded amount simply omits the field).
+      // dispatch() only ever writes finite, non-negative, minor-unit
+      // amounts, but the parse side deliberately does NOT enforce the
+      // minor-unit gate: a legacy log may carry sub-cent precision and
+      // must stay readable (backlog #558). Only a negative, NaN/Infinity,
+      // or non-number payoutAmount in an untrusted log is malformed
+      // (an unrecorded amount simply omits the field).
       if (
         typeof raw.payoutAmount !== "number" ||
         !Number.isFinite(raw.payoutAmount) ||
@@ -1472,9 +1519,11 @@ export function parseHistory(
     }
     if (raw.quotedAmount !== undefined) {
       // Same bar as payoutAmount: dispatch() only ever writes finite,
-      // non-negative amounts, so a negative, NaN/Infinity, or non-number
-      // quotedAmount in an untrusted log is malformed (an unrecorded
-      // quote simply omits the field).
+      // non-negative, minor-unit amounts, but the parse side likewise
+      // does not enforce the minor-unit gate for legacy readability, so
+      // a negative, NaN/Infinity, or non-number quotedAmount in an
+      // untrusted log is malformed (an unrecorded quote simply omits
+      // the field).
       if (
         typeof raw.quotedAmount !== "number" ||
         !Number.isFinite(raw.quotedAmount) ||
@@ -1989,8 +2038,7 @@ export class TaskLifecycle {
       // A payout amount must be a real, non-negative number: NaN, ±Infinity
       // and negatives are caller errors (a bad amount in the audit trail
       // would poison totalPaidOut), so fail fast up front, before
-      // anything mutates. Rounding is deliberately not applied here — the
-      // entry stores the verbatim amount; totalPaidOut rounds the total.
+      // anything mutates.
       if (
         typeof opts.payoutAmount !== "number" ||
         !Number.isFinite(opts.payoutAmount) ||
@@ -2000,12 +2048,25 @@ export class TaskLifecycle {
           `invalid dispatch options: payoutAmount must be a non-negative finite number, got ${String(opts.payoutAmount)}`,
         );
       }
+      // Minor-unit denomination (backlog #558): the amount must also be
+      // exactly representable in integer minor units — more than 2
+      // decimals cannot be stored as integer cents, and silently keeping
+      // sub-cent precision is how binary-float drift accumulates in
+      // batch totals. The round-trip through toMinorUnits is the check:
+      // an amount that does not survive it carries sub-cent precision.
+      // Stored verbatim once it passes; no rounding is applied here.
+      if (toMinorUnits(opts.payoutAmount) / 100 !== opts.payoutAmount) {
+        throw new Error(
+          `invalid dispatch options: payoutAmount must be a minor-unit amount (at most 2 decimal places), got ${String(opts.payoutAmount)}`,
+        );
+      }
     }
     if (opts?.quotedAmount !== undefined) {
       // Same bar as payoutAmount: a quoted amount must be a real,
       // non-negative number — a bad quote in the audit trail would
       // poison payoutMismatch reconciliation — so fail fast up front,
-      // before anything mutates. Stored verbatim; no rounding at write.
+      // before anything mutates. Same minor-unit gate as payoutAmount:
+      // sub-cent quotes are rejected, never silently stored.
       if (
         typeof opts.quotedAmount !== "number" ||
         !Number.isFinite(opts.quotedAmount) ||
@@ -2013,6 +2074,11 @@ export class TaskLifecycle {
       ) {
         throw new Error(
           `invalid dispatch options: quotedAmount must be a non-negative finite number, got ${String(opts.quotedAmount)}`,
+        );
+      }
+      if (toMinorUnits(opts.quotedAmount) / 100 !== opts.quotedAmount) {
+        throw new Error(
+          `invalid dispatch options: quotedAmount must be a minor-unit amount (at most 2 decimal places), got ${String(opts.quotedAmount)}`,
         );
       }
     }
