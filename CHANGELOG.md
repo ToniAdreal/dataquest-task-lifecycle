@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An auditable watchdog report on `expireOverdueTasks()` (backlog #544):
+  `ExpireOverdueResult` gains an optional `entry?: TaskHistoryEntry` —
+  on a successful EXPIRE dispatch the outcome now carries a frozen,
+  detached copy of the appended EXPIRE audit entry (event, from, to, seq,
+  at), so an SLA operations report can cite it per task without
+  re-reading `task.history`. Failed dispatches omit the field entirely,
+  leaving the `{ task, expired: false, error }` failure shape unchanged
+  and backward compatible.
 - A history getter defensive-copy benchmark path (backlog #539):
   `npm run bench` now also times one `get history()` call per
   iteration on a fixed task (BENCH-HG) with a pinned 64-entry

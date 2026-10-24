@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 596 tests, all local
+npm test   # 603 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -473,9 +473,17 @@ pure filter (it never mutates or dispatches); the watchdog executor
 import { expireOverdueTasks, TaskLifecycle } from "./src/index.js";
 
 const tasks: TaskLifecycle[] = loadTasks(); // your store
-const outcomes = expireOverdueTasks(tasks); // [{ task, expired: true }, …]
+const outcomes = expireOverdueTasks(tasks); // [{ task, expired: true, entry }, …]
 // { task, expired: false, error } — see below
 ```
+
+Successful outcomes also carry `entry` — a frozen, detached copy of the
+EXPIRE audit entry the dispatch just appended (`event: "EXPIRE"`,
+`from`, `to`, `seq`, `at`, …). It is there so an SLA operations report
+can cite the outcome per task without re-reading `task.history`
+(which task expired, from which state, at which timestamp); failed
+dispatches omit the field entirely, so the `{ task, expired: false, error }`
+failure shape is unchanged and backward compatible.
 
 Why the executor exists instead of a hand-written loop: `expiredTasks()`
 only checks the deadline and the terminal flag, but `EXPIRE` is **not** a

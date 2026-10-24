@@ -205,6 +205,14 @@ export interface ExpireOverdueResult {
   expired: boolean;
   /** Set when the EXPIRE dispatch threw; the message of the caught error. */
   error?: string;
+  /**
+   * The EXPIRE audit entry that the successful dispatch appended — a
+   * frozen, detached copy of the task's last history entry, so an SLA
+   * operations report can cite it (task id, from/to state, timestamp)
+   * without re-reading `task.history`. Present only when `expired` is
+   * true; failed dispatches leave this absent.
+   */
+  entry?: TaskHistoryEntry;
 }
 
 /**
@@ -223,6 +231,11 @@ export interface ExpireOverdueResult {
  * <message>`) and keeps going, so one unexpirable task never blocks the
  * rest of the batch.
  *
+ * Successful outcomes also carry `entry` — a frozen, detached copy of
+ * the EXPIRE audit entry just appended — so a caller can write an SLA
+ * operations report (which task, from which state, when) without
+ * re-reading the task's history; failures omit it.
+ *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
  * append-only history. Only overdue (non-terminal, past deadline) tasks
@@ -236,7 +249,10 @@ export function expireOverdueTasks(
   return expiredTasks(tasks, now).map((task) => {
     try {
       task.dispatch("EXPIRE");
-      return { task, expired: true };
+      // The history getter returns frozen detached copies, so the last
+      // entry is already the immutable audit record of this dispatch.
+      const history = task.history;
+      return { task, expired: true, entry: history[history.length - 1] };
     } catch (err) {
       return {
         task,
