@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 603 tests, all local
+npm test   # 611 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1060,7 +1060,13 @@ const result = await deliverPayoutWebhook("https://example.com/hooks/payout", we
 
 Retry policy and defaults: `maxAttempts: 3` total attempts,
 `timeoutMs: 5000` per attempt (enforced with an `AbortController`),
-exponential backoff starting at `backoffMs: 1000`. Only 429, 5xx, and
+exponential backoff starting at `backoffMs: 1000`. An opt-in
+`jitterMs` (default `0`) adds a uniform `Math.random() * jitterMs`
+spread on top of each backoff wait — useful when many deliveries fail
+together and would otherwise retry on the same beat (thundering
+herd); the jitter is plain de-synchronization, never cryptographic,
+and a 429 `Retry-After` hint is always waited exactly with no jitter
+added. Only 429, 5xx, and
 network errors (including timeouts) are retried; other 3xx/4xx fail
 immediately (redirects are never followed with the signed payload). A
 429 `Retry-After` hint (delay-seconds or HTTP-date) wins over backoff

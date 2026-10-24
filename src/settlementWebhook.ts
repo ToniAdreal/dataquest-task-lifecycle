@@ -1023,6 +1023,21 @@ export interface DeliverPayoutWebhookOptions {
    * immediately).
    */
   maxRetryDelayMs?: number;
+  /**
+   * Opt-in jitter, in milliseconds, added on top of the exponential
+   * backoff between retries. Default `0` — the delay schedule is
+   * exactly the deterministic backoff sequence and behavior is
+   * unchanged. When greater than `0`, each backoff wait becomes
+   * `backoffMs * 2^(n-1) + Math.random() * jitterMs`, spreading
+   * retries that failed together (a thundering herd after the receiver
+   * restarts) across the `[backoff, backoff + jitterMs]` window.
+   * `Math.random` is used only for de-synchronization — never for
+   * secrets or signatures — so a non-cryptographic RNG is fine. A 429
+   * `Retry-After` hint is the receiver's own prescribed time and is
+   * always waited exactly, with no jitter added. Must be a finite
+   * non-negative number.
+   */
+  jitterMs?: number;
   /** Fetch implementation. Defaults to the global `fetch`. */
   fetchImpl?: PayoutWebhookFetchImpl;
   /**
@@ -1091,21 +1106,45 @@ export function parsePayoutRetryAfter(
 }
 
 /**
+ * Exponential backoff with opt-in jitter for retry `attemptIndex`
+ * (0-based): `backoffMs * 2^attemptIndex`, plus a uniform
+ * `Math.random() * jitterMs` spread when `jitterMs > 0`. The default
+ * `jitterMs` of `0` keeps the deterministic pure-exponential schedule;
+ * the jitter is never applied to a 429 `Retry-After` hint, which is
+ * computed by {@link retryDelayMs} separately.
+ */
+function jitteredBackoffMs(
+  attemptIndex: number,
+  backoffMs: number,
+  jitterMs: number,
+): number {
+  const backoff = backoffMs * 2 ** attemptIndex;
+  if (jitterMs <= 0) return backoff;
+  // Math.random is only de-synchronizing retry schedules (spreading a
+  // thundering herd), never generating secret material — a
+  // non-cryptographic RNG is fine here.
+  return backoff + Math.random() * jitterMs;
+}
+
+/**
  * Wait before the next retry: a 429 `Retry-After` hint wins over
  * backoff, clamped to `maxRetryDelayMs` so a runaway hint can never
- * stall delivery longer than the caller allows.
+ * stall delivery longer than the caller allows. The hint is the
+ * receiver's own prescribed time and is waited exactly — no jitter is
+ * added on top.
  */
 function retryDelayMs(
   response: Response,
   attemptIndex: number,
   backoffMs: number,
   maxRetryDelayMs: number,
+  jitterMs: number,
 ): number {
   if (response.status === 429) {
     const hinted = parsePayoutRetryAfter(response.headers.get("retry-after"));
     if (hinted !== undefined) return Math.min(hinted, maxRetryDelayMs);
   }
-  return backoffMs * 2 ** attemptIndex;
+  return jitteredBackoffMs(attemptIndex, backoffMs, jitterMs);
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -1160,6 +1199,7 @@ interface ResolvedDeliverOptions {
   maxAttempts: number;
   backoffMs: number;
   maxRetryDelayMs: number;
+  jitterMs: number;
   fetchImpl: PayoutWebhookFetchImpl;
   sleepImpl: (ms: number) => Promise<void>;
   signal?: AbortSignal;
@@ -1179,6 +1219,7 @@ function resolveDeliverOptions(
   const maxAttempts = opts.maxAttempts ?? 3;
   const backoffMs = opts.backoffMs ?? 1000;
   const maxRetryDelayMs = opts.maxRetryDelayMs ?? 60_000;
+  const jitterMs = opts.jitterMs ?? 0;
   const fetchImpl: PayoutWebhookFetchImpl =
     opts.fetchImpl ?? ((u, init) => fetch(u, init));
   const sleepImpl = opts.sleepImpl ?? defaultSleep;
@@ -1211,6 +1252,13 @@ function resolveDeliverOptions(
       )}`,
     );
   }
+  if (!Number.isFinite(jitterMs) || jitterMs < 0) {
+    throw new Error(
+      `cannot deliver payout webhook: jitterMs must be a non-negative number, got ${String(
+        opts.jitterMs,
+      )}`,
+    );
+  }
   if (opts.fetchImpl !== undefined && typeof opts.fetchImpl !== "function") {
     throw new Error(
       "cannot deliver payout webhook: fetchImpl must be a function",
@@ -1233,6 +1281,7 @@ function resolveDeliverOptions(
     maxAttempts,
     backoffMs,
     maxRetryDelayMs,
+    jitterMs,
     fetchImpl,
     sleepImpl,
     signal: opts.signal,
@@ -1286,6 +1335,7 @@ export async function deliverPayoutWebhook(
     maxAttempts,
     backoffMs,
     maxRetryDelayMs,
+    jitterMs,
     fetchImpl,
     sleepImpl,
     signal,
@@ -1346,7 +1396,7 @@ export async function deliverPayoutWebhook(
       lastError = err instanceof Error ? err.message : String(err);
       if (attempt < maxAttempts - 1) {
         const aborted = await sleepWithSignal(
-          backoffMs * 2 ** attempt,
+          jitteredBackoffMs(attempt, backoffMs, jitterMs),
           sleepImpl,
           signal,
         );
@@ -1365,7 +1415,7 @@ export async function deliverPayoutWebhook(
     if (response.status === 429 || (response.status >= 500 && response.status <= 599)) {
       if (attempt < maxAttempts - 1) {
         const aborted = await sleepWithSignal(
-          retryDelayMs(response, attempt, backoffMs, maxRetryDelayMs),
+          retryDelayMs(response, attempt, backoffMs, maxRetryDelayMs, jitterMs),
           sleepImpl,
           signal,
         );
@@ -1424,6 +1474,8 @@ export interface PayoutWebhookEndpoint {
   backoffMs?: number;
   /** Per-endpoint override of the call-level `maxRetryDelayMs`. */
   maxRetryDelayMs?: number;
+  /** Per-endpoint override of the call-level `jitterMs`. */
+  jitterMs?: number;
   /** Per-endpoint override of the call-level `signal`. */
   signal?: AbortSignal;
 }
@@ -1562,6 +1614,7 @@ export async function deliverPayoutWebhookToMany(
           maxAttempts: endpoint.maxAttempts ?? opts.maxAttempts,
           backoffMs: endpoint.backoffMs ?? opts.backoffMs,
           maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
+          jitterMs: endpoint.jitterMs ?? opts.jitterMs,
           fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
           sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
           signal: endpoint.signal ?? opts.signal,

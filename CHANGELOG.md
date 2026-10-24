@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in retry jitter on payout webhook delivery (backlog #547):
+  `DeliverPayoutWebhookOptions.jitterMs` (default `0` — the delay
+  schedule stays exactly the deterministic exponential backoff).
+  When greater than `0`, each backoff wait becomes
+  `backoffMs * 2^(n-1) + Math.random() * jitterMs`, spreading retries
+  that failed together (a thundering herd after the receiver restarts)
+  across the `[backoff, backoff + jitterMs]` window. `Math.random` is
+  documented as de-synchronization only, never cryptographic; a 429
+  `Retry-After` hint is the receiver's own prescribed time and is
+  always waited exactly, with no jitter added. Invalid values
+  (negative, `NaN`, infinite, non-number) throw a caller configuration
+  error before any request is made. `deliverPayoutWebhookToMany`
+  forwards the option call-level and accepts a per-endpoint
+  `jitterMs` override.
 - An auditable watchdog report on `expireOverdueTasks()` (backlog #544):
   `ExpireOverdueResult` gains an optional `entry?: TaskHistoryEntry` —
   on a successful EXPIRE dispatch the outcome now carries a frozen,
