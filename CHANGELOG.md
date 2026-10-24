@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Fan-out limits on payout webhook delivery (backlog #559):
+  `DeliverPayoutWebhookToManyOptions.maxEndpoints` (a positive
+  integer; exceeding it throws a caller configuration error before
+  any request is made) and `overallDeadlineMs` (a positive number of
+  milliseconds; when the budget expires, every still-in-flight
+  endpoint is aborted through a deadline signal composed with that
+  endpoint's own signal, so a per-endpoint signal override cannot
+  bypass the deadline). Deadline-stopped endpoints report the
+  deadline timeout error, already-completed endpoints keep their
+  results, and the aggregate result gains `deadlineExceeded: true`
+  (false otherwise, including calls with no deadline). Invalid values
+  for either option throw before any request. The deadline aborts via
+  the fetch signal, so a fetch implementation that ignores its signal
+  cannot be force-stopped by it, exactly as with an external abort.
 - Opt-in retry jitter on payout webhook delivery (backlog #547):
   `DeliverPayoutWebhookOptions.jitterMs` (default `0` — the delay
   schedule stays exactly the deterministic exponential backoff).

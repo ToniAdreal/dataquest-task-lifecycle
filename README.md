@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 623 tests, all local
+npm test   # 632 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1137,7 +1137,7 @@ const out = await deliverPayoutWebhookToMany(paidTask, [
   { url: "https://billing.example.com/hooks/payout", secret: billingSecret },
   { url: "https://risk.example.com/hooks/payout", secret: riskSecret },
 ]);
-// out: { results: DeliverWebhookResult[], delivered: number, failed: number }
+// out: { results: DeliverWebhookResult[], delivered: number, failed: number, deadlineExceeded: boolean }
 // results[i] corresponds to endpoints[i], in input order.
 ```
 
@@ -1155,7 +1155,17 @@ failure — retries exhausted, network error, even an invalid URL —
 marks only that endpoint's result `{ ok: false, … }` and never blocks
 the others. Call-level configuration errors still throw before any
 request: an empty/non-array `endpoints` list, invalid global delivery
-options, or a non-PAID task.
+options, or a non-PAID task. Two fan-out limits are also call-level
+configuration: `maxEndpoints` caps how many endpoints one call may
+carry (exceeding it throws before any request), and
+`overallDeadlineMs` caps the whole call's wall-clock time — when it
+expires, every still-in-flight endpoint is aborted through a deadline
+signal composed with that endpoint's own signal (a per-endpoint signal
+override does not exempt an endpoint from the deadline), the stopped
+endpoints report the deadline timeout error, and the aggregate result
+reports `deadlineExceeded: true` while already-completed endpoints keep
+their results. A fetch implementation that ignores its signal cannot be
+force-stopped by the deadline, exactly as with an external abort.
 
 Honest limits: the payload carries only what the audit history records —
 `payoutRef`/`payoutAmount` are omitted when the entry lacks them (a `PAID`
@@ -1527,7 +1537,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 623 tests covering the happy path, reject→resubmit
+`npm test` runs 632 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

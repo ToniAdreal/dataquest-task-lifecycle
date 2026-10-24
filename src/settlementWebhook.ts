@@ -1497,6 +1497,30 @@ export interface DeliverPayoutWebhookToManyOptions
    * value in tests for determinism. Must be a non-empty string.
    */
   eventId?: string;
+  /**
+   * Maximum number of endpoints in one call. When set and
+   * `endpoints.length` exceeds it, the call throws a caller
+   * configuration error before any request is made (zero fetch calls)
+   * — an unbounded fan-out is how one settlement event turns into an
+   * endpoint explosion. Must be a positive integer when present.
+   */
+  maxEndpoints?: number;
+  /**
+   * Overall wall-clock budget for the whole fan-out, in milliseconds.
+   * When set, a timer aborts every in-flight endpoint delivery once
+   * the budget expires (composed with each endpoint's own signal, so
+   * a per-endpoint signal override cannot bypass the deadline); an
+   * endpoint stopped this way reports
+   * `{ ok: false, error: "payout webhook delivery timed out: overall deadline of <ms>ms exceeded" }`
+   * instead of the plain abort text, and the aggregate result carries
+   * `deadlineExceeded: true`. Endpoints that already completed keep
+   * their results, and `delivered`/`failed` count exactly what
+   * happened. Must be a positive number when present. Honest limit:
+   * the deadline aborts via the fetch signal, exactly like an
+   * external abort — a fetch implementation that ignores its signal
+   * cannot be force-stopped by the deadline either.
+   */
+  overallDeadlineMs?: number;
 }
 
 /**
@@ -1512,6 +1536,12 @@ export interface DeliverPayoutWebhookToManyResult {
   delivered: number;
   /** How many endpoints reported `ok: false`. */
   failed: number;
+  /**
+   * `true` only when an `overallDeadlineMs` budget was set and its
+   * timer fired before every endpoint had settled. `false` in every
+   * other case, including a call with no deadline at all.
+   */
+  deadlineExceeded: boolean;
 }
 
 /**
@@ -1548,12 +1578,49 @@ export interface DeliverPayoutWebhookToManyResult {
  *   made: a missing/empty/non-array `endpoints`, invalid global
  *   delivery options, an invalid shared `now`/`eventId`, or a non-PAID
  *   task are caller bugs, not per-endpoint outcomes.
+ * - `maxEndpoints` caps the fan-out size: more endpoints than the cap
+ *   throws before any request, and an invalid cap (non-integer, <= 0,
+ *   non-finite, non-number) throws the same way.
+ * - `overallDeadlineMs` caps the whole call's wall-clock time: when
+ *   the budget expires, every still-in-flight endpoint is aborted
+ *   through a deadline signal composed with that endpoint's own
+ *   signal (a per-endpoint signal override does NOT exempt an
+ *   endpoint from the deadline). A deadline-stopped endpoint reports
+ *   the deadline timeout error, not the plain abort text; endpoints
+ *   that already finished keep their results, and the aggregate
+ *   result reports `deadlineExceeded: true`.
  *
  * Honest limit: there is no durable queue and no cross-process retry.
  * If the process dies mid-fan-out, some endpoints may have received the
  * event and others not; the caller reconciles by re-delivering and
  * letting receivers deduplicate on the shared `eventId`.
  */
+/**
+ * Combine several abort signals into one that fires when ANY input
+ * fires, with a `dispose()` that detaches the forwarding listeners.
+ * With zero or one live input the input signal is returned as-is
+ * (dispose is then a no-op), so the no-deadline path is untouched.
+ * An already-aborted input aborts the combined signal immediately.
+ */
+function combineAbortSignals(
+  signals: Array<AbortSignal | undefined>,
+): { signal: AbortSignal | undefined; dispose: () => void } {
+  const live = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (live.length <= 1) {
+    return { signal: live[0], dispose: () => {} };
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  for (const s of live) s.addEventListener("abort", onAbort, { once: true });
+  if (live.some((s) => s.aborted)) controller.abort();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const s of live) s.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 export async function deliverPayoutWebhookToMany(
   task: TaskLifecycle,
   endpoints: PayoutWebhookEndpoint[],
@@ -1569,6 +1636,37 @@ export async function deliverPayoutWebhookToMany(
   // endpoint overrides are validated per endpoint, inside the fan-out,
   // so a bad override fails only its own endpoint.)
   resolveDeliverOptions(opts);
+  // Fan-out limits are call-level configuration too: validate them
+  // before any request, with the same "cannot deliver payout webhook
+  // to many endpoints: …" prefix as the endpoints check above.
+  if (
+    opts.maxEndpoints !== undefined &&
+    (!Number.isInteger(opts.maxEndpoints) || opts.maxEndpoints < 1)
+  ) {
+    throw new Error(
+      `cannot deliver payout webhook to many endpoints: maxEndpoints must be a positive integer, got ${String(
+        opts.maxEndpoints,
+      )}`,
+    );
+  }
+  if (
+    opts.maxEndpoints !== undefined &&
+    endpoints.length > opts.maxEndpoints
+  ) {
+    throw new Error(
+      `cannot deliver payout webhook to many endpoints: ${endpoints.length} endpoints exceed maxEndpoints ${opts.maxEndpoints}`,
+    );
+  }
+  if (
+    opts.overallDeadlineMs !== undefined &&
+    (!Number.isFinite(opts.overallDeadlineMs) || opts.overallDeadlineMs <= 0)
+  ) {
+    throw new Error(
+      `cannot deliver payout webhook to many endpoints: overallDeadlineMs must be a positive number, got ${String(
+        opts.overallDeadlineMs,
+      )}`,
+    );
+  }
   // A non-PAID task cannot build any endpoint's webhook: also a
   // call-level configuration error, checked before any request.
   if (task.state !== "PAID") {
@@ -1593,7 +1691,27 @@ export async function deliverPayoutWebhookToMany(
     );
   }
 
-  const results = await Promise.all(
+  // Overall deadline: one timer for the whole call. It flips
+  // `deadlineExceeded` and aborts the shared deadline controller; the
+  // per-endpoint delivery below composes that controller's signal
+  // with the endpoint's own signal, so no endpoint can outrun it.
+  // The timer stays ref'd (never unref'd): a hanging fetch stub is
+  // the one case where the timer is the only handle that can settle
+  // the call, and it is always cleared in the finally-equivalent
+  // step below once every delivery has settled.
+  let deadlineExceeded = false;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadlineSignal: AbortSignal | undefined;
+  if (opts.overallDeadlineMs !== undefined) {
+    const deadlineController = new AbortController();
+    deadlineSignal = deadlineController.signal;
+    deadlineTimer = setTimeout(() => {
+      deadlineExceeded = true;
+      deadlineController.abort();
+    }, opts.overallDeadlineMs);
+  }
+
+  const rawResults = await Promise.all(
     endpoints.map(async (endpoint, index): Promise<DeliverWebhookResult> => {
       try {
         if (
@@ -1609,16 +1727,27 @@ export async function deliverPayoutWebhookToMany(
           now,
           eventId,
         });
-        return await deliverPayoutWebhook(endpoint.url, webhook, {
-          timeoutMs: endpoint.timeoutMs ?? opts.timeoutMs,
-          maxAttempts: endpoint.maxAttempts ?? opts.maxAttempts,
-          backoffMs: endpoint.backoffMs ?? opts.backoffMs,
-          maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
-          jitterMs: endpoint.jitterMs ?? opts.jitterMs,
-          fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
-          sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
-          signal: endpoint.signal ?? opts.signal,
-        });
+        // Compose the deadline with the endpoint's own signal (or the
+        // call-level one): a per-endpoint signal override does not
+        // exempt the endpoint from the overall deadline.
+        const { signal, dispose } = combineAbortSignals([
+          endpoint.signal ?? opts.signal,
+          deadlineSignal,
+        ]);
+        try {
+          return await deliverPayoutWebhook(endpoint.url, webhook, {
+            timeoutMs: endpoint.timeoutMs ?? opts.timeoutMs,
+            maxAttempts: endpoint.maxAttempts ?? opts.maxAttempts,
+            backoffMs: endpoint.backoffMs ?? opts.backoffMs,
+            maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
+            jitterMs: endpoint.jitterMs ?? opts.jitterMs,
+            fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
+            sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
+            signal,
+          });
+        } finally {
+          dispose();
+        }
       } catch (err) {
         // Per-endpoint pre-flight failures (invalid URL, empty secret,
         // invalid per-endpoint override) fail only this endpoint.
@@ -1630,8 +1759,29 @@ export async function deliverPayoutWebhookToMany(
       }
     }),
   );
+  if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+  // Rewrite only the plain abort outcomes of a deadline-expired call:
+  // those are exactly the endpoints the deadline stopped. Endpoints
+  // that failed on their own merits (500, network error, bad URL)
+  // keep their own error text, and completed endpoints keep theirs.
+  const results =
+    deadlineExceeded && opts.overallDeadlineMs !== undefined
+      ? rawResults.map((r) =>
+          !r.ok && r.error === PAYOUT_DELIVERY_ABORTED
+            ? {
+                ...r,
+                error: `payout webhook delivery timed out: overall deadline of ${opts.overallDeadlineMs}ms exceeded`,
+              }
+            : r,
+        )
+      : rawResults;
   const delivered = results.filter((r) => r.ok).length;
-  return { results, delivered, failed: results.length - delivered };
+  return {
+    results,
+    delivered,
+    failed: results.length - delivered,
+    deadlineExceeded,
+  };
 }
 
 /**

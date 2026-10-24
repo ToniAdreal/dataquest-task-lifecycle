@@ -5451,6 +5451,7 @@ test("demo shows the payout webhook fan-out timeout override segment in-process:
     ],
     delivered: 2,
     failed: 1,
+    deadlineExceeded: false,
   });
   assert.equal(fanoutTimeoutHangFetchCalls, 3);
   assert.equal(fanoutTimeoutFastFetchCalls, 2);
@@ -5467,6 +5468,7 @@ test("demo shows the payout webhook fan-out timeout override segment in-process:
     ],
     delivered: 2,
     failed: 1,
+    deadlineExceeded: false,
   });
   assert.equal(fanoutTimeoutInvalidFetchCalls, 0);
   assert.deepEqual(fanoutTimeoutPlainResult, {
@@ -5477,6 +5479,7 @@ test("demo shows the payout webhook fan-out timeout override segment in-process:
     ],
     delivered: 3,
     failed: 0,
+    deadlineExceeded: false,
   });
   // Independent checks built in the test — the demo segment
   // is not self-certifying: the same three fan-outs are
