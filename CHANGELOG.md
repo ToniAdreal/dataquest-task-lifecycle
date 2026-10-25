@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An `X-Event-Id` header on payout webhook delivery (backlog
+  #583): every `deliverPayoutWebhook` attempt — and every endpoint
+  in a `deliverPayoutWebhookToMany` fan-out — carries
+  `X-Event-Id: <payload eventId>` alongside the existing
+  `Idempotency-Key` header (retries reuse the same value; fan-out
+  endpoints share the one logical event's id, so they carry the same
+  value). The header is the event-dedup counterpart to the
+  idempotency header: a gateway that keys only on `X-Event-Id` can
+  deduplicate without parsing the body, including when body parsing
+  fails. Like `Idempotency-Key` it is a transport-layer hint only —
+  it is not covered by the signature, so receivers must verify the
+  signature over the raw body and deduplicate on the verified
+  body's `eventId`, never on the header alone.
 - An approaching-deadline screening branch in the CLI demo (backlog
   #580): four more tasks (DEMO-046–DEMO-049) under the stale
   branch's fixed screening `now` with a 24-hour warning window —

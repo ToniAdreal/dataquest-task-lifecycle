@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 682 tests, all local
+npm test   # 688 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1099,13 +1099,15 @@ Delivery is included: `deliverPayoutWebhook(url, webhook)` POSTs the
 signed payload as JSON with the `X-Hub-Signature-256: <signature>`
 header — the request body is byte-identical to what was signed, so the
 receiver verifies it over the raw bytes. Every attempt also carries an
-`Idempotency-Key: <payload eventId>` header (retries included, no
+`Idempotency-Key: <payload eventId>` header and an
+`X-Event-Id: <payload eventId>` header (retries included, no
 opt-out; fan-out endpoints each carry the shared `eventId` the same
-way), so a receiver that deduplicates on that header need not parse
-the body first. Honest limit: the header is a transport-layer
-idempotency hint, not part of the signature — a receiver must still
-verify the signature over the raw body and deduplicate on the verified
-body's `eventId`, never on the header alone:
+way), so a receiver that deduplicates on either header need not parse
+the body first — and a gateway that keys only on `X-Event-Id` still
+has its dedup key when body parsing fails. Honest limit: both headers
+are transport-layer hints, not part of the signature — a receiver must
+still verify the signature over the raw body and deduplicate on the
+verified body's `eventId`, never on a header alone:
 
 ```ts
 import { deliverPayoutWebhook } from "dataquest-task-lifecycle";
@@ -1579,7 +1581,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 680 tests covering the happy path, reject→resubmit
+`npm test` runs 688 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
