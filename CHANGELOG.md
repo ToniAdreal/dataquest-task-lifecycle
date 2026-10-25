@@ -11,6 +11,13 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A minor-unit display branch in the CLI demo (backlog #586):
+  eleven fixed `formatMinorUnits` vectors (positive, zero, negative,
+  large, up to MAX_SAFE_INTEGER) plus the finance-pass total itself —
+  1634900 minor units rendered "16349.00" — so the demo shows the
+  pinned statement format for settlement amounts instead of leaving
+  the display convention to the caller's imagination. Any drift from
+  the hand-written expectations fails the demo fast (non-zero exit).
 - An `X-Event-Id` header on payout webhook delivery (backlog
   #583): every `deliverPayoutWebhook` attempt — and every endpoint
   in a `deliverPayoutWebhookToMany` fan-out — carries

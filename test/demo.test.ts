@@ -40,6 +40,7 @@ import {
   allowedEvents,
   expireOverdueTasks,
   expiredTasks,
+  formatMinorUnits,
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
@@ -230,6 +231,21 @@ Task DEMO-005: DRAFT
   unreconciledPayouts: DEMO-004 (1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry)
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
   totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)
+
+Minor-unit display branch (formatMinorUnits over the settlement amounts):
+  formatMinorUnits(10098) = "100.98"
+  formatMinorUnits(1) = "0.01"
+  formatMinorUnits(100) = "1.00"
+  formatMinorUnits(0) = "0.00"
+  formatMinorUnits(-0) = "0.00"
+  formatMinorUnits(-100) = "-1.00"
+  formatMinorUnits(-10098) = "-100.98"
+  formatMinorUnits(250000) = "2500.00"
+  formatMinorUnits(1000000000) = "10000000.00"
+  formatMinorUnits(1234567890123) = "12345678901.23"
+  formatMinorUnits(9007199254740991) = "90071992547409.91"
+  finance-pass total: formatMinorUnits(1634900) = "16349.00" (totalPaidOut 16349 rendered for a statement)
+  format: exactly two decimals, no thousands separator, no currency symbol — -0 renders without a minus sign, large amounts stay exact (integer arithmetic)
 
 Dispatch subscription branch (sixth task, in-process fan-out):
 Task DEMO-006: DRAFT
@@ -604,7 +620,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 512);
+  assert.equal(lines.length, 527);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1058,7 +1074,7 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   const reconLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
-      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+      ls.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):") - 1,
     );
   const a = reconLines((await runDemo()).lines);
   const b = reconLines((await runDemo()).lines);
@@ -1066,6 +1082,72 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   // lines; every timestamp in the segment is a fixed literal that
   // never reaches the printed lines, so no normalization is needed.
   assert.equal(a.length, 25);
+  assert.deepEqual(a, b);
+});
+
+test("demo shows the minor-unit display branch in-process: #577 vectors render exactly", async () => {
+  const { formatMinorUnitsCases, formatMinorUnitsTotal, totalPaid, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+  // Hand-written expectations, independent of the demo's own table:
+  // the same vectors the #577 unit tests pin (positive, zero,
+  // negative, large), so a drift in either place shows up here.
+  const expectedFormatted = [
+    "100.98",
+    "0.01",
+    "1.00",
+    "0.00",
+    "0.00",
+    "-1.00",
+    "-100.98",
+    "2500.00",
+    "10000000.00",
+    "12345678901.23",
+    "90071992547409.91",
+  ];
+  assert.equal(formatMinorUnitsCases.length, expectedFormatted.length);
+  assert.deepEqual(
+    formatMinorUnitsCases.map((c) => c.formatted),
+    expectedFormatted,
+  );
+  assert.ok(Object.is(formatMinorUnitsCases[4].input, -0));
+  assert.equal(formatMinorUnitsTotal, "16349.00");
+  assert.equal(totalPaid, 16349);
+  assert.equal(Number(formatMinorUnitsTotal), totalPaid);
+  // The structured cases agree with the library directly.
+  for (const { input, formatted } of formatMinorUnitsCases) {
+    assert.equal(formatMinorUnits(input), formatted);
+  }
+  const displayAt = text.indexOf(
+    "Minor-unit display branch (formatMinorUnits over the settlement amounts):",
+  );
+  assert.ok(
+    displayAt > text.indexOf("totalPaidOut: 16349"),
+    "display branch must follow the finance pass",
+  );
+  assert.ok(
+    text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") >
+      displayAt,
+    "subscription branch must follow the display branch",
+  );
+  assert.match(
+    text,
+    /finance-pass total: formatMinorUnits\(1634900\) = "16349\.00" \(totalPaidOut 16349 rendered for a statement\)/,
+  );
+});
+
+test("demo minor-unit display segment is deterministic: two runs print byte-identical display lines", async () => {
+  const displayLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):"),
+      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+    );
+  const a = displayLines((await runDemo()).lines);
+  const b = displayLines((await runDemo()).lines);
+  // Header + 11 vector lines + finance-pass total line + format
+  // note; every value is a pinned literal, so no normalization is
+  // needed.
+  assert.equal(a.length, 14);
   assert.deepEqual(a, b);
 });
 
@@ -2252,7 +2334,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 512);
+  assert.equal(out.trimEnd().split("\n").length, 527);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
