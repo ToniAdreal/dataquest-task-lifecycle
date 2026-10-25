@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An approaching-deadline screening branch in the CLI demo (backlog
+  #580): four more tasks (DEMO-046–DEMO-049) under the stale
+  branch's fixed screening `now` with a 24-hour warning window —
+  one deadline 12 hours out, one exactly 24 hours out, one exactly
+  at `now`, one a day past — showing the half-open window
+  `(now, now + 24h]` semantics beside both screens' subsets:
+  `tasksApproachingDeadline()` selects only the first two (the
+  upper bound is inclusive) while `expiredTasks()` selects only
+  the last two (the lower bound is exclusive, so a deadline
+  exactly at `now` is already overdue). The segment fails fast
+  (non-zero demo exit) if either subset drifts from the
+  hand-written expectation, and both screens are pure.
 - A fixed-format minor-unit display helper (backlog #577):
   `formatMinorUnits(minorUnits)` renders integer cents as a bare
   two-decimal string (`10098` → `"100.98"`, `0` → `"0.00"`,

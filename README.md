@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 680 tests, all local
+npm test   # 682 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -87,7 +87,17 @@ plus the two screens' subsets side by side: `staleTasks()` selects
 only the first task and `expiredTasks()` only the second, so the
 same batch reads differently under the dwell lens than under the
 deadline lens (both screens are pure; no task is dispatched or
-mutated), a stale-task batch execution branch that runs
+mutated), an approaching-deadline screening branch that drives
+four more tasks under the same fixed screening `now` with a
+24-hour warning window — one deadline 12 hours out, one exactly
+24 hours out, one exactly at `now`, and one a day past — and
+prints the half-open window `(now, now + 24h]` semantics beside
+the two screens' subsets: `tasksApproachingDeadline()` selects
+only the first two (the upper bound is inclusive) while
+`expiredTasks()` selects only the last two (the lower bound is
+exclusive, so a deadline exactly at `now` is already overdue;
+both screens are pure; no task is dispatched or mutated), a
+stale-task batch execution branch that runs
 `actOnStaleTasks()` over four more tasks at the same fixed `now`
 under 7-day dwell budgets for ACCEPTED / CAPTURING / SUBMITTED —
 the stale task stuck in SUBMITTED (a state with no ABANDON edge)

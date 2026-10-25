@@ -49,6 +49,7 @@ import {
   payoutMismatch,
   staleTasks,
   stateDiagram,
+  tasksApproachingDeadline,
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
@@ -278,6 +279,30 @@ Task DEMO-009: DRAFT
   staleTasks([DEMO-007, DEMO-008, DEMO-009], budgets, <timestamp>): DEMO-007 (1 stale)
   expiredTasks([DEMO-007, DEMO-008, DEMO-009], <timestamp>): DEMO-008 (1 overdue)
   contrast: the two screens disagree on the same batch — DEMO-007 is stale but not overdue (dwell past budget, deadline still ahead), DEMO-008 is overdue but not stale (deadline passed, dwell within budget), DEMO-009 is neither
+  screening is pure: no task was dispatched or mutated by either screen
+
+Approaching-deadline screening branch (four more tasks, warning window vs deadline):
+  screened at: <timestamp> (fixed now; no wall clock)
+  window: (now, now + 86400000 ms] (24 hours) — lower bound exclusive, upper bound inclusive
+Task DEMO-046: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+Task DEMO-047: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+Task DEMO-048: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+Task DEMO-049: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  SLA deadline (OPEN): <timestamp>
+  DEMO-046: state OPEN, deadline <timestamp> -> approaching: true, overdue: false
+  DEMO-047: state OPEN, deadline <timestamp> -> approaching: true, overdue: false
+  DEMO-048: state OPEN, deadline <timestamp> -> approaching: false, overdue: true
+  DEMO-049: state OPEN, deadline <timestamp> -> approaching: false, overdue: true
+  tasksApproachingDeadline([DEMO-046, DEMO-047, DEMO-048, DEMO-049], 86400000, <timestamp>): DEMO-046, DEMO-047 (2 approaching)
+  expiredTasks([DEMO-046, DEMO-047, DEMO-048, DEMO-049], <timestamp>): DEMO-048, DEMO-049 (2 overdue)
+  contrast: the window's bounds decide membership — DEMO-047 lands exactly on now + 24 hours and is approaching (upper bound inclusive), DEMO-048 lands exactly on now and is overdue instead (lower bound exclusive), DEMO-049 is overdue, DEMO-046 is approaching from inside the window
   screening is pure: no task was dispatched or mutated by either screen
 
 Stale-task batch execution branch (actOnStaleTasks over four more tasks):
@@ -579,7 +604,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 488);
+  assert.equal(lines.length, 512);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1290,7 +1315,7 @@ test("demo stale-task segment is deterministic: two runs print byte-identical st
   const staleLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):"),
-      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+      ls.indexOf("Approaching-deadline screening branch (four more tasks, warning window vs deadline):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1310,6 +1335,136 @@ test("demo stale-task segment is deterministic: two runs print byte-identical st
   assert.deepEqual(
     a.staleExpiredFound.map((t) => t.id),
     b.staleExpiredFound.map((t) => t.id),
+  );
+});
+
+test("demo shows the approaching-deadline screening branch in-process: window bounds decide membership", async () => {
+  const { approachingTasks, approachingFound, approachingOverdueFound, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+  const NOW = new Date("2026-03-22T09:00:00.000Z");
+  const WINDOW_MS = 24 * 3600_000;
+
+  // The four branch tasks end in the hand-written states with
+  // fixed-literal histories — no wall clock anywhere.
+  assert.deepEqual(
+    approachingTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-046", "OPEN", 1],
+      ["DEMO-047", "OPEN", 1],
+      ["DEMO-048", "OPEN", 1],
+      ["DEMO-049", "OPEN", 1],
+    ],
+  );
+  assert.deepEqual(
+    approachingTasks.map((t) => t.getSlaDeadline("OPEN")),
+    [
+      "2026-03-22T21:00:00.000Z",
+      "2026-03-23T09:00:00.000Z",
+      "2026-03-22T09:00:00.000Z",
+      "2026-03-21T09:00:00.000Z",
+    ],
+  );
+  // The half-open window (now, now + 24h] selects the in-window
+  // task and the exact-upper-bound task, and nothing else: the
+  // exact-lower-bound task is overdue instead of approaching.
+  assert.deepEqual(
+    approachingFound.map((t) => t.id),
+    ["DEMO-046", "DEMO-047"],
+  );
+  assert.deepEqual(
+    approachingOverdueFound.map((t) => t.id),
+    ["DEMO-048", "DEMO-049"],
+  );
+  assert.deepEqual(
+    approachingTasks.map((t) => isOverdue(t, NOW)),
+    [false, false, true, true],
+  );
+  // An independent re-screening of the returned tasks under the
+  // same fixed now and window reproduces both subsets — the demo
+  // segment is not self-certifying.
+  assert.deepEqual(
+    tasksApproachingDeadline(approachingTasks, WINDOW_MS, NOW).map((t) => t.id),
+    ["DEMO-046", "DEMO-047"],
+  );
+  assert.deepEqual(
+    expiredTasks(approachingTasks, NOW).map((t) => t.id),
+    ["DEMO-048", "DEMO-049"],
+  );
+  // Screening is pure: the tasks keep their states and history
+  // lengths after both screens ran inside the demo.
+  assert.deepEqual(
+    approachingTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["OPEN", 1],
+      ["OPEN", 1],
+      ["OPEN", 1],
+      ["OPEN", 1],
+    ],
+  );
+  // The branch is printed after the stale-task dwell screening
+  // branch and before the stale-task batch execution branch, with
+  // its lines verbatim.
+  const approachingAt = text.indexOf(
+    "Approaching-deadline screening branch (four more tasks, warning window vs deadline):",
+  );
+  assert.ok(
+    approachingAt >
+      text.indexOf("Stale-task dwell screening branch (three more tasks, dwell vs deadline):"),
+    "approaching branch must follow the stale screening branch",
+  );
+  assert.ok(
+    text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") >
+      approachingAt,
+    "batch execution branch must follow the approaching branch",
+  );
+  assert.match(text, /screened at: 2026-03-22T09:00:00\.000Z \(fixed now; no wall clock\)/);
+  assert.match(
+    text,
+    /window: \(now, now \+ 86400000 ms\] \(24 hours\) — lower bound exclusive, upper bound inclusive/,
+  );
+  assert.match(
+    text,
+    /DEMO-046: state OPEN, deadline 2026-03-22T21:00:00\.000Z -> approaching: true, overdue: false/,
+  );
+  assert.match(
+    text,
+    /DEMO-048: state OPEN, deadline 2026-03-22T09:00:00\.000Z -> approaching: false, overdue: true/,
+  );
+  assert.match(
+    text,
+    /tasksApproachingDeadline\(\[DEMO-046, DEMO-047, DEMO-048, DEMO-049\], 86400000, 2026-03-22T09:00:00\.000Z\): DEMO-046, DEMO-047 \(2 approaching\)/,
+  );
+  assert.match(
+    text,
+    /expiredTasks\(\[DEMO-046, DEMO-047, DEMO-048, DEMO-049\], 2026-03-22T09:00:00\.000Z\): DEMO-048, DEMO-049 \(2 overdue\)/,
+  );
+  assert.match(text, /contrast: the window's bounds decide membership/);
+});
+
+test("demo approaching-deadline segment is deterministic: two runs print byte-identical approaching lines", async () => {
+  const approachingLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Approaching-deadline screening branch (four more tasks, warning window vs deadline):"),
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = approachingLines(a.lines);
+  // Header + screened-at + window + (task header + 1 transition +
+  // SLA line) x 4 + 4 per-task lines + approaching line +
+  // expired line + contrast line + purity line; every timestamp
+  // in the segment is a fixed literal, so no normalization is
+  // needed.
+  assert.equal(segA.length, 23);
+  assert.deepEqual(segA, approachingLines(b.lines));
+  assert.deepEqual(
+    a.approachingFound.map((t) => t.id),
+    b.approachingFound.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.approachingOverdueFound.map((t) => t.id),
+    b.approachingOverdueFound.map((t) => t.id),
   );
 });
 
@@ -2097,7 +2252,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 488);
+  assert.equal(out.trimEnd().split("\n").length, 512);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
