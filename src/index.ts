@@ -17,6 +17,7 @@ export {
   staleTasks,
   stateDiagram,
   tasksApproachingDeadline,
+  tasksByActor,
   tasksByState,
   totalPaidOut,
   toMinorUnits,

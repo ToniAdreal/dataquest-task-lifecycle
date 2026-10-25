@@ -284,6 +284,45 @@ export function tasksByState(
 }
 
 /**
+ * Batch filter: from a batch of tasks, return the ones whose audit
+ * history contains at least one entry signed by the given actor, in
+ * input order.
+ *
+ * This is the actor counterpart to {@link tasksByState}: a caller that
+ * wants to list every task a given moderator ever touched had to
+ * hand-write the same history scan — and a hand-written scan has no
+ * shared answer for an empty actor string (which dispatch itself
+ * rejects: `undefined` is the anonymous form, an empty string is not
+ * an actor at all). This helper gives that listing one shared, pure
+ * entry point:
+ *
+ *   const moderated = tasksByActor(allTasks, "moderator");
+ *
+ * Pure: reads the tasks' histories, never mutates, dispatches, or
+ * copies the tasks — the returned array holds the same task objects,
+ * in input order, so callers can act on them directly. A task matches
+ * as soon as any one history entry carries the actor, and matches only
+ * once no matter how many of its entries do. Entries without an actor
+ * never match, so anonymous work is never attributed to anyone. An
+ * empty or non-string actor fails fast instead of silently returning
+ * an empty list, so a typo or a missing variable cannot masquerade
+ * as "this actor touched nothing".
+ */
+export function tasksByActor(
+  tasks: readonly TaskLifecycle[],
+  actor: string,
+): TaskLifecycle[] {
+  if (typeof actor !== "string" || actor.length === 0) {
+    throw new Error(
+      `invalid tasksByActor: actor must be a non-empty string, got ${JSON.stringify(actor)}`,
+    );
+  }
+  return tasks.filter((task) =>
+    task.history.some((entry) => entry.actor === actor),
+  );
+}
+
+/**
  * Per-task outcome of {@link expireOverdueTasks}.
  */
 export interface ExpireOverdueResult {
