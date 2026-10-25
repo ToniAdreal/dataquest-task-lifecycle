@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A fixed-format minor-unit display helper (backlog #577):
+  `formatMinorUnits(minorUnits)` renders integer cents as a bare
+  two-decimal string (`10098` → `"100.98"`, `0` → `"0.00"`,
+  `-100` → `"-1.00"`), with no thousands separator and no currency
+  symbol, so statement and reconciliation text no longer drifts per
+  caller. A non-integer input throws the same error as
+  `fromMinorUnits`, and the whole/cents split is integer arithmetic,
+  so large amounts format exactly.
 - An audit entry on stale-patrol outcomes (backlog #571):
   `StaleActionResult` gains an optional `entry` field — a frozen,
   detached copy of the audit entry the action appended — present only

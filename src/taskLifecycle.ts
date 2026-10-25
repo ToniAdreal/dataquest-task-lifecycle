@@ -658,6 +658,37 @@ export function fromMinorUnits(minorUnits: number): number {
 }
 
 /**
+ * Format integer minor units (cents) as a fixed two-decimal string for
+ * display on statements and reconciliation output: `10098` becomes
+ * `"100.98"`, `0` becomes `"0.00"`, and a negative amount keeps its
+ * leading minus (`-100` becomes `"-1.00"`). The format is deliberately
+ * bare — exactly two decimal places, no thousands separator, no
+ * currency symbol — because the currency is the caller's context (the
+ * same no-currency convention as {@link toMinorUnits}), and a bare
+ * string keeps statement text stable across callers instead of each
+ * one inventing its own decimal/separator convention.
+ *
+ * The input must be an integer, with the same error as
+ * {@link fromMinorUnits}; a fractional "minor unit" is a caller error,
+ * not a representable amount. The split is done in integer arithmetic
+ * (`whole = (abs - cents) / 100`), never through a float division
+ * followed by rounding, so large amounts (including
+ * `Number.MAX_SAFE_INTEGER`) format exactly, with no precision drift.
+ */
+export function formatMinorUnits(minorUnits: number): string {
+  if (!Number.isInteger(minorUnits)) {
+    throw new Error(
+      `minor units must be an integer, got ${String(minorUnits)}`,
+    );
+  }
+  const sign = minorUnits < 0 ? "-" : "";
+  const abs = Math.abs(minorUnits);
+  const cents = abs % 100;
+  const whole = (abs - cents) / 100;
+  return `${sign}${whole}.${String(cents).padStart(2, "0")}`;
+}
+
+/**
  * Reconciliation helper: sum the actual settled payout amounts across a
  * batch of `PAID` tasks. For each task it reads the `payoutAmount`
  * recorded on its `PAYOUT_COMPLETE` entry (see {@link DispatchOptions})

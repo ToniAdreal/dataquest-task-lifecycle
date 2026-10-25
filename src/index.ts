@@ -4,6 +4,7 @@ export {
   allowedEvents,
   expiredTasks,
   expireOverdueTasks,
+  formatMinorUnits,
   fromMinorUnits,
   GENESIS_PREV_HASH,
   isOverdue,
