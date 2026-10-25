@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -12,6 +13,9 @@ import {
   DEMO_GUARD_TASK_ID,
   DEMO_HISTORY_BASE_AT,
   DEMO_HISTORY_TASK_ID,
+  DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
+  DEMO_IDEMPOTENCY_HEADER_NOW,
+  DEMO_IDEMPOTENCY_HEADER_TASK_ID,
   DEMO_ROLE_POLICY,
   DEMO_ROTATION_NEW_SECRET,
   DEMO_ROTATION_OLD_SECRET,
@@ -638,11 +642,17 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
   staleTasks selection: [DEMO-038] — exactly-at-budget (DEMO-039), terminal (DEMO-040), no-history (DEMO-041) and unmapped-state (DEMO-042) tasks are not selected
   actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted
   DEMO-038: acted true — notified, task unchanged at OPEN
-  invalid patrol configuration fails fast: staleTasks with an unknown state name throws invalid maxAgeByState: unknown state "BOGUS" before any task is read`;
+  invalid patrol configuration fails fast: staleTasks with an unknown state name throws invalid maxAgeByState: unknown state "BOGUS" before any task is read
+
+Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):
+  event: PAYOUT_COMPLETE for DEMO-054, pinned eventId evt_demo_idempotency_key_001 (deliverPayoutWebhook carries no separate idempotency-key option — the payload eventId IS the idempotency key)
+  first delivery: ok attempts=1 status=200; captured Idempotency-Key: evt_demo_idempotency_key_001
+  redelivery (the same webhook object delivered a second time): ok attempts=1 status=200; captured Idempotency-Key: evt_demo_idempotency_key_001 (unchanged — a receiver deduplicating on the header drops the redelivery without parsing the body)
+  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId evt_demo_idempotency_key_001 equals both captured headers (the header is an unsigned transport hint — the verified body's eventId is the authoritative dedup key)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 547);
+  assert.equal(lines.length, 553);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2476,7 +2486,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 547);
+  assert.equal(out.trimEnd().split("\n").length, 553);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -6309,9 +6319,10 @@ test("demo stale patrol selects only the long-stuck OPEN task and notifies it wi
     (err: unknown) =>
       err instanceof Error && err.message === patrolStaleConfigError,
   );
-  // The segment closes the demo: it follows the expectedSeq
-  // segment, prints its lines verbatim, and its fail-fast
-  // line is the demo's last line.
+  // The segment is followed by the Idempotency-Key header
+  // segment: it follows the expectedSeq segment and prints
+  // its lines verbatim (the header segment's own test pins
+  // the demo's last line).
   const patrolAt = text.indexOf(
     "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
   );
@@ -6336,9 +6347,12 @@ test("demo stale patrol selects only the long-stuck OPEN task and notifies it wi
   ]) {
     assert.ok(text.includes(line), `missing stale patrol line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${DEMO_PATROL_STALE_CONFIG_ERROR} before any task is read`,
+  const idempotencyHeaderAt = text.indexOf(
+    "Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+  );
+  assert.ok(
+    idempotencyHeaderAt > patrolAt,
+    "Idempotency-Key header segment must follow the stale patrol segment",
   );
 });
 
@@ -6346,6 +6360,13 @@ test("demo stale patrol segment is deterministic: two runs print byte-identical 
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Stale patrol (staleTasks / maxAgeByState screening, notify-only action):"),
+      // The slice ends before the blank line that opens the
+      // Idempotency-Key header segment (which now closes the
+      // demo after the patrol); without the end bound the
+      // segment would swallow the new section's lines.
+      ls.indexOf(
+        "Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -6539,4 +6560,236 @@ test("demo history immutability segment is deterministic: two runs print byte-id
   assert.equal(segA.length, 8);
   assert.deepEqual(segA, segment(b.lines));
   assert.deepEqual(a.historyImmutabilityChecks, b.historyImmutabilityChecks);
+});
+
+test("demo shows the payout webhook Idempotency-Key header segment: both deliveries carry the payload eventId on the wire and the verified body agrees", async () => {
+  const {
+    idempotencyHeaderTask,
+    idempotencyHeaderWebhook,
+    idempotencyHeaderEventId,
+    idempotencyHeaderFirst,
+    idempotencyHeaderRetry,
+    idempotencyHeaderCalls,
+    idempotencyHeaderFirstResult,
+    idempotencyHeaderRetryResult,
+    idempotencyHeaderBodyVerifies,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // delivery source in src/settlementWebhook.ts and
+  // test/payoutWebhookIdempotencyHeader.test.ts, never
+  // derived from the demo's own segment.
+  assert.equal(idempotencyHeaderTask.id, DEMO_IDEMPOTENCY_HEADER_TASK_ID);
+  assert.equal(idempotencyHeaderTask.state, "PAID");
+  assert.equal(idempotencyHeaderTask.history.length, 8);
+  assert.equal(
+    idempotencyHeaderTask.history[
+      idempotencyHeaderTask.history.length - 1
+    ].event,
+    "PAYOUT_COMPLETE",
+  );
+  assert.equal(
+    idempotencyHeaderWebhook.payload.eventId,
+    DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
+  );
+  assert.equal(
+    idempotencyHeaderWebhook.payload.at,
+    DEMO_IDEMPOTENCY_HEADER_NOW,
+  );
+  assert.equal(idempotencyHeaderEventId, DEMO_IDEMPOTENCY_HEADER_EVENT_ID);
+  // The header value on both wire captures is the payload
+  // eventId — deliverPayoutWebhook has no separate key
+  // option, so the first delivery and the redelivery of
+  // the same webhook object necessarily agree.
+  assert.equal(idempotencyHeaderFirst, DEMO_IDEMPOTENCY_HEADER_EVENT_ID);
+  assert.equal(idempotencyHeaderRetry, DEMO_IDEMPOTENCY_HEADER_EVENT_ID);
+  assert.equal(idempotencyHeaderCalls, 2);
+  assert.deepEqual(
+    [
+      idempotencyHeaderFirstResult.ok,
+      idempotencyHeaderFirstResult.attempts,
+      idempotencyHeaderFirstResult.status,
+    ],
+    [true, 1, 200],
+  );
+  assert.deepEqual(
+    [
+      idempotencyHeaderRetryResult.ok,
+      idempotencyHeaderRetryResult.attempts,
+      idempotencyHeaderRetryResult.status,
+    ],
+    [true, 1, 200],
+  );
+  assert.equal(idempotencyHeaderBodyVerifies, true);
+
+  // Independent cross-check: the same two-delivery shape
+  // rebuilt here on a fresh task and a fresh loopback
+  // receiver, through the library entry points directly —
+  // the demo segment must agree with the library, not
+  // with itself.
+  const independentTask = new TaskLifecycle("TEST-IDEM-001");
+  independentTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T09:00:00.000Z",
+  });
+  independentTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T09:05:00.000Z",
+  });
+  independentTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-03-24T09:10:00.000Z",
+  });
+  independentTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-24T09:15:00.000Z",
+  });
+  independentTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-03-24T09:20:00.000Z",
+  });
+  independentTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-03-24T09:25:00.000Z",
+  });
+  independentTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-03-24T09:30:00.000Z",
+  });
+  independentTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-24T09:35:00.000Z",
+    payoutAmount: 4200,
+  });
+  const independentWebhook = buildPayoutWebhook(
+    independentTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: new Date("2026-03-24T10:00:00.000Z"),
+      eventId: "evt_test_idempotency_header_001",
+    },
+  );
+  const independentCaptured: string[] = [];
+  const independentBodies: string[] = [];
+  const independentServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      independentCaptured.push(String(req.headers["idempotency-key"] ?? ""));
+      independentBodies.push(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, {
+        "content-type": "application/json",
+        connection: "close",
+      });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) =>
+    independentServer.listen(0, "127.0.0.1", resolve),
+  );
+  const independentAddress = independentServer.address();
+  assert.ok(
+    independentAddress !== null && typeof independentAddress !== "string",
+  );
+  try {
+    const first = await deliverPayoutWebhook(
+      `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
+      independentWebhook,
+    );
+    const retry = await deliverPayoutWebhook(
+      `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
+      independentWebhook,
+    );
+    assert.deepEqual(
+      [first.ok, first.attempts, first.status],
+      [true, 1, 200],
+    );
+    assert.deepEqual(
+      [retry.ok, retry.attempts, retry.status],
+      [true, 1, 200],
+    );
+  } finally {
+    await new Promise<void>((resolve) =>
+      independentServer.close(() => resolve()),
+    );
+  }
+  assert.deepEqual(independentCaptured, [
+    "evt_test_idempotency_header_001",
+    "evt_test_idempotency_header_001",
+  ]);
+  assert.equal(independentBodies.length, 2);
+  assert.equal(
+    independentBodies[0],
+    JSON.stringify(independentWebhook.payload),
+  );
+  assert.equal(
+    independentBodies[1],
+    JSON.stringify(independentWebhook.payload),
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      independentBodies[0],
+      independentWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    true,
+  );
+
+  // The segment closes the demo: it follows the stale
+  // patrol segment, prints its lines verbatim, and its
+  // body-check line is the demo's last line.
+  const headerAt = text.indexOf(
+    "Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+  );
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        "Stale patrol (staleTasks / maxAgeByState screening, notify-only action):",
+      ),
+    "Idempotency-Key header segment must follow the stale patrol segment",
+  );
+  for (const line of [
+    `  event: PAYOUT_COMPLETE for ${DEMO_IDEMPOTENCY_HEADER_TASK_ID}, pinned eventId ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID} (deliverPayoutWebhook carries no separate idempotency-key option — the payload eventId IS the idempotency key)`,
+    `  first delivery: ok attempts=1 status=200; captured Idempotency-Key: ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID}`,
+    `  redelivery (the same webhook object delivered a second time): ok attempts=1 status=200; captured Idempotency-Key: ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID} (unchanged — a receiver deduplicating on the header drops the redelivery without parsing the body)`,
+    `  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID} equals both captured headers (the header is an unsigned transport hint — the verified body's eventId is the authoritative dedup key)`,
+  ]) {
+    assert.ok(text.includes(line), `missing Idempotency-Key line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID} equals both captured headers (the header is an unsigned transport hint — the verified body's eventId is the authoritative dedup key)`,
+  );
+});
+
+test("demo Idempotency-Key header segment is deterministic: two runs print byte-identical header lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + event + first-delivery + redelivery + body-check
+  // lines; every value is a pinned literal (fixed task id,
+  // pinned eventId, fixed delivery outcomes, no printed port),
+  // so no normalization is needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.idempotencyHeaderEventId, b.idempotencyHeaderEventId);
+  assert.equal(a.idempotencyHeaderFirst, b.idempotencyHeaderFirst);
+  assert.equal(a.idempotencyHeaderRetry, b.idempotencyHeaderRetry);
+  assert.equal(a.idempotencyHeaderCalls, b.idempotencyHeaderCalls);
+  assert.equal(
+    a.idempotencyHeaderBodyVerifies,
+    b.idempotencyHeaderBodyVerifies,
+  );
+  assert.deepEqual(
+    a.idempotencyHeaderTask.history.map((h) => [h.event, h.at]),
+    b.idempotencyHeaderTask.history.map((h) => [h.event, h.at]),
+  );
 });

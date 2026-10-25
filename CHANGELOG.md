@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An Idempotency-Key header segment in the CLI demo (backlog
+  #595): one more PAID task (DEMO-054) whose signed payout
+  webhook is delivered twice to a real loopback receiver — the
+  first delivery and the redelivery of the same webhook object —
+  with both captured requests carrying `Idempotency-Key` equal
+  to the pinned payload `eventId`
+  (`evt_demo_idempotency_key_001`), teaching that
+  `deliverPayoutWebhook` has no separate idempotency-key option
+  (the eventId IS the key) and that the header is an unsigned
+  transport hint beside the verified body's `eventId`, which is
+  the authoritative dedup key. The loopback port is ephemeral
+  and never printed, so the segment's output is byte-identical
+  across runs. Any drift from the hand-written expectations
+  fails the demo fast (non-zero exit).
 - A benchmark path for SLA approaching-deadline screening (backlog
   #592): `tasksApproachingDeadline` over a fixed 6-task batch under
   one injected fixed `now` with a 24-hour window — in-window,

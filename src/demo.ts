@@ -438,7 +438,7 @@
  * optimistic lock against the in-memory history —
  * cross-process writers still need compare-and-swap
  * in the durable store itself.
- * and finally a stale patrol segment: five further
+ * a stale patrol segment: five further
  * tasks screened by `staleTasks()` alone at the
  * stale branches' fixed `now` under a patrol budget
  * map (the parameter the library calls
@@ -450,7 +450,19 @@
  * state) — with a notify-only disposition through
  * `actOnStaleTasks()` that dispatches nothing, and
  * a fail-fast check pinning the exact configuration
- * error an unknown state name in the map throws.
+ * error an unknown state name in the map throws,
+ * and finally an Idempotency-Key header segment:
+ * one more PAID task whose signed payout webhook is
+ * delivered twice to a real loopback receiver — the
+ * first delivery and the redelivery of the same
+ * webhook object — and both captured requests carry
+ * `Idempotency-Key` equal to the payload `eventId`
+ * (deliverPayoutWebhook has no separate key option:
+ * the eventId IS the idempotency key), with the
+ * captured wire body verified under the demo secret
+ * as the contrast: the header is an unsigned
+ * transport hint, the verified body's `eventId` is
+ * the authoritative dedup key.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -559,6 +571,7 @@
  * signature, which derive from them and from a random UUID).
  */
 
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   PayoutEventDedupe,
@@ -722,6 +735,19 @@ export const DEMO_PATROL_UNMAPPED_SUBMIT_AT = "2026-02-14T09:00:00.000Z";
 export const DEMO_PATROL_UNMAPPED_REVIEW_AT = "2026-02-15T09:00:00.000Z";
 export const DEMO_PATROL_STALE_CONFIG_ERROR =
   'invalid maxAgeByState: unknown state "BOGUS"';
+
+/**
+ * Fixtures for the demo's closing Idempotency-Key header segment:
+ * the dedicated PAID task id, the pinned payload eventId (which is
+ * also the Idempotency-Key header value on both deliveries), and
+ * the pinned webhook `at` instant. The loopback port is ephemeral
+ * and never printed, so the segment's output is byte-identical
+ * across runs.
+ */
+export const DEMO_IDEMPOTENCY_HEADER_TASK_ID = "DEMO-054";
+export const DEMO_IDEMPOTENCY_HEADER_EVENT_ID =
+  "evt_demo_idempotency_key_001";
+export const DEMO_IDEMPOTENCY_HEADER_NOW = "2026-03-24T10:00:00.000Z";
 
 /**
  * Exact constructor id rejection wording the constructor guard segment pins.
@@ -1249,6 +1275,24 @@ export interface DemoResult {
   slaClearOthersAfterStateClear: Array<string | undefined>;
   /** ACCEPTED / CAPTURING / SUBMITTED read-backs after the no-arg clear. */
   slaClearAfterAllClear: Array<string | undefined>;
+  /** Dedicated PAID task for the closing Idempotency-Key header segment (DEMO-054). */
+  idempotencyHeaderTask: TaskLifecycle;
+  /** Signed payout webhook delivered twice in the Idempotency-Key header segment. */
+  idempotencyHeaderWebhook: PayoutWebhook;
+  /** Pinned payload eventId of the Idempotency-Key header segment's webhook. */
+  idempotencyHeaderEventId: string;
+  /** `Idempotency-Key` header captured on the first delivery. */
+  idempotencyHeaderFirst: string;
+  /** `Idempotency-Key` header captured on the redelivery. */
+  idempotencyHeaderRetry: string;
+  /** Number of requests the loopback receiver captured (2). */
+  idempotencyHeaderCalls: number;
+  /** `deliverPayoutWebhook` result for the first delivery. */
+  idempotencyHeaderFirstResult: DeliverWebhookResult;
+  /** `deliverPayoutWebhook` result for the redelivery. */
+  idempotencyHeaderRetryResult: DeliverWebhookResult;
+  /** Whether the captured wire body verifies under the demo secret. */
+  idempotencyHeaderBodyVerifies: boolean;
   lines: string[];
 }
 
@@ -5941,7 +5985,176 @@ export async function runDemo(): Promise<DemoResult> {
     `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${patrolStaleConfigError} before any task is read`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  // Payout webhook Idempotency-Key header segment (closing):
+  // the #568 header has never appeared in the demo — every
+  // delivery section so far used an injected fake fetch and
+  // captured only the signature, never the headers. Here the
+  // same signed webhook is delivered twice to a real loopback
+  // receiver through the default global fetch (no fetchImpl),
+  // so the header is observed on the actual wire: the first
+  // delivery and the redelivery of the same webhook object.
+  // Hand-written expectations — written out here from the
+  // delivery source and the Idempotency-Key header tests,
+  // never derived by calling deliverPayoutWebhook itself:
+  //   - both deliveries report { ok: true, attempts: 1,
+  //     status: 200 } (the loopback receiver always answers
+  //     200, so no retry is triggered);
+  //   - the receiver captures exactly 2 requests, and both
+  //     carry `Idempotency-Key` equal to the pinned payload
+  //     eventId — deliverPayoutWebhook has no separate
+  //     idempotency-key option, the eventId IS the key, so
+  //     a redelivery necessarily reuses the same value;
+  //   - both captured bodies are byte-identical to the
+  //     signed payload serialization, and the first body
+  //     verifies under the demo secret — the contrast the
+  //     segment teaches: the header is an unsigned
+  //     transport hint, so a receiver that deduplicates on
+  //     it must still verify the signature and deduplicate
+  //     on the verified body's eventId, never on the header
+  //     alone. The segment asserts all of this here,
+  //     outside the printed lines: a delivery semantic that
+  //     drifted would fail the demo itself, not just a test.
+  // The loopback port is ephemeral and never printed, so
+  // the segment's output is byte-identical across runs;
+  // the receiver answers `Connection: close` so its
+  // close() never waits on a keep-alive socket.
+  const idempotencyHeaderTask = new TaskLifecycle(
+    DEMO_IDEMPOTENCY_HEADER_TASK_ID,
+  );
+  idempotencyHeaderTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-24T09:00:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-24T09:05:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-03-24T09:10:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-24T09:15:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-03-24T09:20:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-03-24T09:25:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-03-24T09:30:00.000Z",
+  });
+  idempotencyHeaderTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-24T09:35:00.000Z",
+    payoutAmount: 4200,
+  });
+  const idempotencyHeaderWebhook = buildPayoutWebhook(
+    idempotencyHeaderTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: new Date(DEMO_IDEMPOTENCY_HEADER_NOW),
+      eventId: DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
+    },
+  );
+  const idempotencyHeaderEventId =
+    idempotencyHeaderWebhook.payload.eventId;
+  const idempotencyHeaderCaptured: string[] = [];
+  const idempotencyHeaderBodies: string[] = [];
+  const idempotencyHeaderServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      idempotencyHeaderCaptured.push(
+        String(req.headers["idempotency-key"] ?? ""),
+      );
+      idempotencyHeaderBodies.push(
+        Buffer.concat(chunks).toString("utf8"),
+      );
+      res.writeHead(200, {
+        "content-type": "application/json",
+        connection: "close",
+      });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) =>
+    idempotencyHeaderServer.listen(0, "127.0.0.1", resolve),
+  );
+  const idempotencyHeaderAddress = idempotencyHeaderServer.address();
+  if (
+    idempotencyHeaderAddress === null ||
+    typeof idempotencyHeaderAddress === "string"
+  ) {
+    throw new Error(
+      "demo fixture broken: loopback server did not bind to a port",
+    );
+  }
+  const idempotencyHeaderUrl = `http://127.0.0.1:${idempotencyHeaderAddress.port}/hooks/payout`;
+  let idempotencyHeaderFirstResult: DeliverWebhookResult;
+  let idempotencyHeaderRetryResult: DeliverWebhookResult;
+  try {
+    idempotencyHeaderFirstResult = await deliverPayoutWebhook(
+      idempotencyHeaderUrl,
+      idempotencyHeaderWebhook,
+    );
+    idempotencyHeaderRetryResult = await deliverPayoutWebhook(
+      idempotencyHeaderUrl,
+      idempotencyHeaderWebhook,
+    );
+  } finally {
+    await new Promise<void>((resolve) =>
+      idempotencyHeaderServer.close(() => resolve()),
+    );
+  }
+  const idempotencyHeaderFirst = idempotencyHeaderCaptured[0] ?? "";
+  const idempotencyHeaderRetry = idempotencyHeaderCaptured[1] ?? "";
+  const idempotencyHeaderCalls = idempotencyHeaderCaptured.length;
+  const idempotencyHeaderBodyVerifies =
+    idempotencyHeaderBodies.length > 0 &&
+    verifyPayoutWebhook(
+      idempotencyHeaderBodies[0],
+      idempotencyHeaderWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    );
+  if (
+    idempotencyHeaderTask.state !== "PAID" ||
+    idempotencyHeaderEventId !== DEMO_IDEMPOTENCY_HEADER_EVENT_ID ||
+    idempotencyHeaderFirstResult.ok !== true ||
+    idempotencyHeaderFirstResult.attempts !== 1 ||
+    idempotencyHeaderFirstResult.status !== 200 ||
+    idempotencyHeaderRetryResult.ok !== true ||
+    idempotencyHeaderRetryResult.attempts !== 1 ||
+    idempotencyHeaderRetryResult.status !== 200 ||
+    idempotencyHeaderCalls !== 2 ||
+    idempotencyHeaderFirst !== DEMO_IDEMPOTENCY_HEADER_EVENT_ID ||
+    idempotencyHeaderRetry !== DEMO_IDEMPOTENCY_HEADER_EVENT_ID ||
+    idempotencyHeaderBodies.length !== 2 ||
+    idempotencyHeaderBodies[0] !==
+      JSON.stringify(idempotencyHeaderWebhook.payload) ||
+    idempotencyHeaderBodies[1] !==
+      JSON.stringify(idempotencyHeaderWebhook.payload) ||
+    !idempotencyHeaderBodyVerifies
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook Idempotency-Key header does not match the hand-pinned contract (both deliveries must report ok with 1 attempt and status 200, the loopback receiver must capture exactly 2 requests each carrying Idempotency-Key equal to the pinned payload eventId, both wire bodies must be byte-identical to the signed payload, and the captured body must verify under the demo secret)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook Idempotency-Key header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+    `  event: PAYOUT_COMPLETE for ${DEMO_IDEMPOTENCY_HEADER_TASK_ID}, pinned eventId ${DEMO_IDEMPOTENCY_HEADER_EVENT_ID} (deliverPayoutWebhook carries no separate idempotency-key option — the payload eventId IS the idempotency key)`,
+    `  first delivery: ok attempts=${idempotencyHeaderFirstResult.attempts} status=${idempotencyHeaderFirstResult.status}; captured Idempotency-Key: ${idempotencyHeaderFirst}`,
+    `  redelivery (the same webhook object delivered a second time): ok attempts=${idempotencyHeaderRetryResult.attempts} status=${idempotencyHeaderRetryResult.status}; captured Idempotency-Key: ${idempotencyHeaderRetry} (unchanged — a receiver deduplicating on the header drops the redelivery without parsing the body)`,
+    `  body check: verifyPayoutWebhook over the captured wire body: ${idempotencyHeaderBodyVerifies}; the verified body's eventId ${idempotencyHeaderEventId} equals both captured headers (the header is an unsigned transport hint — the verified body's eventId is the authoritative dedup key)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, lines };
 }
 
 async function main(): Promise<void> {
