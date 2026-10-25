@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An audit entry on stale-patrol outcomes (backlog #571):
+  `StaleActionResult` gains an optional `entry` field — a frozen,
+  detached copy of the audit entry the action appended — present only
+  when the action ran successfully and grew the task's history (the
+  default ABANDON dispatch does; a notify-only custom action does not).
+  Failed actions omit the field, keeping the failure shape backward
+  compatible. This mirrors the `ExpireOverdueResult.entry` added for
+  `expireOverdueTasks` (backlog #544), so a stale-patrol report can
+  cite the entry without re-reading `task.history`.
 - An `Idempotency-Key` header on payout webhook delivery (backlog
   #568): every `deliverPayoutWebhook` attempt — and every endpoint in
   a `deliverPayoutWebhookToMany` fan-out — carries

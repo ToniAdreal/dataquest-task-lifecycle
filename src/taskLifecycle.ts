@@ -465,6 +465,16 @@ export interface StaleActionResult {
   acted: boolean;
   /** Set when the action threw; the message of the caught error. */
   error?: string;
+  /**
+   * The audit entry the successful action appended — a frozen,
+   * detached copy of the task's last history entry, so a stale-patrol
+   * report can cite it (task id, from/to state, timestamp) without
+   * re-reading `task.history`. Present only when the action ran
+   * successfully AND appended to the history (the default ABANDON
+   * dispatch does; a notify-only custom action does not). Failed
+   * actions leave this absent.
+   */
+  entry?: TaskHistoryEntry;
 }
 
 /**
@@ -486,7 +496,12 @@ export interface StaleActionResult {
  *
  * Only stale tasks are attempted; the result has one entry per
  * attempted task, in batch order. Non-stale and terminal tasks are
- * untouched and produce no entry. Pass a custom `action` to do
+ * untouched and produce no entry. Successful outcomes also carry
+ * `entry` — a frozen, detached copy of the audit entry the action
+ * appended — when the action actually grew the history (the default
+ * ABANDON dispatch does); a notify-only custom action appends
+ * nothing, so its successful outcomes omit `entry`, and failed
+ * actions omit it as well. Pass a custom `action` to do
  * something other than abandon — e.g. notify-only paging that leaves
  * the task in its current state:
  *
@@ -511,9 +526,18 @@ export function actOnStaleTasks(
   // staleTasks() validates maxAgeByState and now fail-fast, before any
   // action runs.
   return staleTasks(tasks, maxAgeByState, now).map((task) => {
+    // History is append-only, so growth across the action is exactly
+    // "the action appended an audit entry". The history getter returns
+    // frozen detached copies, so the last entry is already the
+    // immutable audit record of the action — same pattern as
+    // expireOverdueTasks().
+    const before = task.history.length;
     try {
       run(task);
-      return { task, acted: true };
+      const history = task.history;
+      return history.length > before
+        ? { task, acted: true, entry: history[history.length - 1] }
+        : { task, acted: true };
     } catch (err) {
       return {
         task,

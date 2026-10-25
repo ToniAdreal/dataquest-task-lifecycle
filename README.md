@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 655 tests, all local
+npm test   # 664 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -538,7 +538,15 @@ const stale = staleTasks(tasks, {
 
 For acting on that list there is a dedicated executor —
 `actOnStaleTasks(tasks, action, maxAgeByState, now)` — which runs an
-action per stale task and reports `{ task, acted, error? }` per task:
+action per stale task and reports `{ task, acted, error?, entry? }`
+per task. A successful outcome carries `entry` — a frozen, detached
+copy of the audit entry the action appended — when the action actually
+grew the history (the default ABANDON dispatch does); a notify-only
+action appends nothing, so its successful outcomes omit `entry`, and
+failed actions omit it as well. A stale-patrol report can therefore
+cite the entry (task, from/to state, timestamp) without re-reading
+`task.history`, mirroring what `expireOverdueTasks` already does for
+`ExpireOverdueResult`:
 
 ```ts
 import { actOnStaleTasks, TaskLifecycle } from "./src/index.js";
@@ -1556,7 +1564,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 655 tests covering the happy path, reject→resubmit
+`npm test` runs 664 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
