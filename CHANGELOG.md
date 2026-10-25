@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for state-filter listing (backlog
+  #598): `tasksByState` over the fixed 12-task watchdog batch
+  — the timed loop filters for OPEN and self-checks the
+  hand-pinned slice [WD-01, WD-02, WD-08, WD-12] in input
+  order holding the same task objects (the #562
+  order-preservation / same-object semantics), with the
+  terminal-PAID contrast [WD-03] and the unknown-state
+  fail-fast pinned once outside the timed loop. The
+  Benchmarks table is refreshed from this run (59 rows).
 - An Idempotency-Key header segment in the CLI demo (backlog
   #595): one more PAID task (DEMO-054) whose signed payout
   webhook is delivered twice to a real loopback receiver — the
