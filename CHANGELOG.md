@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for SLA approaching-deadline screening (backlog
+  #592): `tasksApproachingDeadline` over a fixed 6-task batch under
+  one injected fixed `now` with a 24-hour window — in-window,
+  upper-bound-inclusive, lower-bound-exclusive, overdue,
+  no-deadline, and terminal-PAID cases — self-checked on every
+  iteration for the hand-pinned [AP-01, AP-02] selection, with the
+  overdue contrast [AP-03, AP-04] pinned once outside the timed
+  loop. The Benchmarks table is refreshed from this run (58 rows).
 - An actor-filter branch in the CLI demo (backlog #589): four
   more tasks (DEMO-050–DEMO-053) under fixed-literal timestamps
   showing `tasksByActor()` beside `tasksByState()` on the same
