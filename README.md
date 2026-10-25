@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 694 tests, all local
+npm test   # 696 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1352,7 +1352,7 @@ and a fail-fast check pinning the exact
 `invalid maxAgeByState: unknown state "BOGUS"`
 configuration error an unknown state name throws.
 
-The demo then closes with an Idempotency-Key header
+The demo then shows an Idempotency-Key header
 segment: one more PAID task (DEMO-054) whose signed
 payout webhook is delivered twice to a real loopback
 receiver — the first delivery and the redelivery of
@@ -1366,6 +1366,20 @@ captured wire body verifies under the demo secret as
 the contrast: the header is an unsigned transport
 hint, and the verified body's `eventId` is the
 authoritative dedup key.
+
+The demo then closes with an X-Event-Id header
+segment: one more PAID task (DEMO-055) whose signed
+payout webhook is delivered twice to a real loopback
+receiver — the first delivery and the redelivery of
+the same webhook object — and both captured requests
+carry `X-Event-Id` equal to the pinned payload
+`eventId` (`evt_demo_x_event_id_001`), with the
+same requests also carrying `Idempotency-Key` equal
+to that same eventId: one logical event, two header
+names for it. The captured wire body verifies under
+the demo secret as the contrast: the headers are
+unsigned transport hints, and the verified body's
+`eventId` is the authoritative dedup key.
 
 ## Retry budgets
 
@@ -1610,7 +1624,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 694 tests covering the happy path, reject→resubmit
+`npm test` runs 696 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -451,7 +451,7 @@
  * `actOnStaleTasks()` that dispatches nothing, and
  * a fail-fast check pinning the exact configuration
  * error an unknown state name in the map throws,
- * and finally an Idempotency-Key header segment:
+ * an Idempotency-Key header segment:
  * one more PAID task whose signed payout webhook is
  * delivered twice to a real loopback receiver — the
  * first delivery and the redelivery of the same
@@ -462,7 +462,16 @@
  * captured wire body verified under the demo secret
  * as the contrast: the header is an unsigned
  * transport hint, the verified body's `eventId` is
- * the authoritative dedup key.
+ * the authoritative dedup key, and finally an
+ * X-Event-Id header segment: one more PAID task
+ * whose signed payout webhook is delivered twice
+ * to a real loopback receiver — the first delivery
+ * and the redelivery of the same webhook object —
+ * and both captured requests carry `X-Event-Id`
+ * equal to the payload `eventId`, with the
+ * `Idempotency-Key` header on the same requests
+ * carrying the same value as the coexistence
+ * contrast (one event, two header names for it).
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -748,6 +757,19 @@ export const DEMO_IDEMPOTENCY_HEADER_TASK_ID = "DEMO-054";
 export const DEMO_IDEMPOTENCY_HEADER_EVENT_ID =
   "evt_demo_idempotency_key_001";
 export const DEMO_IDEMPOTENCY_HEADER_NOW = "2026-03-24T10:00:00.000Z";
+
+/**
+ * Fixtures for the demo's closing X-Event-Id header segment:
+ * the dedicated PAID task id, the pinned payload eventId (which is
+ * also the X-Event-Id header value on both deliveries, and the
+ * Idempotency-Key header value on the same requests), and the
+ * pinned webhook `at` instant. The loopback port is ephemeral
+ * and never printed, so the segment's output is byte-identical
+ * across runs. Next free DEMO number after DEMO-054.
+ */
+export const DEMO_EVENT_ID_HEADER_TASK_ID = "DEMO-055";
+export const DEMO_EVENT_ID_HEADER_EVENT_ID = "evt_demo_x_event_id_001";
+export const DEMO_EVENT_ID_HEADER_NOW = "2026-03-25T10:00:00.000Z";
 
 /**
  * Exact constructor id rejection wording the constructor guard segment pins.
@@ -1293,6 +1315,28 @@ export interface DemoResult {
   idempotencyHeaderRetryResult: DeliverWebhookResult;
   /** Whether the captured wire body verifies under the demo secret. */
   idempotencyHeaderBodyVerifies: boolean;
+  /** Dedicated PAID task for the closing X-Event-Id header segment (DEMO-055). */
+  eventIdHeaderTask: TaskLifecycle;
+  /** Signed payout webhook delivered twice in the X-Event-Id header segment. */
+  eventIdHeaderWebhook: PayoutWebhook;
+  /** Pinned payload eventId of the X-Event-Id header segment's webhook. */
+  eventIdHeaderEventId: string;
+  /** `X-Event-Id` header captured on the first delivery. */
+  eventIdHeaderFirst: string;
+  /** `X-Event-Id` header captured on the redelivery. */
+  eventIdHeaderRetry: string;
+  /** `Idempotency-Key` header captured on the first delivery (coexistence). */
+  eventIdHeaderIdempotencyFirst: string;
+  /** `Idempotency-Key` header captured on the redelivery (coexistence). */
+  eventIdHeaderIdempotencyRetry: string;
+  /** Number of requests the loopback receiver captured (2). */
+  eventIdHeaderCalls: number;
+  /** `deliverPayoutWebhook` result for the first delivery. */
+  eventIdHeaderFirstResult: DeliverWebhookResult;
+  /** `deliverPayoutWebhook` result for the redelivery. */
+  eventIdHeaderRetryResult: DeliverWebhookResult;
+  /** Whether the captured wire body verifies under the demo secret. */
+  eventIdHeaderBodyVerifies: boolean;
   lines: string[];
 }
 
@@ -6154,7 +6198,192 @@ export async function runDemo(): Promise<DemoResult> {
     `  body check: verifyPayoutWebhook over the captured wire body: ${idempotencyHeaderBodyVerifies}; the verified body's eventId ${idempotencyHeaderEventId} equals both captured headers (the header is an unsigned transport hint — the verified body's eventId is the authoritative dedup key)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, lines };
+  // Payout webhook X-Event-Id header segment (closing):
+  // the #583 header has never appeared in the demo — the
+  // Idempotency-Key segment above captures only the
+  // standard idempotency header, never the event-dedup
+  // header, even though deliverPayoutWebhook sends both
+  // on every delivery. Here the same signed webhook is
+  // delivered twice to a real loopback receiver through
+  // the default global fetch (no fetchImpl), so both
+  // headers are observed on the actual wire: the first
+  // delivery and the redelivery of the same webhook
+  // object. Hand-written expectations — written out
+  // here from the delivery source and the X-Event-Id
+  // header tests, never derived by calling
+  // deliverPayoutWebhook itself:
+  //   - both deliveries report { ok: true, attempts: 1,
+  //     status: 200 } (the loopback receiver always
+  //     answers 200, so no retry is triggered);
+  //   - the receiver captures exactly 2 requests, and
+  //     both carry `X-Event-Id` equal to the pinned
+  //     payload eventId — deliverPayoutWebhook has no
+  //     separate event-id option, the eventId IS the
+  //     header value, so a redelivery necessarily
+  //     reuses the same value;
+  //   - the same two requests also carry
+  //     `Idempotency-Key` equal to the same pinned
+  //     eventId — the coexistence contrast: one
+  //     logical event, two header names for it, and a
+  //     receiver keying on either header sees the
+  //     same dedup value;
+  //   - both captured bodies are byte-identical to
+  //     the signed payload serialization, and the
+  //     first body verifies under the demo secret —
+  //     the same contrast as the Idempotency-Key
+  //     segment: the headers are unsigned transport
+  //     hints, the verified body's eventId is the
+  //     authoritative dedup key. The segment asserts
+  //     all of this here, outside the printed lines:
+  //     a delivery semantic that drifted would fail
+  //     the demo itself, not just a test.
+  // The loopback port is ephemeral and never printed,
+  // so the segment's output is byte-identical across
+  // runs; the receiver answers `Connection: close`
+  // so its close() never waits on a keep-alive socket.
+  const eventIdHeaderTask = new TaskLifecycle(
+    DEMO_EVENT_ID_HEADER_TASK_ID,
+  );
+  eventIdHeaderTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-25T09:00:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-25T09:05:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-03-25T09:10:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-25T09:15:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-03-25T09:20:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-03-25T09:25:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-03-25T09:30:00.000Z",
+  });
+  eventIdHeaderTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-25T09:35:00.000Z",
+    payoutAmount: 4200,
+  });
+  const eventIdHeaderWebhook = buildPayoutWebhook(
+    eventIdHeaderTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: new Date(DEMO_EVENT_ID_HEADER_NOW),
+      eventId: DEMO_EVENT_ID_HEADER_EVENT_ID,
+    },
+  );
+  const eventIdHeaderEventId = eventIdHeaderWebhook.payload.eventId;
+  const eventIdHeaderCaptured: string[] = [];
+  const eventIdHeaderIdempotencyCaptured: string[] = [];
+  const eventIdHeaderBodies: string[] = [];
+  const eventIdHeaderServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      eventIdHeaderCaptured.push(String(req.headers["x-event-id"] ?? ""));
+      eventIdHeaderIdempotencyCaptured.push(
+        String(req.headers["idempotency-key"] ?? ""),
+      );
+      eventIdHeaderBodies.push(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, {
+        "content-type": "application/json",
+        connection: "close",
+      });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) =>
+    eventIdHeaderServer.listen(0, "127.0.0.1", resolve),
+  );
+  const eventIdHeaderAddress = eventIdHeaderServer.address();
+  if (
+    eventIdHeaderAddress === null ||
+    typeof eventIdHeaderAddress === "string"
+  ) {
+    throw new Error(
+      "demo fixture broken: loopback server did not bind to a port",
+    );
+  }
+  const eventIdHeaderUrl = `http://127.0.0.1:${eventIdHeaderAddress.port}/hooks/payout`;
+  let eventIdHeaderFirstResult: DeliverWebhookResult;
+  let eventIdHeaderRetryResult: DeliverWebhookResult;
+  try {
+    eventIdHeaderFirstResult = await deliverPayoutWebhook(
+      eventIdHeaderUrl,
+      eventIdHeaderWebhook,
+    );
+    eventIdHeaderRetryResult = await deliverPayoutWebhook(
+      eventIdHeaderUrl,
+      eventIdHeaderWebhook,
+    );
+  } finally {
+    await new Promise<void>((resolve) =>
+      eventIdHeaderServer.close(() => resolve()),
+    );
+  }
+  const eventIdHeaderFirst = eventIdHeaderCaptured[0] ?? "";
+  const eventIdHeaderRetry = eventIdHeaderCaptured[1] ?? "";
+  const eventIdHeaderIdempotencyFirst =
+    eventIdHeaderIdempotencyCaptured[0] ?? "";
+  const eventIdHeaderIdempotencyRetry =
+    eventIdHeaderIdempotencyCaptured[1] ?? "";
+  const eventIdHeaderCalls = eventIdHeaderCaptured.length;
+  const eventIdHeaderBodyVerifies =
+    eventIdHeaderBodies.length > 0 &&
+    verifyPayoutWebhook(
+      eventIdHeaderBodies[0],
+      eventIdHeaderWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    );
+  if (
+    eventIdHeaderTask.state !== "PAID" ||
+    eventIdHeaderEventId !== DEMO_EVENT_ID_HEADER_EVENT_ID ||
+    eventIdHeaderFirstResult.ok !== true ||
+    eventIdHeaderFirstResult.attempts !== 1 ||
+    eventIdHeaderFirstResult.status !== 200 ||
+    eventIdHeaderRetryResult.ok !== true ||
+    eventIdHeaderRetryResult.attempts !== 1 ||
+    eventIdHeaderRetryResult.status !== 200 ||
+    eventIdHeaderCalls !== 2 ||
+    eventIdHeaderFirst !== DEMO_EVENT_ID_HEADER_EVENT_ID ||
+    eventIdHeaderRetry !== DEMO_EVENT_ID_HEADER_EVENT_ID ||
+    eventIdHeaderIdempotencyFirst !== DEMO_EVENT_ID_HEADER_EVENT_ID ||
+    eventIdHeaderIdempotencyRetry !== DEMO_EVENT_ID_HEADER_EVENT_ID ||
+    eventIdHeaderBodies.length !== 2 ||
+    eventIdHeaderBodies[0] !==
+      JSON.stringify(eventIdHeaderWebhook.payload) ||
+    eventIdHeaderBodies[1] !==
+      JSON.stringify(eventIdHeaderWebhook.payload) ||
+    !eventIdHeaderBodyVerifies
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook X-Event-Id header does not match the hand-pinned contract (both deliveries must report ok with 1 attempt and status 200, the loopback receiver must capture exactly 2 requests each carrying X-Event-Id equal to the pinned payload eventId and Idempotency-Key equal to the same eventId, both wire bodies must be byte-identical to the signed payload, and the captured body must verify under the demo secret)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+    `  event: PAYOUT_COMPLETE for ${DEMO_EVENT_ID_HEADER_TASK_ID}, pinned eventId ${DEMO_EVENT_ID_HEADER_EVENT_ID} (deliverPayoutWebhook carries no separate event-id option — the payload eventId IS the X-Event-Id header value)`,
+    `  first delivery: ok attempts=${eventIdHeaderFirstResult.attempts} status=${eventIdHeaderFirstResult.status}; captured X-Event-Id: ${eventIdHeaderFirst}`,
+    `  redelivery (the same webhook object delivered a second time): ok attempts=${eventIdHeaderRetryResult.attempts} status=${eventIdHeaderRetryResult.status}; captured X-Event-Id: ${eventIdHeaderRetry} (unchanged — a receiver deduplicating on the header drops the redelivery without parsing the body)`,
+    `  coexistence: both captured requests also carry Idempotency-Key: ${eventIdHeaderIdempotencyFirst} (first) / ${eventIdHeaderIdempotencyRetry} (redelivery) — the same pinned eventId under the standard idempotency header name`,
+    `  body check: verifyPayoutWebhook over the captured wire body: ${eventIdHeaderBodyVerifies}; the verified body's eventId ${eventIdHeaderEventId} equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, lines };
 }
 
 async function main(): Promise<void> {

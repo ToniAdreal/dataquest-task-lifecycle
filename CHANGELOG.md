@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An X-Event-Id header segment in the CLI demo (backlog
+  #601): one more PAID task (DEMO-055) whose signed payout
+  webhook is delivered twice to a real loopback receiver — the
+  first delivery and the redelivery of the same webhook object —
+  with both captured requests carrying `X-Event-Id` equal to the
+  pinned payload `eventId` (`evt_demo_x_event_id_001`) and the
+  same requests also carrying `Idempotency-Key` equal to that
+  same eventId, teaching that `deliverPayoutWebhook` sends both
+  headers on every delivery (one logical event, two header names)
+  and that the headers are unsigned transport hints beside the
+  verified body's `eventId`, which is the authoritative dedup key.
+  The loopback port is ephemeral and never printed, so the
+  segment's output is byte-identical across runs. Any drift from
+  the hand-written expectations fails the demo fast (non-zero
+  exit).
 - A benchmark path for state-filter listing (backlog
   #598): `tasksByState` over the fixed 12-task watchdog batch
   — the timed loop filters for OPEN and self-checks the
