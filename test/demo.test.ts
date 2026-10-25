@@ -51,6 +51,8 @@ import {
   staleTasks,
   stateDiagram,
   tasksApproachingDeadline,
+  tasksByActor,
+  tasksByState,
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
@@ -320,6 +322,26 @@ Task DEMO-049: DRAFT
   expiredTasks([DEMO-046, DEMO-047, DEMO-048, DEMO-049], <timestamp>): DEMO-048, DEMO-049 (2 overdue)
   contrast: the window's bounds decide membership — DEMO-047 lands exactly on now + 24 hours and is approaching (upper bound inclusive), DEMO-048 lands exactly on now and is overdue instead (lower bound exclusive), DEMO-049 is overdue, DEMO-046 is approaching from inside the window
   screening is pure: no task was dispatched or mutated by either screen
+
+Actor-filter branch (tasksByActor over four more tasks, audit history vs state):
+Task DEMO-050: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (moderator)
+Task DEMO-051: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (contributor)
+  ACCEPT          OPEN         -> ACCEPTED  (moderator)
+Task DEMO-052: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (anonymous)
+Task DEMO-053: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (moderator)
+  ACCEPT          OPEN         -> ACCEPTED  (moderator)
+  DEMO-050: state OPEN, actors moderator
+  DEMO-051: state ACCEPTED, actors contributor, moderator
+  DEMO-052: state OPEN, actors anonymous
+  DEMO-053: state ACCEPTED, actors moderator
+  tasksByActor([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "moderator"): DEMO-050, DEMO-051, DEMO-053 (3 tasks)
+  tasksByActor([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "contributor"): DEMO-051 (1 task)
+  contrast: tasksByState([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "OPEN"): DEMO-050, DEMO-052 (2 tasks) — the two slices are orthogonal: DEMO-052 is OPEN but anonymous so no actor filter claims it, DEMO-051 and DEMO-053 are ACCEPTED yet moderator-touched, and DEMO-053 matches once despite two moderator entries
+  filtering is pure: no task was dispatched or mutated by either filter
 
 Stale-task batch execution branch (actOnStaleTasks over four more tasks):
   executed at: <timestamp> (fixed now; no wall clock)
@@ -620,7 +642,7 @@ Stale patrol (staleTasks / maxAgeByState screening, notify-only action):
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 527);
+  assert.equal(lines.length, 547);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1528,7 +1550,7 @@ test("demo approaching-deadline segment is deterministic: two runs print byte-id
   const approachingLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Approaching-deadline screening branch (four more tasks, warning window vs deadline):"),
-      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+      ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1547,6 +1569,126 @@ test("demo approaching-deadline segment is deterministic: two runs print byte-id
   assert.deepEqual(
     a.approachingOverdueFound.map((t) => t.id),
     b.approachingOverdueFound.map((t) => t.id),
+  );
+});
+
+test("demo shows the actor-filter branch in-process: moderator and contributor slices disagree with the state slice", async () => {
+  const {
+    actorFilterTasks,
+    actorFilterModerator,
+    actorFilterContributor,
+    actorFilterOpenState,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // The four branch tasks end in the hand-written states with
+  // fixed-literal histories — no wall clock anywhere.
+  assert.deepEqual(
+    actorFilterTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-050", "OPEN", 1],
+      ["DEMO-051", "ACCEPTED", 2],
+      ["DEMO-052", "OPEN", 1],
+      ["DEMO-053", "ACCEPTED", 2],
+    ],
+  );
+  // The actor slices: moderator touched three tasks (twice on
+  // DEMO-053, still one match), contributor touched one, and the
+  // anonymous task matches no actor at all.
+  assert.deepEqual(
+    actorFilterModerator.map((t) => t.id),
+    ["DEMO-050", "DEMO-051", "DEMO-053"],
+  );
+  assert.deepEqual(
+    actorFilterContributor.map((t) => t.id),
+    ["DEMO-051"],
+  );
+  // The contrast slice: the OPEN pair is a different subset than
+  // either actor slice — the two lenses are orthogonal.
+  assert.deepEqual(
+    actorFilterOpenState.map((t) => t.id),
+    ["DEMO-050", "DEMO-052"],
+  );
+  // An independent re-screening of the returned tasks reproduces
+  // all three subsets — the demo segment is not self-certifying.
+  assert.deepEqual(
+    tasksByActor(actorFilterTasks, "moderator").map((t) => t.id),
+    ["DEMO-050", "DEMO-051", "DEMO-053"],
+  );
+  assert.deepEqual(
+    tasksByActor(actorFilterTasks, "contributor").map((t) => t.id),
+    ["DEMO-051"],
+  );
+  assert.deepEqual(
+    tasksByState(actorFilterTasks, "OPEN").map((t) => t.id),
+    ["DEMO-050", "DEMO-052"],
+  );
+  // Filtering is pure: the tasks keep their states and history
+  // lengths after both filters ran inside the demo.
+  assert.deepEqual(
+    actorFilterTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["OPEN", 1],
+      ["ACCEPTED", 2],
+      ["OPEN", 1],
+      ["ACCEPTED", 2],
+    ],
+  );
+  // The branch is printed after the approaching-deadline
+  // screening branch and before the stale-task batch execution
+  // branch, with its lines verbatim.
+  const actorAt = text.indexOf(
+    "Actor-filter branch (tasksByActor over four more tasks, audit history vs state):",
+  );
+  assert.ok(
+    actorAt >
+      text.indexOf("Approaching-deadline screening branch (four more tasks, warning window vs deadline):"),
+    "actor-filter branch must follow the approaching branch",
+  );
+  assert.ok(
+    text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") >
+      actorAt,
+    "batch execution branch must follow the actor-filter branch",
+  );
+  assert.match(text, /DEMO-051: state ACCEPTED, actors contributor, moderator/);
+  assert.match(text, /DEMO-052: state OPEN, actors anonymous/);
+  assert.match(
+    text,
+    /tasksByActor\(\[DEMO-050, DEMO-051, DEMO-052, DEMO-053\], "moderator"\): DEMO-050, DEMO-051, DEMO-053 \(3 tasks\)/,
+  );
+  assert.match(
+    text,
+    /contrast: tasksByState\(\[DEMO-050, DEMO-051, DEMO-052, DEMO-053\], "OPEN"\): DEMO-050, DEMO-052 \(2 tasks\)/,
+  );
+});
+
+test("demo actor-filter segment is deterministic: two runs print byte-identical actor lines", async () => {
+  const actorLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):"),
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = actorLines(a.lines);
+  // Header + (task header + steps) x 4 + 4 per-task lines +
+  // moderator line + contributor line + contrast line + purity
+  // line; every timestamp in the segment is a fixed literal, so
+  // no normalization is needed.
+  assert.equal(segA.length, 19);
+  assert.deepEqual(segA, actorLines(b.lines));
+  assert.deepEqual(
+    a.actorFilterModerator.map((t) => t.id),
+    b.actorFilterModerator.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.actorFilterContributor.map((t) => t.id),
+    b.actorFilterContributor.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.actorFilterOpenState.map((t) => t.id),
+    b.actorFilterOpenState.map((t) => t.id),
   );
 });
 
@@ -2334,7 +2476,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 527);
+  assert.equal(out.trimEnd().split("\n").length, 547);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An actor-filter branch in the CLI demo (backlog #589): four
+  more tasks (DEMO-050–DEMO-053) under fixed-literal timestamps
+  showing `tasksByActor()` beside `tasksByState()` on the same
+  batch — the moderator slice (DEMO-050, DEMO-051, DEMO-053)
+  and the contributor slice (DEMO-051) against the OPEN slice
+  (DEMO-050, DEMO-052) — so the demo teaches that the actor
+  slice and the state slice are orthogonal: a twice-touched task
+  matches once, and an anonymous task matches no actor. Any
+  drift from the hand-written expectations fails the demo fast
+  (non-zero exit).
 - A minor-unit display branch in the CLI demo (backlog #586):
   eleven fixed `formatMinorUnits` vectors (positive, zero, negative,
   large, up to MAX_SAFE_INTEGER) plus the finance-pass total itself —

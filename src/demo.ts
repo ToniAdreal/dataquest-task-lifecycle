@@ -587,6 +587,8 @@ import {
   staleTasks,
   stateDiagram,
   tasksApproachingDeadline,
+  tasksByActor,
+  tasksByState,
   totalPaidOut,
   transitionTable,
   transitionTableJson,
@@ -1141,6 +1143,14 @@ export interface DemoResult {
   approachingFound: TaskLifecycle[];
   /** `expiredTasks` selection over {@link DemoResult.approachingTasks} (DEMO-048, DEMO-049). */
   approachingOverdueFound: TaskLifecycle[];
+  /** The actor-filter branch's four tasks, in filter order. */
+  actorFilterTasks: TaskLifecycle[];
+  /** `tasksByActor` selection over {@link DemoResult.actorFilterTasks} (DEMO-050, DEMO-051, DEMO-053). */
+  actorFilterModerator: TaskLifecycle[];
+  /** `tasksByActor` selection over {@link DemoResult.actorFilterTasks} (DEMO-051). */
+  actorFilterContributor: TaskLifecycle[];
+  /** `tasksByState` contrast selection over {@link DemoResult.actorFilterTasks} (DEMO-050, DEMO-052). */
+  actorFilterOpenState: TaskLifecycle[];
   staleActionTasks: TaskLifecycle[];
   staleActionResults: StaleActionResult[];
   expireExecutionTasks: TaskLifecycle[];
@@ -2260,6 +2270,94 @@ export async function runDemo(): Promise<DemoResult> {
   );
   lines.push(
     "  screening is pure: no task was dispatched or mutated by either screen",
+  );
+
+  // Actor-filter branch: the state lens and the actor lens slice
+  // the same batch differently, and the demo shows both at once
+  // on four more tasks under fixed-literal timestamps (no wall
+  // clock, no network). Hand-written expectations:
+  //   DEMO-050 PUBLISHes as "moderator" and stays OPEN —
+  //     moderator-touched, and in the OPEN slice.
+  //   DEMO-051 PUBLISHes as "contributor", then ACCEPTs as
+  //     "moderator", landing in ACCEPTED — touched by both
+  //     actors, but in neither actor's slice twice, and outside
+  //     the OPEN slice.
+  //   DEMO-052 PUBLISHes with no actor (anonymous) and stays
+  //     OPEN — in the OPEN slice, but in no actor's slice:
+  //     anonymous work is never attributed to anyone.
+  //   DEMO-053 PUBLISHes as "moderator" and ACCEPTs as
+  //     "moderator", landing in ACCEPTED — two moderator
+  //     entries, yet it matches the moderator filter exactly
+  //     once.
+  // So `tasksByActor(batch, "moderator")` is DEMO-050, DEMO-051,
+  // DEMO-053; `tasksByActor(batch, "contributor")` is DEMO-051
+  // alone; and the contrast row `tasksByState(batch, "OPEN")`
+  // is DEMO-050, DEMO-052 — the two slices are orthogonal, and
+  // both are pure: neither filter dispatches or mutates.
+  const driveActorTask = (
+    id: string,
+    spec: Array<{ event: TaskEvent; actor?: string; at: string }>,
+  ): TaskLifecycle => {
+    const driven = new TaskLifecycle(id);
+    lines.push(`Task ${driven.id}: ${driven.state}`);
+    for (const { event, actor, at } of spec) {
+      const from = driven.state;
+      const to = driven.dispatch(event, {
+        ...(actor === undefined ? {} : { actor }),
+        at,
+      });
+      lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor ?? "anonymous"})`);
+    }
+    return driven;
+  };
+  lines.push("", "Actor-filter branch (tasksByActor over four more tasks, audit history vs state):");
+  const actorModeratorTask = driveActorTask("DEMO-050", [
+    { event: "PUBLISH", actor: "moderator", at: "2026-03-20T09:00:00.000Z" },
+  ]);
+  const actorBothTask = driveActorTask("DEMO-051", [
+    { event: "PUBLISH", actor: "contributor", at: "2026-03-20T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "moderator", at: "2026-03-20T10:00:00.000Z" },
+  ]);
+  const actorAnonymousTask = driveActorTask("DEMO-052", [
+    { event: "PUBLISH", at: "2026-03-20T09:00:00.000Z" },
+  ]);
+  const actorTwiceTask = driveActorTask("DEMO-053", [
+    { event: "PUBLISH", actor: "moderator", at: "2026-03-20T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "moderator", at: "2026-03-20T10:00:00.000Z" },
+  ]);
+  const actorFilterTasks = [
+    actorModeratorTask,
+    actorBothTask,
+    actorAnonymousTask,
+    actorTwiceTask,
+  ];
+  const actorFilterModerator = tasksByActor(actorFilterTasks, "moderator");
+  const actorFilterContributor = tasksByActor(actorFilterTasks, "contributor");
+  const actorFilterOpenState = tasksByState(actorFilterTasks, "OPEN");
+  if (
+    actorFilterModerator.map((t) => t.id).join(",") !== "DEMO-050,DEMO-051,DEMO-053" ||
+    actorFilterContributor.map((t) => t.id).join(",") !== "DEMO-051" ||
+    actorFilterOpenState.map((t) => t.id).join(",") !== "DEMO-050,DEMO-052"
+  ) {
+    throw new Error(
+      "demo actor-filter segment broken: expected moderator [DEMO-050,DEMO-051,DEMO-053], contributor [DEMO-051], OPEN [DEMO-050,DEMO-052]",
+    );
+  }
+  for (const t of actorFilterTasks) {
+    const actors = [...new Set(t.history.map((entry) => entry.actor ?? "anonymous"))];
+    lines.push(`  ${t.id}: state ${t.state}, actors ${actors.join(", ")}`);
+  }
+  lines.push(
+    `  tasksByActor([${actorFilterTasks.map((t) => t.id).join(", ")}], "moderator"): ${actorFilterModerator.map((t) => t.id).join(", ")} (${actorFilterModerator.length} tasks)`,
+  );
+  lines.push(
+    `  tasksByActor([${actorFilterTasks.map((t) => t.id).join(", ")}], "contributor"): ${actorFilterContributor.map((t) => t.id).join(", ")} (${actorFilterContributor.length} task)`,
+  );
+  lines.push(
+    `  contrast: tasksByState([${actorFilterTasks.map((t) => t.id).join(", ")}], "OPEN"): ${actorFilterOpenState.map((t) => t.id).join(", ")} (${actorFilterOpenState.length} tasks) — the two slices are orthogonal: DEMO-052 is OPEN but anonymous so no actor filter claims it, DEMO-051 and DEMO-053 are ACCEPTED yet moderator-touched, and DEMO-053 matches once despite two moderator entries`,
+  );
+  lines.push(
+    "  filtering is pure: no task was dispatched or mutated by either filter",
   );
 
   // Stale-task batch execution branch: screening alone does not
@@ -5843,7 +5941,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  invalid patrol configuration fails fast: staleTasks with an unknown state name throws ${patrolStaleConfigError} before any task is read`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, lines };
 }
 
 async function main(): Promise<void> {

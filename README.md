@@ -100,7 +100,17 @@ the two screens' subsets: `tasksApproachingDeadline()` selects
 only the first two (the upper bound is inclusive) while
 `expiredTasks()` selects only the last two (the lower bound is
 exclusive, so a deadline exactly at `now` is already overdue;
-both screens are pure; no task is dispatched or mutated), a
+both screens are pure; no task is dispatched or mutated), an
+actor-filter branch that drives four more tasks under
+fixed-literal timestamps and slices the same batch two ways —
+`tasksByActor()` selects every task a given actor touched
+(DEMO-050, DEMO-051, DEMO-053 for "moderator"; DEMO-051 alone
+for "contributor", matched once despite two moderator entries on
+DEMO-053, and never the anonymous DEMO-052) while
+`tasksByState()` selects only the OPEN pair (DEMO-050,
+DEMO-052) — so the actor slice and the state slice are
+orthogonal, and both filters are pure; no task is dispatched or
+mutated), a
 stale-task batch execution branch that runs
 `actOnStaleTasks()` over four more tasks at the same fixed `now`
 under 7-day dwell budgets for ACCEPTED / CAPTURING / SUBMITTED —
