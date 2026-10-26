@@ -391,6 +391,9 @@ Task DEMO-016: DRAFT
   expiredTasks([DEMO-014, DEMO-015, DEMO-016], <timestamp>): DEMO-014, DEMO-015 (2 overdue)
   DEMO-014: expired=true -> state EXPIRED (EXPIRE dispatched by the executor)
   DEMO-015: expired=true -> state EXPIRED (EXPIRE dispatched by the executor)
+  expireOverdueTasks audit entries (result.entry — the EXPIRE audit record, cited without re-reading task.history):
+  DEMO-014: entry seq 3 EXPIRE ACCEPTED -> EXPIRED at <timestamp> — matches DEMO-014 history last entry
+  DEMO-015: entry seq 2 EXPIRE OPEN -> EXPIRED at <timestamp> — matches DEMO-015 history last entry
   DEMO-016: not overdue at the fixed now (deadline <timestamp> still ahead) -> no result entry, untouched in ACCEPTED
   screening vs execution: expiredTasks subset [DEMO-014, DEMO-015] == expireOverdueTasks acted set [DEMO-014, DEMO-015]: true (same tasks, same batch order)
   execution: 2 attempted, 2 expired, 0 failed — the not-yet-overdue task was never attempted
@@ -667,7 +670,7 @@ Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver �
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 565);
+  assert.equal(lines.length, 568);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2501,7 +2504,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 565);
+  assert.equal(out.trimEnd().split("\n").length, 568);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -2806,7 +2809,102 @@ test("demo shows the SLA watchdog batch execution branch in-process: screening s
   );
 });
 
-test("demo SLA watchdog execution segment is deterministic in its printed lines: two runs print byte-identical execution lines", async () => {
+test("demo SLA watchdog execution entry citations: result.entry lines match the tasks' history last entries", async () => {
+  const {
+    expireExecutionTasks,
+    expireExecutionResults,
+    expireExecutionEntryRefs,
+    lines,
+  } = await runDemo();
+  const text = normalize(lines.join("\n"));
+  // The entry block header and both citation lines, in batch
+  // order, between the result lines and the not-overdue line.
+  assert.match(
+    text,
+    /expireOverdueTasks audit entries \(result\.entry — the EXPIRE audit record, cited without re-reading task\.history\):/,
+  );
+  assert.match(
+    text,
+    /DEMO-014: entry seq 3 EXPIRE ACCEPTED -> EXPIRED at <timestamp> — matches DEMO-014 history last entry/,
+  );
+  assert.match(
+    text,
+    /DEMO-015: entry seq 2 EXPIRE OPEN -> EXPIRED at <timestamp> — matches DEMO-015 history last entry/,
+  );
+  assert.ok(
+    text.indexOf("DEMO-014: entry seq 3") > text.indexOf("DEMO-014: expired=true"),
+    "entry citations must follow the result lines",
+  );
+  assert.ok(
+    text.indexOf("DEMO-015: entry seq 2") < text.indexOf("DEMO-016: not overdue"),
+    "entry citations must precede the not-overdue line",
+  );
+  // DemoResult refs: one per success, in batch order, each exactly
+  // the task's last history entry (seq/event/from/to/actor pinned;
+  // `at` equals the last entry's `at` within the same run — both
+  // are the same wall-clock dispatch timestamp, never asserted
+  // against a fixed literal).
+  assert.deepEqual(
+    expireExecutionEntryRefs.map((r) => r.taskId),
+    ["DEMO-014", "DEMO-015"],
+  );
+  assert.deepEqual(
+    expireExecutionEntryRefs.map((r) => [
+      r.taskId,
+      r.entry.seq,
+      r.entry.event,
+      r.entry.from,
+      r.entry.to,
+      r.entry.actor,
+    ]),
+    [
+      ["DEMO-014", 3, "EXPIRE", "ACCEPTED", "EXPIRED", "system"],
+      ["DEMO-015", 2, "EXPIRE", "OPEN", "EXPIRED", "system"],
+    ],
+  );
+  for (const [i, ref] of expireExecutionEntryRefs.entries()) {
+    const last = expireExecutionTasks[i].history.at(-1)!;
+    assert.deepEqual(ref.entry, last);
+    assert.ok(Object.isFrozen(ref.entry), "entry citation must be frozen");
+  }
+  // Failed results carry no entry — vacuous for this batch (both
+  // expired), so the invariant is also pinned on an independent
+  // stuck batch the demo batch cannot show: an overdue IN_REVIEW
+  // task has no EXPIRE edge, so its outcome must omit `entry`.
+  assert.ok(
+    expireExecutionResults.every((r) => r.expired || !("entry" in r)),
+  );
+  const stuck = new TaskLifecycle("STUCK-ENTRY");
+  stuck.dispatch("PUBLISH", { actor: "poster" });
+  stuck.dispatch("ACCEPT", { actor: "contributor" });
+  stuck.dispatch("START_CAPTURE", { actor: "contributor" });
+  stuck.dispatch("SUBMIT", { actor: "contributor" });
+  stuck.dispatch("BEGIN_REVIEW", { actor: "reviewer" });
+  stuck.setSlaDeadline("2026-01-01T00:00:00.000Z");
+  const [stuckResult] = expireOverdueTasks(
+    [stuck],
+    new Date("2026-03-06T09:00:00.000Z"),
+  );
+  assert.equal(stuckResult.expired, false);
+  assert.ok(
+    !("entry" in stuckResult),
+    "failed outcome must not carry an entry field",
+  );
+});
+
+test("demo SLA watchdog execution entry refs are frozen detached copies, not live history objects", async () => {
+  const { expireExecutionTasks, expireExecutionEntryRefs } = await runDemo();
+  for (const [i, ref] of expireExecutionEntryRefs.entries()) {
+    const live = expireExecutionTasks[i].history.at(-1)!;
+    assert.deepEqual(ref.entry, live);
+    // The history getter returns fresh frozen copies per call, so
+    // the ref is its own object — never an alias into live history.
+    assert.notEqual(ref.entry, live);
+    assert.ok(Object.isFrozen(ref.entry));
+  }
+});
+
+test("demo SLA watchdog execution segment is deterministic in its printed lines: two runs agree after timestamp normalization", async () => {
   const execLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):"),
@@ -2818,13 +2916,14 @@ test("demo SLA watchdog execution segment is deterministic in its printed lines:
   // Header + executed-at + rebuilt note + (task header + 2
   // transitions + deadline line) + (task header + 1 transition +
   // deadline line) + (task header + 2 transitions + deadline
-  // line) + screening line + 2 result lines + the not-overdue
-  // line + the consistency line + the execution summary; every
-  // printed value is a fixed literal or derived from one — the
-  // executor's own wall-clock audit timestamps are never
-  // printed — so no normalization is needed.
-  assert.equal(segA.length, 20);
-  assert.deepEqual(segA, execLines(b.lines));
+  // line) + screening line + 2 result lines + the entry block
+  // header + 2 entry citation lines + the not-overdue
+  // line + the consistency line + the execution summary; the
+  // entry citations carry the executor's wall-clock audit
+  // timestamps, so the two runs are compared normalized (like
+  // the golden output), never byte-for-byte on those `at` values.
+  assert.equal(segA.length, 23);
+  assert.deepEqual(normalize(segA.join("\n")), normalize(execLines(b.lines).join("\n")));
   assert.deepEqual(
     a.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
     b.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),

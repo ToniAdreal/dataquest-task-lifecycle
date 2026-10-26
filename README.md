@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 698 tests, all local
+npm test   # 700 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -129,8 +129,11 @@ deadline is still ahead produces no result entry and is never
 attempted, and the printed screening subset equals the
 execution's acted set (2 attempted, 2 expired, 0 failed; the
 executor's own EXPIRE audit entries carry the library-default
-wall-clock timestamp, which the segment never prints, so its
-printed lines are byte-deterministic) — and a closing event-sourcing
+wall-clock timestamp, and the segment now prints each successful
+result's entry citation — seq/event/from/to/at, with a "no entry"
+line for any failed dispatch — so its printed lines agree across
+runs only after timestamp normalization, like the golden output)
+— and a closing event-sourcing
 segment that exports the main task's audit history with
 `historyToNdjson()`, prints all 12 NDJSON lines, parses them back
 with `historyFromNdjson()`, and replays them with

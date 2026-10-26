@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- An audit-entry citation block in the CLI demo's SLA watchdog
+  batch execution branch (backlog #616): after the per-task
+  result lines, the demo prints each successful
+  `expireOverdueTasks` result's `entry` — `entry seq 3 EXPIRE
+  ACCEPTED -> EXPIRED at <wall-clock>`, `entry seq 2 EXPIRE OPEN
+  -> EXPIRED at <wall-clock>` — with a `no entry — failed
+  dispatch appends nothing` line for any failed dispatch, so a
+  reader sees the audit record without re-reading
+  `task.history`. A fail-fast self-check requires every
+  successful entry to equal the task history's last entry
+  (seq/event/from/to/at/actor) and every failed outcome to
+  carry no entry, and `DemoResult` gains
+  `expireExecutionEntryRefs` (one `{ taskId, entry }` per
+  expired task, in batch order). Honest limit carried over
+  from the segment's own comment: the printed `at` is the
+  executor's wall-clock dispatch timestamp — the fixed
+  screening now only selects, it does not stamp — so the
+  demo tests pin seq/event/from/to/actor and normalize the
+  printed `at`, never asserting a wall-clock value; the
+  demo's printed line count grows from 565 to 568.
 - A benchmark path for minor-unit display formatting (backlog
   #614): `formatMinorUnits` over the fixed 12-vector demo
   corpus — the eleven demo vectors (positive, zero, negative,
