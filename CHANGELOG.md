@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A minor-unit conversion branch in the CLI demo (backlog #623):
+  after the `formatMinorUnits` display branch, the demo turns the
+  finance-pass total 16349 major units into 1634900 integer cents
+  with `toMinorUnits` and back with `fromMinorUnits`, cross-checked
+  against `totalPaidOut` itself (not a second hard-coded copy),
+  and shows a fractional minor unit (1634900.5) rejected fail-fast
+  with `minor units must be an integer, got 1634900.5`. `DemoResult`
+  gains `minorUnitsConversion` (`{ major, minor, roundTrip }`) and
+  `minorUnitsFractionalError`, and the demo's printed line count
+  grows from 568 to 573.
 - An audit-entry citation block in the CLI demo's SLA watchdog
   batch execution branch (backlog #616): after the per-task
   result lines, the demo prints each successful

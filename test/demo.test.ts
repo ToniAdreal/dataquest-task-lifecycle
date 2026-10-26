@@ -48,6 +48,7 @@ import {
   expireOverdueTasks,
   expiredTasks,
   formatMinorUnits,
+  fromMinorUnits,
   historyFromNdjson,
   historyToNdjson,
   isOverdue,
@@ -60,6 +61,7 @@ import {
   tasksApproachingDeadline,
   tasksByActor,
   tasksByState,
+  toMinorUnits,
   transitionTable,
   transitionTableJson,
   verifyHistoryChain,
@@ -255,6 +257,11 @@ Minor-unit display branch (formatMinorUnits over the settlement amounts):
   formatMinorUnits(9007199254740991) = "90071992547409.91"
   finance-pass total: formatMinorUnits(1634900) = "16349.00" (totalPaidOut 16349 rendered for a statement)
   format: exactly two decimals, no thousands separator, no currency symbol â€” -0 renders without a minus sign, large amounts stay exact (integer arithmetic)
+
+Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):
+  toMinorUnits(16349) = 1634900 (finance-pass totalPaidOut in integer cents)
+  fromMinorUnits(1634900) = 16349 (round-trip back to totalPaidOut, no float drift)
+  fromMinorUnits(1634900.5) rejected: "minor units must be an integer, got 1634900.5" (a fractional minor unit is a caller error, not a representable amount)
 
 Dispatch subscription branch (sixth task, in-process fan-out):
 Task DEMO-006: DRAFT
@@ -670,7 +677,7 @@ Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver â€
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 568);
+  assert.equal(lines.length, 573);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1190,7 +1197,7 @@ test("demo minor-unit display segment is deterministic: two runs print byte-iden
   const displayLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):"),
-      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+      ls.indexOf("Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):") - 1,
     );
   const a = displayLines((await runDemo()).lines);
   const b = displayLines((await runDemo()).lines);
@@ -1198,6 +1205,72 @@ test("demo minor-unit display segment is deterministic: two runs print byte-iden
   // note; every value is a pinned literal, so no normalization is
   // needed.
   assert.equal(a.length, 14);
+  assert.deepEqual(a, b);
+});
+
+test("demo shows the minor-unit conversion branch in-process: finance-pass total converts both ways, fractional minor units rejected", async () => {
+  const { minorUnitsConversion, minorUnitsFractionalError, totalPaid, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+  // Hand-written expectations, independent of the demo's own
+  // cross-check: the finance-pass total 16349 major units is
+  // 1634900 minor units, and back.
+  assert.deepEqual(minorUnitsConversion, {
+    major: 16349,
+    minor: 1634900,
+    roundTrip: 16349,
+  });
+  assert.equal(totalPaid, 16349);
+  assert.equal(
+    minorUnitsFractionalError,
+    "minor units must be an integer, got 1634900.5",
+  );
+  // The structured conversion agrees with the library directly.
+  assert.equal(toMinorUnits(16349), 1634900);
+  assert.equal(fromMinorUnits(1634900), 16349);
+  assert.throws(
+    () => fromMinorUnits(1634900.5),
+    /minor units must be an integer, got 1634900\.5/,
+  );
+  const conversionAt = text.indexOf(
+    "Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):",
+  );
+  assert.ok(
+    conversionAt >
+      text.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):"),
+    "conversion branch must follow the display branch",
+  );
+  assert.ok(
+    text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") >
+      conversionAt,
+    "subscription branch must follow the conversion branch",
+  );
+  assert.match(
+    text,
+    /toMinorUnits\(16349\) = 1634900 \(finance-pass totalPaidOut in integer cents\)/,
+  );
+  assert.match(
+    text,
+    /fromMinorUnits\(1634900\) = 16349 \(round-trip back to totalPaidOut, no float drift\)/,
+  );
+  assert.match(
+    text,
+    /fromMinorUnits\(1634900\.5\) rejected: "minor units must be an integer, got 1634900\.5"/,
+  );
+});
+
+test("demo minor-unit conversion segment is deterministic: two runs print byte-identical conversion lines", async () => {
+  const conversionLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):"),
+      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+    );
+  const a = conversionLines((await runDemo()).lines);
+  const b = conversionLines((await runDemo()).lines);
+  // Header + toMinorUnits line + fromMinorUnits line + fractional
+  // rejection line; every value is a pinned literal, so no
+  // normalization is needed.
+  assert.equal(a.length, 4);
   assert.deepEqual(a, b);
 });
 
@@ -2504,7 +2577,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 568);
+  assert.equal(out.trimEnd().split("\n").length, 573);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

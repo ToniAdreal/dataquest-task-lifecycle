@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 700 tests, all local
+npm test   # 702 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -75,7 +75,11 @@ total is the hand-computed 16349, a minor-unit display branch that
 runs the settlement amounts through `formatMinorUnits` — eleven fixed
 vectors (positive, zero, negative, large, up to MAX_SAFE_INTEGER)
 plus the finance-pass total itself, 1634900 minor units rendered
-"16349.00", so a statement prints one pinned format — a dispatch subscription branch
+"16349.00", so a statement prints one pinned format — a minor-unit
+conversion branch that turns the finance-pass total 16349 major units
+into 1634900 integer cents with `toMinorUnits` and back with
+`fromMinorUnits`, and shows a fractional minor unit (1634900.5)
+rejected fail-fast — a dispatch subscription branch
 that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
 dispatches in order, each `(event, from, to)` matching the audit
