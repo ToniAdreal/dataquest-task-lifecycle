@@ -1875,6 +1875,9 @@ if (
 //   EXPIRE has an edge from OPEN and CAPTURING but not IN_REVIEW, so
 //   expired = [true, false, true, true], only WD-06 carries an error,
 //   and the post-states are EXPIRED / IN_REVIEW / EXPIRED / EXPIRED.
+//   Each successful outcome also carries `entry`, checked against
+//   that task's history last entry (seq/event/from/to/at); the
+//   failed WD-06 outcome must carry no entry.
 //   actOnStaleTasks with the default ABANDON action attempts the 4
 //   stale tasks in batch order (WD-01 OPEN, WD-04 ACCEPTED, WD-06
 //   IN_REVIEW, WD-08 OPEN). ABANDON has an edge only from ACCEPTED
@@ -1904,6 +1907,34 @@ function checkExpireResults(
     results[3].error !== undefined
   ) {
     throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  // Audit-entry check (backlog #626, the dataquest mirror of the
+  // escrow #625 check): every successful outcome's `entry` must be
+  // exactly the EXPIRE audit entry the dispatch appended — i.e. the
+  // task history's last entry on seq/event/from/to/at — and the one
+  // failed outcome (WD-06, IN_REVIEW) must carry no entry at all,
+  // because a failed dispatch appends nothing.
+  for (const result of results) {
+    const last = result.task.history[result.task.history.length - 1];
+    if (result.expired) {
+      const entry = result.entry;
+      if (
+        entry === undefined ||
+        entry.seq !== last.seq ||
+        entry.event !== last.event ||
+        entry.from !== last.from ||
+        entry.to !== last.to ||
+        entry.at !== last.at
+      ) {
+        throw new Error(
+          `benchmark self-check failed: ${where} (result.entry does not match history last entry for ${result.task.id})`,
+        );
+      }
+    } else if (result.entry !== undefined) {
+      throw new Error(
+        `benchmark self-check failed: ${where} (failed outcome for ${result.task.id} must carry no entry)`,
+      );
+    }
   }
 }
 function checkStaleResults(

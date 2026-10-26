@@ -1986,7 +1986,10 @@ per-iteration self-checks pin the hand-counted outcomes (expire:
 WD-01, WD-10 and WD-12 expire, WD-06 — IN_REVIEW, which has no
 `EXPIRE` edge — fails in isolation; stale action: only WD-04 —
 ACCEPTED — is abandoned, WD-01 / WD-08 (OPEN) and WD-06 (IN_REVIEW)
-fail in isolation) and the resulting task states. The
+fail in isolation) and the resulting task states. The expire
+self-check additionally pins each successful outcome's `entry`
+against that task's history last entry (seq/event/from/to/at),
+and requires the failed WD-06 outcome to carry no entry. The
 `parsePayoutRetryAfter` path parses a fixed 11-value corpus on every
 iteration under one injected fixed `nowMs`
 (`2026-06-01T12:00:00.000Z`, never the wall clock, and no network):

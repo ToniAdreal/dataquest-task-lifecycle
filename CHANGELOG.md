@@ -11,6 +11,14 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark self-check for `expireOverdueTasks` audit entries
+  (backlog #626, the dataquest mirror of the escrow #625 check):
+  `checkExpireResults` now also requires every successful
+  outcome's `entry` to equal that task's history last entry on
+  seq/event/from/to/at, and requires the failed WD-06 outcome
+  (IN_REVIEW, no `EXPIRE` edge) to carry no entry. The
+  Benchmarks table is not refreshed for this change: the added
+  assertions do not change the measured rows' inputs.
 - A benchmark path for minor-unit conversion (backlog #624):
   `toMinorUnits`/`fromMinorUnits` over a fixed 4-vector corpus —
   the finance-pass total (16349 major units ↔ 1634900 minor
