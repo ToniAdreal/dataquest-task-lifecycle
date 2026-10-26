@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for minor-unit display formatting (backlog
+  #614): `formatMinorUnits` over the fixed 12-vector demo
+  corpus — the eleven demo vectors (positive, zero, negative,
+  -0 rendering without a minus sign, large, and
+  `MAX_SAFE_INTEGER` exact through integer arithmetic) plus
+  the finance-pass total (1634900 minor units rendering
+  "16349.00") — with every vector self-checked per iteration
+  against the demo's pinned strings and a fractional input
+  pinned once outside the timed loop to its exact
+  `minor units must be an integer` fail-fast error. This run
+  measured ~393,323 ops/sec (2.54 µs/op) for the new row on
+  Node v24.22.1 / AMD EPYC 9D25. The Benchmarks table is
+  refreshed from this run (61 rows).
 - A fan-out limits segment in the CLI demo (backlog
   #607): the two call-level guards of
   `deliverPayoutWebhookToMany` that the earlier fan-out
