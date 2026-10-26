@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for actor-filter listing (backlog
+  #604): `tasksByActor` over a fixed 6-task mixed-actor batch
+  — the timed loop filters for "moderator" and self-checks
+  the hand-pinned slice [BENCH-ACTOR-01, BENCH-ACTOR-02,
+  BENCH-ACTOR-04] in input order holding the same task
+  objects (the twice-touched task matches exactly once, the
+  anonymous task and the no-history task match nothing),
+  with the contributor contrast [BENCH-ACTOR-02,
+  BENCH-ACTOR-05] and the empty-actor fail-fast pinned once
+  outside the timed loop, mirroring the #589 demo semantics.
+  This run measured ~103,611 ops/sec (9.65 µs/op) for the
+  new row on Node v24.22.1 / AMD EPYC 9D25. The Benchmarks
+  table is refreshed from this run (60 rows).
 - An X-Event-Id header segment in the CLI demo (backlog
   #601): one more PAID task (DEMO-055) whose signed payout
   webhook is delivered twice to a real loopback receiver — the
