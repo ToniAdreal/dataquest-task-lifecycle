@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for minor-unit conversion (backlog #624):
+  `toMinorUnits`/`fromMinorUnits` over a fixed 4-vector corpus —
+  the finance-pass total (16349 major units ↔ 1634900 minor
+  units), zero, a negative amount, and the 0.33 round-trip —
+  plus the 0.333 nearest-cent rounding vector, with every vector
+  self-checked per iteration in both directions and a fractional
+  minor input (1634900.5) pinned once outside the timed loop to
+  its exact `minor units must be an integer` fail-fast error.
+  This run measured ~11,609,098 ops/sec (0.09 µs/op) for the new
+  row on Node v24.22.1 / AMD EPYC 9D25. The Benchmarks table is
+  refreshed from this run (62 rows).
 - A minor-unit conversion branch in the CLI demo (backlog #623):
   after the `formatMinorUnits` display branch, the demo turns the
   finance-pass total 16349 major units into 1634900 integer cents
