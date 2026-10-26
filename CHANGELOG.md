@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for payout webhook fan-out limits (backlog #628):
+  `deliverPayoutWebhookToMany` under `maxEndpoints` /
+  `overallDeadlineMs` — the timed loop runs the 50 ms deadline case
+  (3 endpoints, two answering 200 at once and one hanging until its
+  abort signal fires), self-checking the two kept
+  `{ ok: true, attempts: 1, status: 200 }` results, the
+  deadline-stopped `{ ok: false, attempts: 1 }` result carrying the
+  deadline timeout error, delivered 2 / failed 1 with
+  `deadlineExceeded: true`, and exactly 3 fetch calls; the over-cap
+  case (3 endpoints under `maxEndpoints: 2`) is pinned once outside
+  the timed loop to the exact configuration error with zero fetch
+  calls. The new row's throughput is deadline-bound by the pinned
+  50 ms wait, not a measure of fan-out overhead. The Benchmarks
+  table is refreshed from this run.
 - A benchmark self-check for `expireOverdueTasks` audit entries
   (backlog #626, the dataquest mirror of the escrow #625 check):
   `checkExpireResults` now also requires every successful

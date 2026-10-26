@@ -1058,6 +1058,22 @@
  *      rounded amount. Pure, so no fixture rebuild is
  *      needed. No network, no randomness, and no wall
  *      clock.
+ *  55. Payout webhook fan-out limits — `deliverPayoutWebhookToMany`
+ *      under `maxEndpoints` / `overallDeadlineMs`: the timed loop
+ *      runs the deadline case (3 endpoints, two answering 200 at
+ *      once and one hanging until its abort signal fires, under a
+ *      pinned 50 ms overall budget), self-checking the two kept
+ *      { ok: true, attempts: 1, status: 200 } results, the
+ *      deadline-stopped { ok: false, attempts: 1 } result carrying
+ *      the deadline timeout error (not the plain abort text),
+ *      delivered 2 / failed 1 with deadlineExceeded true, and
+ *      exactly 3 fetch calls, one per endpoint. Outside the timed
+ *      loop, 3 endpoints under maxEndpoints 2 throw the pinned
+ *      over-cap configuration error with zero fetch calls. Honest
+ *      limit: the 50 ms deadline wait is the behaviour under test
+ *      itself, so this row's throughput is deadline-bound, not a
+ *      measure of fan-out overhead — compare the plain 4-endpoint
+ *      row for that. No elapsed wall-clock duration is asserted.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -2026,6 +2042,139 @@ for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
   if (!call || !verifyPayoutWebhook(call.body, call.signature, endpoint.secret)) {
     throw new Error(
       `benchmark fixture failed: fan-out endpoint ${i} signature does not verify`,
+    );
+  }
+}
+
+// Fan-out limits fixture: the same PAID task fanned out to 3 fixed
+// endpoints under the two call-level guards of
+// `deliverPayoutWebhookToMany` that the plain fan-out row never
+// exercises — `maxEndpoints` and `overallDeadlineMs` (see the CLI
+// demo's fan-out limits segment and
+// test/payoutWebhookFanoutLimits.test.ts for the same contract).
+// Hand-written expectations — written out here from the
+// DeliverPayoutWebhookToManyOptions docs in
+// src/settlementWebhook.ts, never derived by calling
+// deliverPayoutWebhookToMany itself:
+//   - outside the timed loop, 3 endpoints under maxEndpoints 2
+//     throw exactly
+//     "cannot deliver payout webhook to many endpoints: 3
+//     endpoints exceed maxEndpoints 2" before any request is made
+//     (0 fetch calls) — the cap is a call-level configuration
+//     error, not a per-endpoint outcome;
+//   - inside the timed loop, under overallDeadlineMs 50, the two
+//     answering endpoints report { ok: true, attempts: 1,
+//     status: 200 } and keep their results, the hanging endpoint
+//     (risk, which only settles when its abort signal fires)
+//     reports { ok: false, attempts: 1, error: "payout webhook
+//     delivery timed out: overall deadline of 50ms exceeded" }
+//     with no status, the aggregate reports delivered 2 /
+//     failed 1 with deadlineExceeded true, and exactly 3 fetch
+//     calls are made, one per endpoint — the deadline aborts the
+//     in-flight attempt, it does not retry it.
+// Honest limit, as in the timeout row: the 50 ms deadline wait is
+// the behaviour under test itself, at its pinned short length, so
+// this row's throughput is deadline-bound (~20 ops/sec), not a
+// measure of fan-out overhead — compare the plain 4-endpoint row
+// for that. No elapsed wall-clock duration is asserted.
+const FANOUT_LIMITS_MAX_ENDPOINTS = 2;
+const FANOUT_LIMITS_OVERALL_DEADLINE_MS = 50;
+const FANOUT_LIMITS_OVER_CAP_ERROR =
+  "cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints 2";
+const FANOUT_LIMITS_DEADLINE_ERROR =
+  "payout webhook delivery timed out: overall deadline of 50ms exceeded";
+const FANOUT_LIMITS_ENDPOINTS: PayoutWebhookEndpoint[] = [
+  { url: "https://billing.example.com/hooks/payout", secret: "bench-fanout-limits-secret-billing" },
+  { url: "https://risk.example.com/hooks/payout", secret: "bench-fanout-limits-secret-risk" },
+  { url: "https://notifications.example.com/hooks/payout", secret: "bench-fanout-limits-secret-notifications" },
+];
+let fanoutLimitsCalls = 0;
+const fanoutLimitsFetch: PayoutWebhookFetchImpl = async (url, init) => {
+  fanoutLimitsCalls++;
+  if (url === FANOUT_LIMITS_ENDPOINTS[1].url) {
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal;
+      if (signal === null || signal === undefined) {
+        reject(new Error("benchmark hanging fetch received no request signal"));
+        return;
+      }
+      if (signal.aborted) {
+        reject(new Error("benchmark hanging fetch aborted"));
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => reject(new Error("benchmark hanging fetch aborted")),
+        { once: true },
+      );
+    });
+  }
+  return new Response("{}", { status: 200 });
+};
+const fanoutLimitsNoSleep = async () => {};
+
+async function runFanoutLimits() {
+  fanoutLimitsCalls = 0;
+  const out = await deliverPayoutWebhookToMany(paidTask, FANOUT_LIMITS_ENDPOINTS, {
+    fetchImpl: fanoutLimitsFetch,
+    sleepImpl: fanoutLimitsNoSleep,
+    backoffMs: 0,
+    overallDeadlineMs: FANOUT_LIMITS_OVERALL_DEADLINE_MS,
+    now: WEBHOOK_NOW,
+    eventId: WEBHOOK_EVENT_ID,
+  });
+  if (
+    out.results.length !== FANOUT_LIMITS_ENDPOINTS.length ||
+    out.delivered !== 2 ||
+    out.failed !== 1 ||
+    out.deadlineExceeded !== true ||
+    out.results[0].ok !== true ||
+    out.results[0].attempts !== 1 ||
+    out.results[0].status !== 200 ||
+    out.results[0].error !== undefined ||
+    out.results[1].ok !== false ||
+    out.results[1].attempts !== 1 ||
+    out.results[1].status !== undefined ||
+    out.results[1].error !== FANOUT_LIMITS_DEADLINE_ERROR ||
+    out.results[2].ok !== true ||
+    out.results[2].attempts !== 1 ||
+    out.results[2].status !== 200 ||
+    out.results[2].error !== undefined ||
+    fanoutLimitsCalls !== FANOUT_LIMITS_ENDPOINTS.length
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany fan-out limits",
+    );
+  }
+  return out;
+}
+
+// One-time fixture validation (outside the timed loop): the
+// deadline case runs once here, and the over-cap call must throw
+// the pinned configuration error with zero fetch calls.
+await runFanoutLimits();
+{
+  let overCapCalls = 0;
+  const overCapFetch: PayoutWebhookFetchImpl = async () => {
+    overCapCalls++;
+    return new Response("{}", { status: 200 });
+  };
+  let overCapError = "";
+  try {
+    await deliverPayoutWebhookToMany(paidTask, FANOUT_LIMITS_ENDPOINTS, {
+      fetchImpl: overCapFetch,
+      sleepImpl: fanoutLimitsNoSleep,
+      backoffMs: 0,
+      maxEndpoints: FANOUT_LIMITS_MAX_ENDPOINTS,
+      now: WEBHOOK_NOW,
+      eventId: WEBHOOK_EVENT_ID,
+    });
+  } catch (err) {
+    overCapError = err instanceof Error ? err.message : String(err);
+  }
+  if (overCapError !== FANOUT_LIMITS_OVER_CAP_ERROR || overCapCalls !== 0) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany maxEndpoints over-cap rejection",
     );
   }
 }
@@ -6843,6 +6992,12 @@ async function benchDeliverPayoutWebhookToMany(): Promise<number> {
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToManyLimits(): Promise<number> {
+  return measureAsync(async () => {
+    await runFanoutLimits();
+  }, ITERATIONS);
+}
+
 function benchDeliverPayoutWebhook(): Promise<number> {
   return measureAsync(async () => {
     await runSingleDelivery();
@@ -7537,6 +7692,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
+  { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
   { path: "deliverPayoutWebhook (single endpoint)", ops: await benchDeliverPayoutWebhook() },
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },
   { path: "deliverPayoutWebhook AbortSignal pre-abort", ops: await benchDeliverPayoutWebhookAbortPre() },
