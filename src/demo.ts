@@ -1117,6 +1117,18 @@ export interface DemoResult {
   fanoutTimeoutInvalidFetchCalls: number;
   /** Aggregate result of the no-override fan-out call (3 delivered, 0 failed). */
   fanoutTimeoutPlainResult: DeliverPayoutWebhookToManyResult;
+  /** The fan-out limits segment's pinned `maxEndpoints` cap (2). */
+  fanoutLimitsMaxEndpoints: number;
+  /** The fan-out limits segment's pinned `overallDeadlineMs` budget (50). */
+  fanoutLimitsOverallDeadlineMs: number;
+  /** Error thrown by the over-cap fan-out call ("" if it delivered). */
+  fanoutLimitsOverCapError: string;
+  /** Fetch calls the over-cap fan-out call made (0 — fail-fast). */
+  fanoutLimitsOverCapFetchCalls: number;
+  /** Aggregate result of the deadline fan-out call (2 delivered, 1 deadline-stopped). */
+  fanoutLimitsDeadlineResult: DeliverPayoutWebhookToManyResult;
+  /** Fetch calls the deadline fan-out call made (3 — one per endpoint). */
+  fanoutLimitsDeadlineFetchCalls: number;
   /** Guarded task of the closing expectedSeq segment (DEMO-033, CAPTURING, 3 entries). */
   expectedSeqTask: TaskLifecycle;
   /** Return of DEMO-033's guarded START_CAPTURE (CAPTURING). */
@@ -5533,6 +5545,158 @@ export async function runDemo(): Promise<DemoResult> {
     `  no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: ${fanoutTimeoutPlainResult.delivered} delivered, ${fanoutTimeoutPlainResult.failed} failed (omitting the override preserves the exact pre-override fan-out behaviour)`,
   );
 
+  // Payout webhook fan-out limits segment: the two
+  // call-level guards of deliverPayoutWebhookToMany
+  // (#559) that the fan-out segment above never
+  // exercised — it fanned out to 3 endpoints with no
+  // limits set, and the timeout-override segment only
+  // varied per-endpoint timeoutMs. Here the same
+  // task's payout event is fanned out under both
+  // guards, with injected fetches and zero real
+  // network:
+  //   - maxEndpoints: 3 endpoints under a cap of 2
+  //     throw a caller configuration error before
+  //     any request is made (zero fetch calls) — an
+  //     unbounded fan-out is how one settlement
+  //     event turns into an endpoint explosion.
+  //   - overallDeadlineMs: a 50 ms whole-call
+  //     budget with two endpoints answering 200 at
+  //     once and one hanging endpoint that only
+  //     settles when its abort signal fires. The
+  //     completed endpoints keep their results, the
+  //     stopped endpoint reports the deadline
+  //     timeout error (not the plain abort text),
+  //     and the aggregate carries
+  //     deadlineExceeded: true.
+  // Hand-written expectations — written out here
+  // from the DeliverPayoutWebhookToManyOptions docs
+  // and the fan-out limits tests, never derived by
+  // calling deliverPayoutWebhookToMany itself. The
+  // segment asserts all of this here, outside the
+  // printed lines: a limits verdict that drifted
+  // would fail the demo itself, not just a test.
+  // Honest limit, as in the timeout segments: the
+  // 50 ms deadline wait is the behaviour under
+  // test itself, at its pinned short length; no
+  // elapsed wall-clock duration is asserted.
+  const FANOUT_LIMITS_NOW = new Date("2026-03-22T09:00:00.000Z");
+  const FANOUT_LIMITS_EVENT_ID = "evt_demo_fanout_limits_001";
+  const fanoutLimitsMaxEndpoints = 2;
+  const fanoutLimitsOverallDeadlineMs = 50;
+  const fanoutLimitsEndpoints = [
+    {
+      name: "billing",
+      url: "https://billing.example.com/hooks/payout",
+      secret: "demo-fanout-limits-billing-secret-do-not-use-in-production",
+    },
+    {
+      name: "risk",
+      url: "https://risk.example.com/hooks/payout",
+      secret: "demo-fanout-limits-risk-secret-do-not-use-in-production",
+    },
+    {
+      name: "notifications",
+      url: "https://notifications.example.com/hooks/payout",
+      secret: "demo-fanout-limits-notifications-secret-do-not-use-in-production",
+    },
+  ] as const;
+  // Over-cap call: 3 endpoints under maxEndpoints 2.
+  // The counting fetch must never fire: the cap is a
+  // call-level configuration error, checked before
+  // any request, exactly like an empty endpoints
+  // array or a non-PAID task.
+  let fanoutLimitsOverCapFetchCalls = 0;
+  let fanoutLimitsOverCapError = "";
+  try {
+    await deliverPayoutWebhookToMany(
+      task,
+      fanoutLimitsEndpoints.map(({ url, secret }) => ({ url, secret })),
+      {
+        fetchImpl: (async () => {
+          fanoutLimitsOverCapFetchCalls += 1;
+          return new Response("{}", { status: 200 });
+        }) as PayoutWebhookFetchImpl,
+        sleepImpl: async () => {},
+        backoffMs: 0,
+        maxEndpoints: fanoutLimitsMaxEndpoints,
+        now: FANOUT_LIMITS_NOW,
+        eventId: FANOUT_LIMITS_EVENT_ID,
+      },
+    );
+  } catch (err) {
+    fanoutLimitsOverCapError = err instanceof Error ? err.message : String(err);
+  }
+  // Deadline call: billing + notifications answer 200
+  // at once; risk hangs and only settles when the
+  // overall-deadline abort fires (its fetch rejects
+  // on the abort signal, exactly like a real fetch).
+  let fanoutLimitsDeadlineFetchCalls = 0;
+  const fanoutLimitsDeadlineResult = await deliverPayoutWebhookToMany(
+    task,
+    fanoutLimitsEndpoints.map((ep) =>
+      ep.name === "risk"
+        ? {
+            url: ep.url,
+            secret: ep.secret,
+            fetchImpl: ((_url: string, init: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                fanoutLimitsDeadlineFetchCalls += 1;
+                init.signal?.addEventListener(
+                  "abort",
+                  () => reject(new Error("The operation was aborted")),
+                  { once: true },
+                );
+              })) as PayoutWebhookFetchImpl,
+          }
+        : { url: ep.url, secret: ep.secret },
+    ),
+    {
+      fetchImpl: (async () => {
+        fanoutLimitsDeadlineFetchCalls += 1;
+        return new Response("{}", { status: 200 });
+      }) as PayoutWebhookFetchImpl,
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      overallDeadlineMs: fanoutLimitsOverallDeadlineMs,
+      now: FANOUT_LIMITS_NOW,
+      eventId: FANOUT_LIMITS_EVENT_ID,
+    },
+  );
+  if (
+    fanoutLimitsOverCapError !==
+      `cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints ${fanoutLimitsMaxEndpoints}` ||
+    fanoutLimitsOverCapFetchCalls !== 0 ||
+    fanoutLimitsDeadlineResult.delivered !== 2 ||
+    fanoutLimitsDeadlineResult.failed !== 1 ||
+    fanoutLimitsDeadlineResult.deadlineExceeded !== true ||
+    fanoutLimitsDeadlineResult.results.length !== 3 ||
+    fanoutLimitsDeadlineResult.results[0].ok !== true ||
+    fanoutLimitsDeadlineResult.results[0].attempts !== 1 ||
+    fanoutLimitsDeadlineResult.results[0].status !== 200 ||
+    fanoutLimitsDeadlineResult.results[0].error !== undefined ||
+    fanoutLimitsDeadlineResult.results[1].ok !== false ||
+    fanoutLimitsDeadlineResult.results[1].attempts !== 1 ||
+    fanoutLimitsDeadlineResult.results[1].status !== undefined ||
+    fanoutLimitsDeadlineResult.results[1].error !==
+      `payout webhook delivery timed out: overall deadline of ${fanoutLimitsOverallDeadlineMs}ms exceeded` ||
+    fanoutLimitsDeadlineResult.results[2].ok !== true ||
+    fanoutLimitsDeadlineResult.results[2].attempts !== 1 ||
+    fanoutLimitsDeadlineResult.results[2].status !== 200 ||
+    fanoutLimitsDeadlineResult.results[2].error !== undefined ||
+    fanoutLimitsDeadlineFetchCalls !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhookToMany fan-out limits do not match the hand-pinned contract (3 endpoints under maxEndpoints 2 must throw \"cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints 2\" before any request, with zero fetch calls; and under overallDeadlineMs 50 the two answering endpoints must report { ok: true, attempts: 1, status: 200 } while the hanging endpoint reports { ok: false, attempts: 1, error: \"payout webhook delivery timed out: overall deadline of 50ms exceeded\" } with deadlineExceeded true and exactly 3 fetch calls, one per endpoint)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook fan-out limits (deliverPayoutWebhookToMany maxEndpoints / overallDeadlineMs guards — injected fetches, no real network):",
+    `  shared eventId: ${FANOUT_LIMITS_EVENT_ID}, shared at: ${FANOUT_LIMITS_NOW.toISOString()} (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)`,
+    `  over-cap, fail-fast (maxEndpoints ${fanoutLimitsMaxEndpoints} for 3 endpoints): the call throws before any request -> error="${fanoutLimitsOverCapError}"; fetch calls: ${fanoutLimitsOverCapFetchCalls} (the cap is call-level configuration, not a per-endpoint outcome — a caller that miscounts its receivers learns it before a single endpoint is contacted)`,
+    `  deadline, stopped endpoint kept honest (overallDeadlineMs ${fanoutLimitsOverallDeadlineMs}): billing ok=${fanoutLimitsDeadlineResult.results[0].ok} attempts=${fanoutLimitsDeadlineResult.results[0].attempts} status=${fanoutLimitsDeadlineResult.results[0].status}, notifications ok=${fanoutLimitsDeadlineResult.results[2].ok} attempts=${fanoutLimitsDeadlineResult.results[2].attempts} status=${fanoutLimitsDeadlineResult.results[2].status} — both completed before the budget expired and keep their results; risk ok=${fanoutLimitsDeadlineResult.results[1].ok} attempts=${fanoutLimitsDeadlineResult.results[1].attempts} error="${fanoutLimitsDeadlineResult.results[1].error}" (the deadline timeout text, not the plain abort text); fan-out: ${fanoutLimitsDeadlineResult.delivered} delivered, ${fanoutLimitsDeadlineResult.failed} failed, deadlineExceeded=${fanoutLimitsDeadlineResult.deadlineExceeded}; fetch calls: ${fanoutLimitsDeadlineFetchCalls} (one per endpoint — the deadline aborts the in-flight attempt, it does not retry it)`,
+  );
+
   // Dispatch expectedSeq optimistic concurrency segment
   // (closing): every dispatch above moves its task
   // forward on the caller's word alone. None of them
@@ -6383,7 +6547,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  body check: verifyPayoutWebhook over the captured wire body: ${eventIdHeaderBodyVerifies}; the verified body's eventId ${eventIdHeaderEventId} equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, lines };
 }
 
 async function main(): Promise<void> {

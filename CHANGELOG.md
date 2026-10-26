@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A fan-out limits segment in the CLI demo (backlog
+  #607): the two call-level guards of
+  `deliverPayoutWebhookToMany` that the earlier fan-out
+  segments never exercised — 3 endpoints under a
+  `maxEndpoints` cap of 2 throw the pinned `3 endpoints
+  exceed maxEndpoints 2` configuration error before any
+  request, with zero fetch calls; and under an
+  `overallDeadlineMs` budget of 50, two endpoints
+  answering 200 at once keep their results while the
+  hanging endpoint reports the deadline timeout error
+  with `deadlineExceeded: true`. Any drift from the
+  hand-written expectations fails the demo fast
+  (non-zero exit), and the demo's printed line count
+  grows from 560 to 565.
 - A benchmark path for actor-filter listing (backlog
   #604): `tasksByActor` over a fixed 6-task mixed-actor batch
   — the timed loop filters for "moderator" and self-checks

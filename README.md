@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 696 tests, all local
+npm test   # 698 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1181,6 +1181,18 @@ override of 0 is reported for its endpoint alone as
 with zero fetch calls to it; and a fan-out with no override
 anywhere behaves exactly as before. No real network, no
 randomness, and no elapsed wall-clock duration is asserted.
+The demo then continues with a fan-out limits segment: the
+two call-level guards of `deliverPayoutWebhookToMany` that
+the earlier fan-out segments never exercised — 3 endpoints
+under a `maxEndpoints` cap of 2 throw the pinned
+`3 endpoints exceed maxEndpoints 2` configuration error
+before any request, with zero fetch calls; and under an
+`overallDeadlineMs` budget of 50, two endpoints answering
+200 at once keep their results while the hanging endpoint
+reports `{ ok: false, attempts: 1, error: "payout webhook
+delivery timed out: overall deadline of 50ms exceeded" }`
+with the aggregate `deadlineExceeded: true`. No elapsed
+wall-clock duration is asserted.
 
 Multi-endpoint fan-out is included too:
 `deliverPayoutWebhookToMany(task, endpoints)` delivers ONE settlement

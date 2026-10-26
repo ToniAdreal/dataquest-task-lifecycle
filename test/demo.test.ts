@@ -615,6 +615,11 @@ Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves ti
   invalid override, isolated failure (notifications): per-endpoint timeoutMs 0 -> its result is exactly { ok: false, attempts: 0, error: "cannot deliver payout webhook: timeoutMs must be a positive number, got 0" }; fetch calls to that endpoint: 0; billing and slow (answering 200 at once in this call) are unchanged at ok=true attempts=1 status=200 — a bad per-endpoint override is reported for its own endpoint only, where the same value at call level would throw for the whole call before any request
   no overrides anywhere: no endpoint pins timeoutMs and the call sets none either (the 5000 ms default applies) -> all three endpoints ok=true attempts=1 status=200; fan-out: 3 delivered, 0 failed (omitting the override preserves the exact pre-override fan-out behaviour)
 
+Payout webhook fan-out limits (deliverPayoutWebhookToMany maxEndpoints / overallDeadlineMs guards — injected fetches, no real network):
+  shared eventId: evt_demo_fanout_limits_001, shared at: <timestamp> (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)
+  over-cap, fail-fast (maxEndpoints 2 for 3 endpoints): the call throws before any request -> error="cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints 2"; fetch calls: 0 (the cap is call-level configuration, not a per-endpoint outcome — a caller that miscounts its receivers learns it before a single endpoint is contacted)
+  deadline, stopped endpoint kept honest (overallDeadlineMs 50): billing ok=true attempts=1 status=200, notifications ok=true attempts=1 status=200 — both completed before the budget expired and keep their results; risk ok=false attempts=1 error="payout webhook delivery timed out: overall deadline of 50ms exceeded" (the deadline timeout text, not the plain abort text); fan-out: 2 delivered, 1 failed, deadlineExceeded=true; fetch calls: 3 (one per endpoint — the deadline aborts the in-flight attempt, it does not retry it)
+
 Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):
   correct guard (DEMO-033): driven PUBLISH -> ACCEPT under fixed timestamps to seq 2 (state ACCEPTED, history entries: 2); START_CAPTURE with expectedSeq 2 at <timestamp> -> CAPTURING, history entries: 3; last entry: seq 3 START_CAPTURE ACCEPTED -> CAPTURING by contributor (the caller pinned the seq it based its decision on and the task was still there, so exactly one step advances)
   stale guard (DEMO-034): the same pinned 2-entry history; START_CAPTURE with expectedSeq 1 -> rejected: "dispatch conflict: expected seq 1 but task is at seq 2"; state after: ACCEPTED, history entries: 2 (the guard runs before every other dispatch check and changes nothing — no state move, no history entry — so a writer holding a stale snapshot fails loudly instead of advancing a state it never saw, and re-reading the task and retrying with the fresh seq works)
@@ -662,7 +667,7 @@ Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver �
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 560);
+  assert.equal(lines.length, 565);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2496,7 +2501,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 560);
+  assert.equal(out.trimEnd().split("\n").length, 565);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -6019,6 +6024,170 @@ test("demo payout webhook fan-out timeout override segment is deterministic: two
     b.fanoutTimeoutInvalidFetchCalls,
   );
   assert.deepEqual(a.fanoutTimeoutPlainResult, b.fanoutTimeoutPlainResult);
+});
+
+test("demo shows the payout webhook fan-out limits segment in-process: an over-cap fan-out throws before any request, and a deadline stops only the hanging endpoint", async () => {
+  const {
+    task,
+    fanoutLimitsMaxEndpoints,
+    fanoutLimitsOverallDeadlineMs,
+    fanoutLimitsOverCapError,
+    fanoutLimitsOverCapFetchCalls,
+    fanoutLimitsDeadlineResult,
+    fanoutLimitsDeadlineFetchCalls,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from
+  // the DeliverPayoutWebhookToManyOptions docs in
+  // src/settlementWebhook.ts and
+  // test/payoutWebhookFanoutLimits.test.ts, never
+  // derived from the demo's own fan-out calls.
+  assert.equal(fanoutLimitsMaxEndpoints, 2);
+  assert.equal(fanoutLimitsOverallDeadlineMs, 50);
+  assert.equal(
+    fanoutLimitsOverCapError,
+    "cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints 2",
+  );
+  assert.equal(fanoutLimitsOverCapFetchCalls, 0);
+  assert.deepEqual(fanoutLimitsDeadlineResult, {
+    results: [
+      { ok: true, attempts: 1, status: 200 },
+      {
+        ok: false,
+        attempts: 1,
+        error:
+          "payout webhook delivery timed out: overall deadline of 50ms exceeded",
+      },
+      { ok: true, attempts: 1, status: 200 },
+    ],
+    delivered: 2,
+    failed: 1,
+    deadlineExceeded: true,
+  });
+  assert.equal(fanoutLimitsDeadlineFetchCalls, 3);
+  // Independent checks built in the test — the demo
+  // segment is not self-certifying: the same two
+  // fan-outs are driven here with fresh counting
+  // fetches. The hanging fetch only settles when its
+  // abort signal fires, exactly like the real fetch;
+  // no elapsed duration is asserted anywhere — the
+  // pinned 50 ms deadline is the behaviour under test
+  // itself.
+  const NOW = new Date("2026-03-22T09:00:00.000Z");
+  const EVENT_ID = "evt_demo_fanout_limits_001";
+  const endpoints = [
+    { url: "https://billing.example.com/hooks/payout", secret: "test-secret-billing" },
+    { url: "https://risk.example.com/hooks/payout", secret: "test-secret-risk" },
+    { url: "https://notifications.example.com/hooks/payout", secret: "test-secret-notifications" },
+  ];
+  let independentOverCapCalls = 0;
+  await assert.rejects(
+    () =>
+      deliverPayoutWebhookToMany(
+        task,
+        endpoints,
+        {
+          fetchImpl: (async () => {
+            independentOverCapCalls += 1;
+            return new Response("{}", { status: 200 });
+          }) as never,
+          sleepImpl: async () => {},
+          backoffMs: 0,
+          maxEndpoints: 2,
+          now: NOW,
+          eventId: EVENT_ID,
+        },
+      ),
+    /3 endpoints exceed maxEndpoints 2/,
+  );
+  assert.equal(independentOverCapCalls, 0);
+  let independentDeadlineCalls = 0;
+  const independentDeadline = await deliverPayoutWebhookToMany(
+    task,
+    endpoints.map((ep) =>
+      ep.url === endpoints[1].url
+        ? {
+            url: ep.url,
+            secret: ep.secret,
+            fetchImpl: ((_url: string, init: RequestInit) =>
+              new Promise<Response>((_resolve, reject) => {
+                independentDeadlineCalls += 1;
+                init.signal?.addEventListener(
+                  "abort",
+                  () => reject(new Error("The operation was aborted")),
+                  { once: true },
+                );
+              })) as never,
+          }
+        : { url: ep.url, secret: ep.secret },
+    ),
+    {
+      fetchImpl: (async () => {
+        independentDeadlineCalls += 1;
+        return new Response("{}", { status: 200 });
+      }) as never,
+      sleepImpl: async () => {},
+      backoffMs: 0,
+      overallDeadlineMs: 50,
+      now: NOW,
+      eventId: EVENT_ID,
+    },
+  );
+  assert.deepEqual(independentDeadline, fanoutLimitsDeadlineResult);
+  assert.equal(independentDeadlineCalls, 3);
+  // The segment follows the fan-out timeout override
+  // segment and prints its lines verbatim, and the
+  // dispatch expectedSeq segment follows it.
+  const fanoutLimitsAt = text.indexOf(
+    "Payout webhook fan-out limits (deliverPayoutWebhookToMany maxEndpoints / overallDeadlineMs guards — injected fetches, no real network):",
+  );
+  assert.ok(
+    fanoutLimitsAt >
+      text.indexOf(
+        "Payout webhook fan-out timeout overrides (deliverPayoutWebhookToMany resolves timeoutMs per endpoint — endpoint.timeoutMs ?? call-level timeoutMs, injected fetches — no real network):",
+      ),
+    "fan-out limits segment must follow the fan-out timeout override segment",
+  );
+  for (const line of [
+    `  shared eventId: evt_demo_fanout_limits_001, shared at: 2026-03-22T09:00:00.000Z (one logical event for all three endpoints in each call, as in the fan-out segment above; every endpoint signed with its own secret)`,
+    `  over-cap, fail-fast (maxEndpoints 2 for 3 endpoints): the call throws before any request -> error="cannot deliver payout webhook to many endpoints: 3 endpoints exceed maxEndpoints 2"; fetch calls: 0 (the cap is call-level configuration, not a per-endpoint outcome — a caller that miscounts its receivers learns it before a single endpoint is contacted)`,
+    `  deadline, stopped endpoint kept honest (overallDeadlineMs 50): billing ok=true attempts=1 status=200, notifications ok=true attempts=1 status=200 — both completed before the budget expired and keep their results; risk ok=false attempts=1 error="payout webhook delivery timed out: overall deadline of 50ms exceeded" (the deadline timeout text, not the plain abort text); fan-out: 2 delivered, 1 failed, deadlineExceeded=true; fetch calls: 3 (one per endpoint — the deadline aborts the in-flight attempt, it does not retry it)`,
+  ]) {
+    assert.ok(text.includes(line), `missing fan-out limits line: ${line}`);
+  }
+  assert.ok(
+    text.indexOf(
+      "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+    ) > fanoutLimitsAt,
+    "expectedSeq segment must follow the fan-out limits segment",
+  );
+});
+
+test("demo payout webhook fan-out limits segment is deterministic: two runs print byte-identical fan-out limits lines", async () => {
+  const segment = (ls: string[]) => {
+    const start = ls.indexOf("Payout webhook fan-out limits (deliverPayoutWebhookToMany maxEndpoints / overallDeadlineMs guards — injected fetches, no real network):");
+    return ls.slice(start, start + 4);
+  };
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + shared / over-cap / deadline lines;
+  // every value in the segment is a pinned literal
+  // (the pinned cap 2, the pinned 50 ms deadline,
+  // the pinned error texts, the fetch counts), so no
+  // normalization is needed — the only real wait is
+  // the pinned 50 ms deadline itself, whose duration
+  // is never printed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.fanoutLimitsMaxEndpoints, b.fanoutLimitsMaxEndpoints);
+  assert.equal(a.fanoutLimitsOverallDeadlineMs, b.fanoutLimitsOverallDeadlineMs);
+  assert.equal(a.fanoutLimitsOverCapError, b.fanoutLimitsOverCapError);
+  assert.equal(a.fanoutLimitsOverCapFetchCalls, b.fanoutLimitsOverCapFetchCalls);
+  assert.deepEqual(a.fanoutLimitsDeadlineResult, b.fanoutLimitsDeadlineResult);
+  assert.equal(a.fanoutLimitsDeadlineFetchCalls, b.fanoutLimitsDeadlineFetchCalls);
 });
 
 test("demo shows the dispatch expectedSeq segment in-process: a correct guard advances one step, a stale guard conflicts untouched, 0 guards an empty history, illegal values throw, and no guard is unchanged", async () => {
