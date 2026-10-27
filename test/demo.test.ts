@@ -16,6 +16,9 @@ import {
   DEMO_EVENT_ID_HEADER_EVENT_ID,
   DEMO_EVENT_ID_HEADER_NOW,
   DEMO_EVENT_ID_HEADER_TASK_ID,
+  DEMO_JITTER_EVENT_ID,
+  DEMO_JITTER_NOW,
+  DEMO_JITTER_TASK_ID,
   DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
   DEMO_IDEMPOTENCY_HEADER_NOW,
   DEMO_IDEMPOTENCY_HEADER_TASK_ID,
@@ -673,11 +676,18 @@ Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver �
   first delivery: ok attempts=1 status=200; captured X-Event-Id: evt_demo_x_event_id_001
   redelivery (the same webhook object delivered a second time): ok attempts=1 status=200; captured X-Event-Id: evt_demo_x_event_id_001 (unchanged — a receiver deduplicating on the header drops the redelivery without parsing the body)
   coexistence: both captured requests also carry Idempotency-Key: evt_demo_x_event_id_001 (first) / evt_demo_x_event_id_001 (redelivery) — the same pinned eventId under the standard idempotency header name
-  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId evt_demo_x_event_id_001 equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`;
+  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId evt_demo_x_event_id_001 equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)
+
+Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):
+  event: PAYOUT_COMPLETE for DEMO-056, pinned eventId evt_demo_jitter_backoff_001 (backoffMs 100, maxAttempts 3 — the same signed webhook delivered three times, once per script)
+  jittered (jitterMs 1000, 500/500/200): ok attempts=3 status=200; recorded waits: 2, inside [100, 1100] then [200, 1200] (exact waits vary run to run — only the intervals are pinned, never the random draw)
+  control (jitterMs 0, same 500/500/200 script): ok attempts=3 status=200; recorded waits: [100, 200] ms exactly — jitterMs 0 falls back to the pure exponential schedule
+  429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=2 status=200; recorded wait: [30000] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top
+  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId evt_demo_jitter_backoff_001`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 573);
+  assert.equal(lines.length, 580);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2577,7 +2587,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 573);
+  assert.equal(out.trimEnd().split("\n").length, 580);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -7364,9 +7374,18 @@ test("demo shows the payout webhook X-Event-Id header segment: both deliveries c
   ]) {
     assert.ok(text.includes(line), `missing X-Event-Id line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId ${DEMO_EVENT_ID_HEADER_EVENT_ID} equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`,
+  // The jitter backoff segment now closes the demo, so the
+  // X-Event-Id body-check line is no longer the last line —
+  // it must be followed by the jitter segment, whose own
+  // test pins the demo's last line.
+  assert.ok(
+    text.indexOf(
+      "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
+    ) >
+      text.indexOf(
+        `  body check: verifyPayoutWebhook over the captured wire body: true; the verified body's eventId ${DEMO_EVENT_ID_HEADER_EVENT_ID} equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`,
+      ),
+    "jitter backoff segment must follow the X-Event-Id header segment",
   );
 });
 
@@ -7376,6 +7395,13 @@ test("demo X-Event-Id header segment is deterministic: two runs print byte-ident
       ls.indexOf(
         "Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
       ),
+      // The slice ends before the blank line that opens the
+      // jitter backoff segment (which now closes the demo);
+      // without the end bound the segment would swallow
+      // the new section's lines.
+      ls.indexOf(
+        "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -7403,5 +7429,254 @@ test("demo X-Event-Id header segment is deterministic: two runs print byte-ident
   assert.deepEqual(
     a.eventIdHeaderTask.history.map((h) => [h.event, h.at]),
     b.eventIdHeaderTask.history.map((h) => [h.event, h.at]),
+  );
+});
+
+test("demo shows the payout webhook jitter backoff segment: jittered waits stay inside their windows, the zero-jitter control is exact, and the 429 hint is waited verbatim", async () => {
+  const {
+    jitterTask,
+    jitterWebhook,
+    jitterEventId,
+    jitterResult,
+    jitterSleeps,
+    jitterCalls,
+    exactResult,
+    exactSleeps,
+    exactCalls,
+    hintResult,
+    hintSleeps,
+    hintCalls,
+    jitterBodyVerifies,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // delivery source in src/settlementWebhook.ts and
+  // test/payoutWebhookJitter.test.ts, never derived from
+  // the demo's own segment.
+  assert.equal(jitterTask.id, DEMO_JITTER_TASK_ID);
+  assert.equal(jitterTask.state, "PAID");
+  assert.equal(jitterTask.history.length, 8);
+  assert.equal(
+    jitterTask.history[jitterTask.history.length - 1].event,
+    "PAYOUT_COMPLETE",
+  );
+  assert.equal(jitterWebhook.payload.eventId, DEMO_JITTER_EVENT_ID);
+  assert.equal(jitterWebhook.payload.at, DEMO_JITTER_NOW);
+  assert.equal(jitterEventId, DEMO_JITTER_EVENT_ID);
+  // Jittered script: backoffMs 100, jitterMs 1000, so wait 1
+  // is 100 + [0, 1000) and wait 2 is 200 + [0, 1000) —
+  // intervals only, the random draw itself is unpinned.
+  assert.deepEqual(
+    [jitterResult.ok, jitterResult.attempts, jitterResult.status],
+    [true, 3, 200],
+  );
+  assert.equal(jitterSleeps.length, 2);
+  assert.ok(
+    jitterSleeps[0] >= 100 && jitterSleeps[0] <= 1100,
+    `first jittered wait ${jitterSleeps[0]} must fall in [100, 1100]`,
+  );
+  assert.ok(
+    jitterSleeps[1] >= 200 && jitterSleeps[1] <= 1200,
+    `second jittered wait ${jitterSleeps[1]} must fall in [200, 1200]`,
+  );
+  assert.equal(jitterCalls, 3);
+  // Zero-jitter control over the identical script: the
+  // pure exponential schedule, exactly [100, 200].
+  assert.deepEqual(
+    [exactResult.ok, exactResult.attempts, exactResult.status],
+    [true, 3, 200],
+  );
+  assert.deepEqual(exactSleeps, [100, 200]);
+  assert.equal(exactCalls, 3);
+  // 429 hint under jitterMs 1000: the receiver's own
+  // prescribed 30 s is waited verbatim, no jitter added.
+  assert.deepEqual(
+    [hintResult.ok, hintResult.attempts, hintResult.status],
+    [true, 2, 200],
+  );
+  assert.deepEqual(hintSleeps, [30000]);
+  assert.equal(hintCalls, 2);
+  assert.equal(jitterBodyVerifies, true);
+
+  // Independent cross-check: the same three shapes rebuilt
+  // here on a fresh task and a fresh loopback receiver,
+  // through the library entry points directly — the demo
+  // segment must agree with the library, not with itself.
+  // The jittered script uses a stubbed Math.random draw of
+  // 0.5 so its waits are pinned exactly, not just inside
+  // their windows; the stub is restored afterwards.
+  const independentTask = new TaskLifecycle("TEST-JITTER-001");
+  independentTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-26T09:00:00.000Z",
+  });
+  independentTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-26T09:05:00.000Z",
+  });
+  independentTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-03-26T09:10:00.000Z",
+  });
+  independentTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-26T09:15:00.000Z",
+  });
+  independentTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-03-26T09:20:00.000Z",
+  });
+  independentTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-03-26T09:25:00.000Z",
+  });
+  independentTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-03-26T09:30:00.000Z",
+  });
+  independentTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-26T09:35:00.000Z",
+    payoutAmount: 4200,
+  });
+  const independentWebhook = buildPayoutWebhook(
+    independentTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: new Date("2026-03-26T10:00:00.000Z"),
+      eventId: "evt_test_jitter_backoff_001",
+    },
+  );
+  const independentScripts: Record<string, number[]> = {
+    "/hooks/jitter": [500, 500, 200],
+    "/hooks/hint": [429, 200],
+  };
+  const independentCounts: Record<string, number> = {};
+  const independentServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const path = req.url ?? "";
+      const count = (independentCounts[path] ?? 0) + 1;
+      independentCounts[path] = count;
+      const status = (independentScripts[path] ?? [200])[count - 1] ?? 200;
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        connection: "close",
+      };
+      if (status === 429) headers["retry-after"] = "30";
+      res.writeHead(status, headers);
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) =>
+    independentServer.listen(0, "127.0.0.1", resolve),
+  );
+  const independentAddress = independentServer.address();
+  assert.ok(
+    independentAddress !== null && typeof independentAddress !== "string",
+  );
+  const independentBase = `http://127.0.0.1:${independentAddress.port}`;
+  const realRandom = Math.random;
+  try {
+    Math.random = () => 0.5;
+    const independentSleeps: number[] = [];
+    const independentResult = await deliverPayoutWebhook(
+      `${independentBase}/hooks/jitter`,
+      independentWebhook,
+      {
+        backoffMs: 100,
+        jitterMs: 1000,
+        maxAttempts: 3,
+        sleepImpl: async (ms: number) => {
+          independentSleeps.push(ms);
+        },
+      },
+    );
+    assert.deepEqual(
+      [independentResult.ok, independentResult.attempts, independentResult.status],
+      [true, 3, 200],
+    );
+    // 100 + 0.5 * 1000 = 600, 200 + 0.5 * 1000 = 700.
+    assert.deepEqual(independentSleeps, [600, 700]);
+    assert.equal(independentCounts["/hooks/jitter"], 3);
+    const independentHintSleeps: number[] = [];
+    const independentHint = await deliverPayoutWebhook(
+      `${independentBase}/hooks/hint`,
+      independentWebhook,
+      {
+        backoffMs: 100,
+        jitterMs: 1000,
+        sleepImpl: async (ms: number) => {
+          independentHintSleeps.push(ms);
+        },
+      },
+    );
+    assert.deepEqual(
+      [independentHint.ok, independentHint.attempts, independentHint.status],
+      [true, 2, 200],
+    );
+    assert.deepEqual(independentHintSleeps, [30000]);
+  } finally {
+    Math.random = realRandom;
+    await new Promise<void>((resolve) =>
+      independentServer.close(() => resolve()),
+    );
+  }
+
+  // The segment follows the X-Event-Id header segment and
+  // closes the demo; its printed lines are pinned literals
+  // except the jittered waits, which are never printed —
+  // only their intervals — so every line below is exact.
+  const headerAt = text.indexOf(
+    "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
+  );
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        "Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
+      ),
+    "jitter backoff segment must follow the X-Event-Id header segment",
+  );
+  for (const line of [
+    `  event: PAYOUT_COMPLETE for ${DEMO_JITTER_TASK_ID}, pinned eventId ${DEMO_JITTER_EVENT_ID} (backoffMs 100, maxAttempts 3 — the same signed webhook delivered three times, once per script)`,
+    `  jittered (jitterMs 1000, 500/500/200): ok attempts=3 status=200; recorded waits: 2, inside [100, 1100] then [200, 1200] (exact waits vary run to run — only the intervals are pinned, never the random draw)`,
+    `  control (jitterMs 0, same 500/500/200 script): ok attempts=3 status=200; recorded waits: [100, 200] ms exactly — jitterMs 0 falls back to the pure exponential schedule`,
+    `  429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=2 status=200; recorded wait: [30000] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top`,
+    `  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${DEMO_JITTER_EVENT_ID}`,
+  ]) {
+    assert.ok(text.includes(line), `missing jitter backoff line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${DEMO_JITTER_EVENT_ID}`,
+  );
+});
+
+test("demo jitter backoff segment is deterministic: two runs print byte-identical jitter lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + event + jittered + control + hint +
+  // body-check lines; the jittered waits are never
+  // printed (only their intervals), so no normalization
+  // is needed despite the random draw.
+  assert.equal(segA.length, 6);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.jitterEventId, b.jitterEventId);
+  assert.deepEqual(a.exactSleeps, b.exactSleeps);
+  assert.deepEqual(a.hintSleeps, b.hintSleeps);
+  assert.equal(a.jitterBodyVerifies, b.jitterBodyVerifies);
+  assert.deepEqual(
+    a.jitterTask.history.map((h) => [h.event, h.at]),
+    b.jitterTask.history.map((h) => [h.event, h.at]),
   );
 });

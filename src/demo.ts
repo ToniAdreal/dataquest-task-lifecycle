@@ -774,6 +774,20 @@ export const DEMO_EVENT_ID_HEADER_EVENT_ID = "evt_demo_x_event_id_001";
 export const DEMO_EVENT_ID_HEADER_NOW = "2026-03-25T10:00:00.000Z";
 
 /**
+ * Fixtures for the demo's closing jitter backoff segment:
+ * the dedicated PAID task id, the pinned payload eventId, and
+ * the pinned webhook `at` instant. The loopback port is
+ * ephemeral and never printed, and the jittered waits are
+ * never printed either — only the intervals they must fall
+ * in — so the segment's output is byte-identical across
+ * runs despite the random draw. Next free DEMO number
+ * after DEMO-055.
+ */
+export const DEMO_JITTER_TASK_ID = "DEMO-056";
+export const DEMO_JITTER_EVENT_ID = "evt_demo_jitter_backoff_001";
+export const DEMO_JITTER_NOW = "2026-03-26T10:00:00.000Z";
+
+/**
  * Exact constructor id rejection wording the constructor guard segment pins.
  * Must stay verbatim-equal to the `assert.match` in test/constructorId.test.ts
  * and the `throw` in the TaskLifecycle constructor (src/taskLifecycle.ts).
@@ -1357,6 +1371,32 @@ export interface DemoResult {
   eventIdHeaderRetryResult: DeliverWebhookResult;
   /** Whether the captured wire body verifies under the demo secret. */
   eventIdHeaderBodyVerifies: boolean;
+  /** Jitter backoff segment's PAID task (DEMO-056). */
+  jitterTask: TaskLifecycle;
+  /** Signed payout webhook the jitter segment delivers three times. */
+  jitterWebhook: PayoutWebhook;
+  /** Pinned payload eventId of the jitter segment's webhook. */
+  jitterEventId: string;
+  /** `deliverPayoutWebhook` result for the jittered 500/500/200 delivery. */
+  jitterResult: DeliverWebhookResult;
+  /** Waits the recording sleep captured for the jittered delivery (2, interval-pinned). */
+  jitterSleeps: number[];
+  /** Requests the loopback receiver captured for the jittered script (3). */
+  jitterCalls: number;
+  /** `deliverPayoutWebhook` result for the jitterMs 0 control delivery. */
+  exactResult: DeliverWebhookResult;
+  /** Waits the recording sleep captured for the control delivery (exactly [100, 200]). */
+  exactSleeps: number[];
+  /** Requests the loopback receiver captured for the control script (3). */
+  exactCalls: number;
+  /** `deliverPayoutWebhook` result for the 429 Retry-After delivery. */
+  hintResult: DeliverWebhookResult;
+  /** Waits the recording sleep captured for the 429 delivery (exactly [30000]). */
+  hintSleeps: number[];
+  /** Requests the loopback receiver captured for the 429 script (2). */
+  hintCalls: number;
+  /** Whether the jittered script's wire bodies verify under the demo secret. */
+  jitterBodyVerifies: boolean;
   lines: string[];
 }
 
@@ -6649,7 +6689,224 @@ export async function runDemo(): Promise<DemoResult> {
     `  body check: verifyPayoutWebhook over the captured wire body: ${eventIdHeaderBodyVerifies}; the verified body's eventId ${eventIdHeaderEventId} equals both captured headers (the headers are unsigned transport hints — the verified body's eventId is the authoritative dedup key)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, lines };
+  // Payout webhook jitter backoff segment (closing):
+  // `DeliverPayoutWebhookOptions.jitterMs` has never
+  // appeared in the demo — the bench path (#634) times
+  // the jittered schedule, but a caller reading only
+  // the demo learns nothing about the "exponential
+  // backoff + uniform jitter spreads a thundering herd"
+  // retry semantic, nor that jitterMs 0 falls back to
+  // the exact exponential schedule. Here the same
+  // signed webhook is delivered three times to a real
+  // loopback receiver through the default global fetch
+  // (no fetchImpl), each delivery against its own
+  // path-scripted answers and its own recording sleep
+  // (no real network, no real wait):
+  //   - /hooks/jitter: 500 / 500 / 200 under
+  //     backoffMs 100, jitterMs 1000 — the two waits
+  //     must land inside [100, 1100] and [200, 1200]
+  //     (only the intervals are asserted, never the
+  //     random draw, so the segment cannot flake);
+  //   - /hooks/exact: the same 500 / 500 / 200 script
+  //     under jitterMs 0 — the two waits must be
+  //     exactly [100, 200], the pure exponential
+  //     schedule, proving the opt-in changes nothing
+  //     when it is off;
+  //   - /hooks/hint: 429 with `Retry-After: 30` then
+  //     200 under jitterMs 1000 — the single wait
+  //     must be exactly [30000], the receiver's own
+  //     prescribed time waited verbatim with no
+  //     jitter added on top (the 429 hint branch
+  //     never touches jitteredBackoffMs).
+  // The segment asserts all of this here, outside the
+  // printed lines: a retry schedule that drifted would
+  // fail the demo itself, not just a test. The
+  // loopback port is ephemeral and never printed, and
+  // the jittered waits are never printed either — only
+  // their intervals — so the segment's output is
+  // byte-identical across runs; the receiver answers
+  // `Connection: close` so its close() never waits on
+  // a keep-alive socket.
+  const jitterTask = new TaskLifecycle(DEMO_JITTER_TASK_ID);
+  jitterTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-03-26T09:00:00.000Z",
+  });
+  jitterTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-03-26T09:05:00.000Z",
+  });
+  jitterTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-03-26T09:10:00.000Z",
+  });
+  jitterTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-03-26T09:15:00.000Z",
+  });
+  jitterTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-03-26T09:20:00.000Z",
+  });
+  jitterTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-03-26T09:25:00.000Z",
+  });
+  jitterTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-03-26T09:30:00.000Z",
+  });
+  jitterTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-03-26T09:35:00.000Z",
+    payoutAmount: 4200,
+  });
+  const jitterWebhook = buildPayoutWebhook(
+    jitterTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: new Date(DEMO_JITTER_NOW),
+      eventId: DEMO_JITTER_EVENT_ID,
+    },
+  );
+  const jitterEventId = jitterWebhook.payload.eventId;
+  const jitterScripts: Record<string, number[]> = {
+    "/hooks/jitter": [500, 500, 200],
+    "/hooks/exact": [500, 500, 200],
+    "/hooks/hint": [429, 200],
+  };
+  const jitterCounts: Record<string, number> = {};
+  const jitterBodies: Record<string, string[]> = {};
+  const jitterServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const path = req.url ?? "";
+      const count = (jitterCounts[path] ?? 0) + 1;
+      jitterCounts[path] = count;
+      (jitterBodies[path] ??= []).push(
+        Buffer.concat(chunks).toString("utf8"),
+      );
+      const script = jitterScripts[path] ?? [200];
+      const status = script[count - 1] ?? 200;
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        connection: "close",
+      };
+      if (status === 429) headers["retry-after"] = "30";
+      res.writeHead(status, headers);
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((resolve) =>
+    jitterServer.listen(0, "127.0.0.1", resolve),
+  );
+  const jitterAddress = jitterServer.address();
+  if (jitterAddress === null || typeof jitterAddress === "string") {
+    throw new Error(
+      "demo fixture broken: loopback server did not bind to a port",
+    );
+  }
+  const jitterBase = `http://127.0.0.1:${jitterAddress.port}`;
+  const jitterSleeps: number[] = [];
+  const exactSleeps: number[] = [];
+  const hintSleeps: number[] = [];
+  let jitterResult: DeliverWebhookResult;
+  let exactResult: DeliverWebhookResult;
+  let hintResult: DeliverWebhookResult;
+  try {
+    jitterResult = await deliverPayoutWebhook(
+      `${jitterBase}/hooks/jitter`,
+      jitterWebhook,
+      {
+        backoffMs: 100,
+        jitterMs: 1000,
+        maxAttempts: 3,
+        sleepImpl: async (ms: number) => {
+          jitterSleeps.push(ms);
+        },
+      },
+    );
+    exactResult = await deliverPayoutWebhook(
+      `${jitterBase}/hooks/exact`,
+      jitterWebhook,
+      {
+        backoffMs: 100,
+        jitterMs: 0,
+        maxAttempts: 3,
+        sleepImpl: async (ms: number) => {
+          exactSleeps.push(ms);
+        },
+      },
+    );
+    hintResult = await deliverPayoutWebhook(
+      `${jitterBase}/hooks/hint`,
+      jitterWebhook,
+      {
+        backoffMs: 100,
+        jitterMs: 1000,
+        sleepImpl: async (ms: number) => {
+          hintSleeps.push(ms);
+        },
+      },
+    );
+  } finally {
+    await new Promise<void>((resolve) =>
+      jitterServer.close(() => resolve()),
+    );
+  }
+  const jitterCalls = jitterCounts["/hooks/jitter"] ?? 0;
+  const exactCalls = jitterCounts["/hooks/exact"] ?? 0;
+  const hintCalls = jitterCounts["/hooks/hint"] ?? 0;
+  const jitterBodyVerifies =
+    (jitterBodies["/hooks/jitter"]?.length ?? 0) > 0 &&
+    verifyPayoutWebhook(
+      jitterBodies["/hooks/jitter"]![0],
+      jitterWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    ) &&
+    (jitterBodies["/hooks/jitter"] ?? []).every(
+      (body) => body === JSON.stringify(jitterWebhook.payload),
+    );
+  if (
+    jitterTask.state !== "PAID" ||
+    jitterEventId !== DEMO_JITTER_EVENT_ID ||
+    jitterResult.ok !== true ||
+    jitterResult.attempts !== 3 ||
+    jitterResult.status !== 200 ||
+    jitterSleeps.length !== 2 ||
+    jitterSleeps[0] < 100 ||
+    jitterSleeps[0] > 1100 ||
+    jitterSleeps[1] < 200 ||
+    jitterSleeps[1] > 1200 ||
+    jitterCalls !== 3 ||
+    exactResult.ok !== true ||
+    exactResult.attempts !== 3 ||
+    exactResult.status !== 200 ||
+    JSON.stringify(exactSleeps) !== JSON.stringify([100, 200]) ||
+    exactCalls !== 3 ||
+    hintResult.ok !== true ||
+    hintResult.attempts !== 2 ||
+    hintResult.status !== 200 ||
+    JSON.stringify(hintSleeps) !== JSON.stringify([30000]) ||
+    hintCalls !== 2 ||
+    !jitterBodyVerifies
+  ) {
+    throw new Error(
+      "demo fixture broken: deliverPayoutWebhook jitter backoff does not match the hand-pinned contract (the jittered 500/500/200 delivery must report ok with 3 attempts and status 200 with two waits inside [100, 1100] and [200, 1200]; the jitterMs 0 control over the same script must report ok with 3 attempts and status 200 with waits exactly [100, 200]; the 429 Retry-After: 30 delivery under jitterMs 1000 must report ok with 2 attempts and status 200 with a wait exactly [30000]; and the jittered script's wire bodies must be byte-identical to the signed payload and verify under the demo secret)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
+    `  event: PAYOUT_COMPLETE for ${DEMO_JITTER_TASK_ID}, pinned eventId ${DEMO_JITTER_EVENT_ID} (backoffMs 100, maxAttempts 3 — the same signed webhook delivered three times, once per script)`,
+    `  jittered (jitterMs 1000, 500/500/200): ok attempts=${jitterResult.attempts} status=${jitterResult.status}; recorded waits: 2, inside [100, 1100] then [200, 1200] (exact waits vary run to run — only the intervals are pinned, never the random draw)`,
+    `  control (jitterMs 0, same 500/500/200 script): ok attempts=${exactResult.attempts} status=${exactResult.status}; recorded waits: [${exactSleeps.join(", ")}] ms exactly — jitterMs 0 falls back to the pure exponential schedule`,
+    `  429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=${hintResult.attempts} status=${hintResult.status}; recorded wait: [${hintSleeps.join(", ")}] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top`,
+    `  body check: verifyPayoutWebhook over the captured wire body: ${jitterBodyVerifies}; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${jitterEventId}`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, lines };
 }
 
 async function main(): Promise<void> {

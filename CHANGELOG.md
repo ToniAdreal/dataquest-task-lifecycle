@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A jitter backoff segment in the CLI demo (backlog #652):
+  `deliverPayoutWebhook` with `jitterMs` over a loopback
+  receiver with a recording sleep — one signed webhook
+  delivered three times, once per path-scripted script
+  (backoffMs 100, maxAttempts 3): the jittered
+  500 / 500 / 200 script whose two waits must land
+  inside [100, 1100] and [200, 1200] (intervals only,
+  never the random draw), the jitterMs 0 control over
+  the same script sleeping exactly [100, 200], and the
+  429 `Retry-After: 30` script under jitterMs 1000
+  waiting exactly [30000] — the receiver's prescribed
+  time with no jitter added. The demo's golden output
+  and the X-Event-Id segment tests are updated for the
+  new closing section.
 - A benchmark path for payout webhook jitter backoff (backlog #634):
   `deliverPayoutWebhook` with `jitterMs` over a 500 / 500 / 200
   script (backoffMs 100, maxAttempts 3, injected recording sleep) —

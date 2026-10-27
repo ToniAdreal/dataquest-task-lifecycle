@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 702 tests, all local
+npm test   # 704 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1386,7 +1386,7 @@ the contrast: the header is an unsigned transport
 hint, and the verified body's `eventId` is the
 authoritative dedup key.
 
-The demo then closes with an X-Event-Id header
+The demo then shows an X-Event-Id header
 segment: one more PAID task (DEMO-055) whose signed
 payout webhook is delivered twice to a real loopback
 receiver — the first delivery and the redelivery of
@@ -1399,6 +1399,21 @@ names for it. The captured wire body verifies under
 the demo secret as the contrast: the headers are
 unsigned transport hints, and the verified body's
 `eventId` is the authoritative dedup key.
+
+The demo then closes with a jitter backoff segment:
+one more PAID task (DEMO-056) whose signed payout
+webhook is delivered three times to a real loopback
+receiver, once per path-scripted script, each with
+its own recording sleep and no real wait. Under
+`jitterMs` 1000 and `backoffMs` 100, the 500 / 500 /
+200 script's two waits land inside [100, 1100] and
+[200, 1200] — only the intervals are pinned, never
+the random draw — while the `jitterMs` 0 control
+over the same script waits exactly [100, 200], the
+pure exponential schedule. A 429 with
+`Retry-After: 30` under `jitterMs` 1000 still waits
+exactly [30000]: the receiver's prescribed time is
+waited verbatim, with no jitter added on top.
 
 ## Retry budgets
 
@@ -1643,7 +1658,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 696 tests covering the happy path, reject→resubmit
+`npm test` runs 704 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
