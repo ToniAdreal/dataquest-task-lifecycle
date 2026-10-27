@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for payout webhook jitter backoff (backlog #634):
+  `deliverPayoutWebhook` with `jitterMs` over a 500 / 500 / 200
+  script (backoffMs 100, maxAttempts 3, injected recording sleep) —
+  one timed pass is two deliveries, the jittered script whose two
+  sleeps must land inside [100, 1100] and [200, 1200] and the
+  zero-jitter control sleeping exactly [100, 200]; the exact
+  jittered sleeps [100, 700] under a stubbed `Math.random`
+  sequence [0, 0.5] are pinned once outside the timed loop, and
+  the stub's restore is asserted. This run measured ~3,720
+  ops/sec (268.81 µs/op) for the new row on Node v24.22.1 /
+  AMD EPYC 9D25. The Benchmarks table is refreshed from this run
+  (64 rows).
 - A benchmark path for payout webhook fan-out limits (backlog #628):
   `deliverPayoutWebhookToMany` under `maxEndpoints` /
   `overallDeadlineMs` — the timed loop runs the 50 ms deadline case
