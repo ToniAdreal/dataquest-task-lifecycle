@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A benchmark path for payout webhook delivery-header verification
+  (backlog #653): `deliverPayoutWebhook` against a real loopback
+  HTTP server answering 500 then 200 (backoffMs 0, no-op sleep,
+  default fetch) — one timed pass is one delivery, self-checked on
+  every iteration for result { ok: true, attempts: 2, status: 200 }
+  with exactly two captured requests, every attempt's
+  `Idempotency-Key` and `X-Event-Id` both equal to the body
+  `eventId` (the same value across the retry), and both bodies
+  byte-identical to the signed body; the captured
+  `X-Hub-Signature-256` is pinned equal to the build-time
+  signature and verified over the captured body once outside the
+  timed loop, pinning both headers outside signature coverage.
+  This run measured ~1,466 ops/sec (681.92 µs/op) for the new row
+  on Node v24.22.1 / AMD EPYC 9D25. The Benchmarks table is
+  refreshed from this run (65 rows). Honest limit: the row is
+  local-HTTP-bound, not a measure of delivery logic overhead.
 - A jitter backoff segment in the CLI demo (backlog #652):
   `deliverPayoutWebhook` with `jitterMs` over a loopback
   receiver with a recording sleep — one signed webhook
