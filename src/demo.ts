@@ -788,6 +788,33 @@ export const DEMO_JITTER_EVENT_ID = "evt_demo_jitter_backoff_001";
 export const DEMO_JITTER_NOW = "2026-03-26T10:00:00.000Z";
 
 /**
+ * Fixtures for the demo's closing stale-task watchdog reminder
+ * loop (backlog #672): the fixed screening instant shared with
+ * the stale branches, the 7-day dwell budgets, and the three
+ * mixed-batch tasks — one idle past its budget (DEMO-057),
+ * one freshly active (DEMO-058), one terminal despite its
+ * dwell (DEMO-059, driven to PAID on the patrol terminal
+ * task's dates). Next free DEMO number after DEMO-056.
+ */
+export const DEMO_REMINDER_NOW = "2026-03-22T09:00:00.000Z";
+export const DEMO_REMINDER_DAY_MS = 86_400_000;
+export const DEMO_REMINDER_MAX_AGE_MS = 7 * DEMO_REMINDER_DAY_MS;
+export const DEMO_REMINDER_STALE_TASK_ID = "DEMO-057";
+export const DEMO_REMINDER_STALE_PUBLISH_AT = "2026-03-01T09:00:00.000Z";
+export const DEMO_REMINDER_STALE_DEADLINE = "2026-03-30T09:00:00.000Z";
+export const DEMO_REMINDER_FRESH_TASK_ID = "DEMO-058";
+export const DEMO_REMINDER_FRESH_PUBLISH_AT = "2026-03-21T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_TASK_ID = "DEMO-059";
+export const DEMO_REMINDER_TERMINAL_PUBLISH_AT = "2026-02-20T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_ACCEPT_AT = "2026-02-21T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_CAPTURE_AT = "2026-02-22T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_SUBMIT_AT = "2026-02-24T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_REVIEW_AT = "2026-02-25T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_APPROVE_AT = "2026-02-26T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_REQUEST_AT = "2026-02-27T09:00:00.000Z";
+export const DEMO_REMINDER_TERMINAL_COMPLETE_AT = "2026-02-28T09:00:00.000Z";
+
+/**
  * Exact constructor id rejection wording the constructor guard segment pins.
  * Must stay verbatim-equal to the `assert.match` in test/constructorId.test.ts
  * and the `throw` in the TaskLifecycle constructor (src/taskLifecycle.ts).
@@ -1397,6 +1424,14 @@ export interface DemoResult {
   hintCalls: number;
   /** Whether the jittered script's wire bodies verify under the demo secret. */
   jitterBodyVerifies: boolean;
+  /** The watchdog reminder loop's mixed batch, in batch order. */
+  watchdogReminderTasks: TaskLifecycle[];
+  /** `staleTasks` selection over the reminder batch (only DEMO-057). */
+  watchdogReminderSelected: TaskLifecycle[];
+  /** Per-task outcomes of `actOnStaleTasks` running the notify-only reminder action. */
+  watchdogReminderResults: StaleActionResult[];
+  /** Ids the reminder loop's notify-only action recorded, in action order. */
+  watchdogReminderNotifiedIds: string[];
   lines: string[];
 }
 
@@ -6906,7 +6941,130 @@ export async function runDemo(): Promise<DemoResult> {
     `  body check: verifyPayoutWebhook over the captured wire body: ${jitterBodyVerifies}; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${jitterEventId}`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, lines };
+  // Stale-task watchdog reminder loop (closing, backlog #672):
+  // the section the earlier stale branches never showed end to
+  // end — a mixed batch (one task idle past its budget, one
+  // freshly active, one terminal) screened by `staleTasks()`,
+  // then walked by `actOnStaleTasks()` with a notify-only
+  // action. The stale task is NOT expired: its SLA deadline
+  // is still ahead (stale is not overdue), and the state
+  // machine has no REMIND event, so the "reminder" is the
+  // caller's out-of-band notification delivered by the action,
+  // not a state transition — the disposition is the caller's
+  // choice, and this loop leaves every task's state and
+  // history exactly as found. Hand-pinned expectations: at
+  // the fixed now 2026-03-22T09:00:00.000Z under OPEN / PAID
+  // budgets of 7 days, DEMO-057 (OPEN since 2026-03-01,
+  // dwell 21 days) is the only stale task; DEMO-058 (OPEN
+  // since 2026-03-21, dwell 1 day) is within budget;
+  // DEMO-059 (PAID, last entry 2026-02-28, dwell 22 days)
+  // is terminal and therefore never stale despite its dwell
+  // and despite PAID carrying a budget in the map.
+  const reminderNow = new Date(DEMO_REMINDER_NOW);
+  const reminderStaleTask = new TaskLifecycle(DEMO_REMINDER_STALE_TASK_ID);
+  reminderStaleTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_REMINDER_STALE_PUBLISH_AT,
+  });
+  reminderStaleTask.setSlaDeadline(DEMO_REMINDER_STALE_DEADLINE, "OPEN");
+  const reminderFreshTask = new TaskLifecycle(DEMO_REMINDER_FRESH_TASK_ID);
+  reminderFreshTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_REMINDER_FRESH_PUBLISH_AT,
+  });
+  const reminderTerminalTask = new TaskLifecycle(
+    DEMO_REMINDER_TERMINAL_TASK_ID,
+  );
+  reminderTerminalTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_REMINDER_TERMINAL_PUBLISH_AT,
+  });
+  reminderTerminalTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: DEMO_REMINDER_TERMINAL_ACCEPT_AT,
+  });
+  reminderTerminalTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: DEMO_REMINDER_TERMINAL_CAPTURE_AT,
+  });
+  reminderTerminalTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: DEMO_REMINDER_TERMINAL_SUBMIT_AT,
+  });
+  reminderTerminalTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: DEMO_REMINDER_TERMINAL_REVIEW_AT,
+  });
+  reminderTerminalTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: DEMO_REMINDER_TERMINAL_APPROVE_AT,
+  });
+  reminderTerminalTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: DEMO_REMINDER_TERMINAL_REQUEST_AT,
+  });
+  reminderTerminalTask.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: DEMO_REMINDER_TERMINAL_COMPLETE_AT,
+  });
+  const watchdogReminderTasks = [
+    reminderStaleTask,
+    reminderFreshTask,
+    reminderTerminalTask,
+  ];
+  const reminderBudgets = {
+    OPEN: DEMO_REMINDER_MAX_AGE_MS,
+    PAID: DEMO_REMINDER_MAX_AGE_MS,
+  };
+  const watchdogReminderSelected = staleTasks(
+    watchdogReminderTasks,
+    reminderBudgets,
+    reminderNow,
+  );
+  const watchdogReminderNotifiedIds: string[] = [];
+  const watchdogReminderResults = actOnStaleTasks(
+    watchdogReminderTasks,
+    (t) => {
+      watchdogReminderNotifiedIds.push(t.id);
+    },
+    reminderBudgets,
+    reminderNow,
+  );
+  if (
+    watchdogReminderSelected.length !== 1 ||
+    watchdogReminderSelected[0] !== reminderStaleTask ||
+    watchdogReminderResults.length !== 1 ||
+    watchdogReminderResults[0].task !== reminderStaleTask ||
+    watchdogReminderResults[0].acted !== true ||
+    watchdogReminderResults[0].error !== undefined ||
+    watchdogReminderResults[0].entry !== undefined ||
+    watchdogReminderNotifiedIds.length !== 1 ||
+    watchdogReminderNotifiedIds[0] !== DEMO_REMINDER_STALE_TASK_ID ||
+    reminderStaleTask.state !== "OPEN" ||
+    reminderStaleTask.history.length !== 1 ||
+    reminderFreshTask.state !== "OPEN" ||
+    reminderFreshTask.history.length !== 1 ||
+    reminderTerminalTask.state !== "PAID" ||
+    reminderTerminalTask.history.length !== 8 ||
+    isOverdue(reminderStaleTask, reminderNow) !== false
+  ) {
+    throw new Error(
+      "demo fixture broken: watchdog reminder loop does not have the pinned shape (only the stale OPEN task selected and notified; the fresh task within budget and the terminal task despite its dwell excluded; the notify-only action appends no entry and leaves every state and history unchanged; the stale task is not overdue)",
+    );
+  }
+  lines.push(
+    "",
+    "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+    `  fixed now: ${DEMO_REMINDER_NOW} — budgets: OPEN 7 days, PAID 7 days (dwell from the last history entry, strictly past the budget; terminal tasks are never stale even with a budget)`,
+    `  ${DEMO_REMINDER_STALE_TASK_ID}: state OPEN, entered ${DEMO_REMINDER_STALE_PUBLISH_AT}, dwell 21 days, SLA deadline ${DEMO_REMINDER_STALE_DEADLINE} — stale: true, overdue: false`,
+    `  ${DEMO_REMINDER_FRESH_TASK_ID}: state OPEN, entered ${DEMO_REMINDER_FRESH_PUBLISH_AT}, dwell 1 day — stale: false`,
+    `  ${DEMO_REMINDER_TERMINAL_TASK_ID}: state PAID, entered ${DEMO_REMINDER_TERMINAL_COMPLETE_AT}, dwell 22 days — stale: false (terminal beats the budget)`,
+    `  staleTasks selection: [${watchdogReminderSelected.map((t) => t.id).join(", ")}] — the fresh task is within budget, the terminal task is excluded despite its dwell`,
+    `  actOnStaleTasks (action: notify the assignee, dispatch nothing): ${watchdogReminderResults.length} attempted`,
+    `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
 }
 
 async function main(): Promise<void> {

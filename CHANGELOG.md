@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- A stale-task watchdog reminder loop in the CLI demo (backlog
+  #672): a mixed batch — DEMO-057 idle in OPEN past its 7-day
+  budget, DEMO-058 freshly active in OPEN, DEMO-059 terminal in
+  PAID despite a 22-day dwell — screened by `staleTasks()` and
+  walked by `actOnStaleTasks()` with a notify-only action, so
+  only DEMO-057 is selected and notified and no task's state or
+  history changes. The stale task's SLA deadline is still ahead,
+  pinning stale-is-not-overdue, and the segment states plainly
+  that the state machine has no REMIND event: the reminder is
+  the caller's out-of-band notification, and the disposition is
+  the caller's choice. `DemoResult` gains
+  `watchdogReminderTasks`, `watchdogReminderSelected`,
+  `watchdogReminderResults`, and `watchdogReminderNotifiedIds`,
+  and the demo's printed line count grows from 580 to 589.
 - A benchmark path for payout webhook delivery-header verification
   (backlog #653): `deliverPayoutWebhook` against a real loopback
   HTTP server answering 500 then 200 (backoffMs 0, no-op sleep,

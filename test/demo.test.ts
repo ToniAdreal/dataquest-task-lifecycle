@@ -35,6 +35,15 @@ import {
   DEMO_PATROL_STALE_TASK_ID,
   DEMO_PATROL_TERMINAL_COMPLETE_AT,
   DEMO_PATROL_TERMINAL_TASK_ID,
+  DEMO_REMINDER_FRESH_PUBLISH_AT,
+  DEMO_REMINDER_FRESH_TASK_ID,
+  DEMO_REMINDER_MAX_AGE_MS,
+  DEMO_REMINDER_NOW,
+  DEMO_REMINDER_STALE_DEADLINE,
+  DEMO_REMINDER_STALE_PUBLISH_AT,
+  DEMO_REMINDER_STALE_TASK_ID,
+  DEMO_REMINDER_TERMINAL_COMPLETE_AT,
+  DEMO_REMINDER_TERMINAL_TASK_ID,
   DEMO_PATROL_UNMAPPED_REVIEW_AT,
   DEMO_PATROL_UNMAPPED_TASK_ID,
   DEMO_SEEDED_IDEMPOTENCY_KEYS,
@@ -683,11 +692,20 @@ Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterM
   jittered (jitterMs 1000, 500/500/200): ok attempts=3 status=200; recorded waits: 2, inside [100, 1100] then [200, 1200] (exact waits vary run to run — only the intervals are pinned, never the random draw)
   control (jitterMs 0, same 500/500/200 script): ok attempts=3 status=200; recorded waits: [100, 200] ms exactly — jitterMs 0 falls back to the pure exponential schedule
   429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=2 status=200; recorded wait: [30000] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top
-  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId evt_demo_jitter_backoff_001`;
+  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId evt_demo_jitter_backoff_001
+
+Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):
+  fixed now: <timestamp> — budgets: OPEN 7 days, PAID 7 days (dwell from the last history entry, strictly past the budget; terminal tasks are never stale even with a budget)
+  DEMO-057: state OPEN, entered <timestamp>, dwell 21 days, SLA deadline <timestamp> — stale: true, overdue: false
+  DEMO-058: state OPEN, entered <timestamp>, dwell 1 day — stale: false
+  DEMO-059: state PAID, entered <timestamp>, dwell 22 days — stale: false (terminal beats the budget)
+  staleTasks selection: [DEMO-057] — the fresh task is within budget, the terminal task is excluded despite its dwell
+  actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted
+  DEMO-057: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 580);
+  assert.equal(lines.length, 589);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2587,7 +2605,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 580);
+  assert.equal(out.trimEnd().split("\n").length, 589);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -7374,10 +7392,10 @@ test("demo shows the payout webhook X-Event-Id header segment: both deliveries c
   ]) {
     assert.ok(text.includes(line), `missing X-Event-Id line: ${line}`);
   }
-  // The jitter backoff segment now closes the demo, so the
+  // The jitter backoff segment follows this one, and the
+  // watchdog reminder loop closes the demo after it, so the
   // X-Event-Id body-check line is no longer the last line —
-  // it must be followed by the jitter segment, whose own
-  // test pins the demo's last line.
+  // it must be followed by the jitter segment.
   assert.ok(
     text.indexOf(
       "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
@@ -7396,9 +7414,9 @@ test("demo X-Event-Id header segment is deterministic: two runs print byte-ident
         "Payout webhook X-Event-Id header (deliverPayoutWebhook to a loopback receiver — the header on the actual wire):",
       ),
       // The slice ends before the blank line that opens the
-      // jitter backoff segment (which now closes the demo);
-      // without the end bound the segment would swallow
-      // the new section's lines.
+      // jitter backoff segment (which the watchdog reminder
+      // loop now follows); without the end bound the segment
+      // would swallow the jitter and reminder lines.
       ls.indexOf(
         "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
       ) - 1,
@@ -7627,7 +7645,8 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
   }
 
   // The segment follows the X-Event-Id header segment and
-  // closes the demo; its printed lines are pinned literals
+  // is followed by the watchdog reminder loop, which closes
+  // the demo; its printed lines are pinned literals
   // except the jittered waits, which are never printed —
   // only their intervals — so every line below is exact.
   const headerAt = text.indexOf(
@@ -7649,9 +7668,17 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
   ]) {
     assert.ok(text.includes(line), `missing jitter backoff line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${DEMO_JITTER_EVENT_ID}`,
+  // The watchdog reminder loop now closes the demo, so the
+  // jitter body-check line is no longer the last line —
+  // it must be followed by the reminder segment.
+  assert.ok(
+    text.indexOf(
+      "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+    ) >
+      text.indexOf(
+        `  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${DEMO_JITTER_EVENT_ID}`,
+      ),
+    "watchdog reminder loop must follow the jitter backoff segment",
   );
 });
 
@@ -7661,6 +7688,13 @@ test("demo jitter backoff segment is deterministic: two runs print byte-identica
       ls.indexOf(
         "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
       ),
+      // The slice ends before the blank line that opens the
+      // watchdog reminder loop (which now closes the demo);
+      // without the end bound the segment would swallow
+      // the reminder lines.
+      ls.indexOf(
+        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -7678,5 +7712,195 @@ test("demo jitter backoff segment is deterministic: two runs print byte-identica
   assert.deepEqual(
     a.jitterTask.history.map((h) => [h.event, h.at]),
     b.jitterTask.history.map((h) => [h.event, h.at]),
+  );
+});
+
+test("demo shows the stale-task watchdog reminder loop in-process: only the idle task is selected and notified, nothing expires", async () => {
+  const {
+    watchdogReminderTasks,
+    watchdogReminderSelected,
+    watchdogReminderResults,
+    watchdogReminderNotifiedIds,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  const NOW = new Date(DEMO_REMINDER_NOW);
+  const BUDGETS = {
+    OPEN: DEMO_REMINDER_MAX_AGE_MS,
+    PAID: DEMO_REMINDER_MAX_AGE_MS,
+  };
+
+  // Batch order and states: stale OPEN, fresh OPEN, terminal PAID.
+  assert.deepEqual(
+    watchdogReminderTasks.map((t) => t.id),
+    [
+      DEMO_REMINDER_STALE_TASK_ID,
+      DEMO_REMINDER_FRESH_TASK_ID,
+      DEMO_REMINDER_TERMINAL_TASK_ID,
+    ],
+  );
+  assert.deepEqual(
+    watchdogReminderTasks.map((t) => t.state),
+    ["OPEN", "OPEN", "PAID"],
+  );
+  // The notify-only action appends nothing: history lengths are
+  // exactly the fixture drives (1, 1, 8).
+  assert.deepEqual(
+    watchdogReminderTasks.map((t) => t.history.length),
+    [1, 1, 8],
+  );
+  // Selection: only the idle task; the fresh task is within
+  // budget and the terminal task is excluded despite its dwell.
+  assert.deepEqual(
+    watchdogReminderSelected.map((t) => t.id),
+    [DEMO_REMINDER_STALE_TASK_ID],
+  );
+  assert.equal(watchdogReminderResults.length, 1);
+  assert.equal(watchdogReminderResults[0].task, watchdogReminderTasks[0]);
+  assert.equal(watchdogReminderResults[0].acted, true);
+  assert.equal(watchdogReminderResults[0].error, undefined);
+  // A notify-only action appends no audit entry.
+  assert.equal(watchdogReminderResults[0].entry, undefined);
+  assert.deepEqual(watchdogReminderNotifiedIds, [DEMO_REMINDER_STALE_TASK_ID]);
+  // Stale is not overdue: the stale task's SLA deadline is ahead.
+  assert.equal(isOverdue(watchdogReminderTasks[0], NOW), false);
+  assert.equal(
+    watchdogReminderTasks[0].getSlaDeadline("OPEN"),
+    DEMO_REMINDER_STALE_DEADLINE,
+  );
+
+  // Independent cross-check: the same batch rebuilt here through
+  // the library entry points directly must agree with the demo.
+  const independentStale = new TaskLifecycle("TEST-REMINDER-001");
+  independentStale.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_REMINDER_STALE_PUBLISH_AT,
+  });
+  independentStale.setSlaDeadline(DEMO_REMINDER_STALE_DEADLINE, "OPEN");
+  const independentFresh = new TaskLifecycle("TEST-REMINDER-002");
+  independentFresh.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: DEMO_REMINDER_FRESH_PUBLISH_AT,
+  });
+  const independentTerminal = new TaskLifecycle("TEST-REMINDER-003");
+  independentTerminal.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-02-20T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-02-21T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: "2026-02-22T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: "2026-02-24T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: "2026-02-25T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: "2026-02-26T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-02-27T09:00:00.000Z",
+  });
+  independentTerminal.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: DEMO_REMINDER_TERMINAL_COMPLETE_AT,
+  });
+  const independentBatch = [
+    independentStale,
+    independentFresh,
+    independentTerminal,
+  ];
+  assert.deepEqual(
+    staleTasks(independentBatch, BUDGETS, NOW).map((t) => t.id),
+    ["TEST-REMINDER-001"],
+  );
+  const independentNotified: string[] = [];
+  const independentResults = actOnStaleTasks(
+    independentBatch,
+    (t) => {
+      independentNotified.push(t.id);
+    },
+    BUDGETS,
+    NOW,
+  );
+  assert.equal(independentResults.length, 1);
+  assert.equal(independentResults[0].acted, true);
+  assert.equal(independentResults[0].entry, undefined);
+  assert.deepEqual(independentNotified, ["TEST-REMINDER-001"]);
+  assert.deepEqual(
+    independentBatch.map((t) => t.state),
+    ["OPEN", "OPEN", "PAID"],
+  );
+
+  // The segment follows the jitter backoff segment and closes
+  // the demo; its printed lines are pinned literals (every
+  // timestamp is a fixed literal, so no normalization needed).
+  const header =
+    "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):";
+  const headerAt = text.indexOf(header);
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        `  body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${DEMO_JITTER_EVENT_ID}`,
+      ),
+    "watchdog reminder loop must follow the jitter backoff segment",
+  );
+  for (const line of [
+    `  fixed now: ${DEMO_REMINDER_NOW} — budgets: OPEN 7 days, PAID 7 days (dwell from the last history entry, strictly past the budget; terminal tasks are never stale even with a budget)`,
+    `  ${DEMO_REMINDER_STALE_TASK_ID}: state OPEN, entered ${DEMO_REMINDER_STALE_PUBLISH_AT}, dwell 21 days, SLA deadline ${DEMO_REMINDER_STALE_DEADLINE} — stale: true, overdue: false`,
+    `  ${DEMO_REMINDER_FRESH_TASK_ID}: state OPEN, entered ${DEMO_REMINDER_FRESH_PUBLISH_AT}, dwell 1 day — stale: false`,
+    `  ${DEMO_REMINDER_TERMINAL_TASK_ID}: state PAID, entered ${DEMO_REMINDER_TERMINAL_COMPLETE_AT}, dwell 22 days — stale: false (terminal beats the budget)`,
+    `  staleTasks selection: [${DEMO_REMINDER_STALE_TASK_ID}] — the fresh task is within budget, the terminal task is excluded despite its dwell`,
+    `  actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted`,
+    `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+  ]) {
+    assert.ok(text.includes(line), `missing reminder loop line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+  );
+});
+
+test("demo watchdog reminder loop segment is deterministic: two runs print byte-identical reminder lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + fixed-now + 3 task lines + selection + action +
+  // result lines; every value is a pinned literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 8);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(
+    a.watchdogReminderSelected.map((t) => t.id),
+    b.watchdogReminderSelected.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.watchdogReminderNotifiedIds,
+    b.watchdogReminderNotifiedIds,
+  );
+  assert.deepEqual(
+    a.watchdogReminderTasks.map((t) => t.state),
+    b.watchdogReminderTasks.map((t) => t.state),
+  );
+  assert.deepEqual(
+    a.watchdogReminderTasks.map((t) => t.history.length),
+    b.watchdogReminderTasks.map((t) => t.history.length),
   );
 });
