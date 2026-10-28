@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x jitterMs benchmark row
+  (backlog #685): `bench/bench.ts` adds a
+  `deliverPayoutWebhookToMany jitterMs fan-out (4 endpoints)` row
+  — the combination the single-endpoint jitter row and the plain
+  fan-out row each cover alone. One timed pass is two fan-outs:
+  a jittered 4-endpoint fan-out (every endpoint on a 500 / 500 /
+  200 script, backoffMs 100, maxAttempts 3, jitterMs 1000) whose
+  per-endpoint sleeps must land inside [100, 1100] and
+  [200, 1200], and a zero-jitter control fan-out sleeping exactly
+  [100, 200] per endpoint; every endpoint must report
+  `{ ok: true, attempts: 3, status: 200 }` with exactly 3 fetch
+  calls, so a retrying endpoint never consumes or blocks
+  another's budget. Each endpoint records its own sleeps,
+  because the deliveries run concurrently and a shared recorder
+  could not pin per-endpoint windows; the exact [100, 700]
+  spread stays pinned by the single-endpoint row, since
+  concurrent endpoints share the global `Math.random` and draw
+  order is nondeterministic. Every endpoint's final call body
+  carries the shared eventId and verifies under its own secret
+  (pinned outside the timed loop). No source change: the
+  combination was unmeasured, not unimplemented. README
+  Benchmarks table refreshed from this run.
 - RESUBMIT budget x payoutRef gate combination coverage
   (backlog #684): `test/resubmitPayoutRef.test.ts` (5 cases) pins
   that the two mechanisms are orthogonal — a maxResubmits-1 task
