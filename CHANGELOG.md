@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- RESUBMIT budget x payoutRef gate combination coverage
+  (backlog #684): `test/resubmitPayoutRef.test.ts` (5 cases) pins
+  that the two mechanisms are orthogonal — a maxResubmits-1 task
+  with requirePayoutRef that has spent its RESUBMIT and reached
+  PAYOUT_PENDING still rejects a payout without a ref
+  (`payout reference required: …`) with no history residue, no
+  seq gap and the RESUBMIT count still 1, and the corrected
+  payout with a ref (reusing the failed attempt's idempotency
+  key) succeeds; the budget stays exhausted for a second
+  RESUBMIT after a full resubmit round, the same round without
+  the gate pays out without a ref (control), and fromHistory
+  re-attaches both switches together. No source change: the
+  combination was untested, not unimplemented.
 - SLA overdue x DISPUTE budget combination coverage
   (backlog #683): `test/slaDisputeBudget.test.ts` (6 cases) pins
   that the two mechanisms are orthogonal — an exhausted budget
