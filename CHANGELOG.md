@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Watchdog `actOnStaleTasks` notify-only benchmark row
+  (backlog #686): `bench/bench.ts` adds an
+  `actOnStaleTasks notify-only (12 mixed-state tasks, fresh fixture)`
+  row — the reminder-loop shape (record the id, dispatch nothing)
+  that the demo's notify-only loop uses, previously invisible
+  beside the default-ABANDON executor row. One timed pass rebuilds
+  the same 12-task watchdog batch fresh (for parity with the other
+  executor rows, even though the action mutates nothing), runs
+  `actOnStaleTasks` with a notify-only action, and self-checks
+  every iteration: 4 notifications in batch order (WD-01, WD-04,
+  WD-06, WD-08), every outcome acted with no error and no audit
+  entry, and byte-identical states and histories across the whole
+  batch. This run: ~2,478 ops/sec (403.58 µs/op), against ~912.1
+  ops/sec for the default-ABANDON row — the gap is the dispatch
+  plus hash-chained audit entry the notify path skips, with the
+  fixture rebuild and byte self-checks still inside the timed
+  region. No source change: the path was unmeasured, not
+  unimplemented. README Benchmarks table refreshed from this run.
 - Payout webhook fan-out x jitterMs benchmark row
   (backlog #685): `bench/bench.ts` adds a
   `deliverPayoutWebhookToMany jitterMs fan-out (4 endpoints)` row
