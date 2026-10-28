@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- NDJSON history export x payout fields combination coverage
+  (backlog #674): `test/ndjsonPayout.test.ts` (12 cases) pins
+  that a PAID task's history — `payoutRef`/`payoutAmount` on its
+  PAYOUT_COMPLETE entry — survives NDJSON export and
+  `fromHistory` replay with history deep-equal, state PAID,
+  and `totalPaidOut` unchanged; zero amount, amount without
+  ref, and ref without amount each round-trip; a
+  PAYOUT_PENDING history keeps `requirePayoutRef` enforcement
+  after the NDJSON hop; and damaged payout lines fail closed
+  with the NDJSON line number (`invalid ndjson: line 8: …`
+  for negative / non-number amounts and empty refs, line 16
+  under blank-line shift), while a payoutAmount rewritten to
+  another valid number is caught by the hash chain instead
+  (the chain error carries no entry index, so it is not
+  retagged with a line number). No source change: the
+  combination was untested, not unimplemented.
 - A stale-task watchdog reminder loop in the CLI demo (backlog
   #672): a mixed batch — DEMO-057 idle in OPEN past its 7-day
   budget, DEMO-058 freshly active in OPEN, DEMO-059 terminal in
