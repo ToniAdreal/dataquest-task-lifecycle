@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- SLA overdue x DISPUTE budget combination coverage
+  (backlog #683): `test/slaDisputeBudget.test.ts` (6 cases) pins
+  that the two mechanisms are orthogonal — an exhausted budget
+  never blocks EXPIRE (a budget-1 task that spent its DISPUTE,
+  then RESUBMITs into CAPTURING, still expires once overdue, and
+  a budget-0 task expires without ever disputing), while being
+  overdue never waives the budget (a budget-1 task back in
+  REJECTED and overdue still gets `dispute budget exhausted:
+  1 of 1`); `expiredTasks` screening is budget-blind, the
+  `expireOverdueTasks` watchdog batch expires the CAPTURING
+  task and reports the REJECTED one as `invalid transition:
+  EXPIRE from REJECTED` (never a budget error), and a snapshot
+  round-trip preserves the combination on both sides. No
+  source change: the combination was untested, not
+  unimplemented — with one honest correction to the backlog
+  text, which assumed an overdue task that just disputed could
+  EXPIRE, but DISPUTED and REJECTED have no EXPIRE edge, so
+  the EXPIRE leg runs in CAPTURING, the state a RESUBMIT
+  lands in after the dispute round.
 - SLA overdue x RESUBMIT budget combination coverage
   (backlog #676): `test/slaResubmitBudget.test.ts` (6 cases) pins
   that the two mechanisms are orthogonal — an exhausted budget
