@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- NDJSON history export x unreconciled-payout screening combination
+  coverage (backlog #687): `test/ndjsonUnreconciled.test.ts` (5 cases)
+  pins that a mixed batch (ref PAID, no-ref PAID, request-only-ref
+  PAID, PAYOUT_PENDING, EXPIRED) screens identically before and after
+  a per-task NDJSON -> `fromHistory` round-trip, with state and full
+  history deep-equal; a ref on REQUEST_PAYOUT alone still leaves the
+  task unreconciled after the hop (the screen reads the
+  PAYOUT_COMPLETE entry, and NDJSON does not promote the request ref
+  onto it); a second hop keeps the screening identical; and damaged
+  payout lines fail closed with the NDJSON line number
+  (`invalid ndjson: line 8: …` for a negative payoutAmount and for
+  an empty payoutRef on the PAYOUT_COMPLETE line). No source change:
+  the combination was untested, not unimplemented.
 - Watchdog `actOnStaleTasks` notify-only benchmark row
   (backlog #686): `bench/bench.ts` adds an
   `actOnStaleTasks notify-only (12 mixed-state tasks, fresh fixture)`
