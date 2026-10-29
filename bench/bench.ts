@@ -38,7 +38,12 @@
  *      recorded `payoutAmount`s across the batch, the day-end total
  *      finance reconciliation checks the screened set against. This is
  *      the batch pass finance reconciliation runs over a whole task
- *      set, as opposed to the per-task webhook paths above;
+ *      set, as opposed to the per-task webhook paths above. A combined
+ *      row runs the whole forwarder-to-reconciliation chain over the
+ *      same batch: per task `historyToNdjson` -> `historyFromNdjson`
+ *      -> `TaskLifecycle.fromHistory`, then `unreconciledPayouts`
+ *      over the rebuilt batch, self-checked against the hand-computed
+ *      unreconciled ids and byte-identical re-exported NDJSON;
  *   7. payout webhook fan-out delivery — `deliverPayoutWebhookToMany()`
  *      delivering one PAID task's settlement event to 4 endpoints at
  *      once (one shared `eventId`, one byte-identical body, each copy
@@ -8076,6 +8081,51 @@ function benchUnreconciledPayouts(): number {
 }
 
 // ---------------------------------------------------------------------
+// NDJSON x unreconciledPayouts (12 PAID tasks): the forwarder-to-
+// reconciliation chain a batch pipeline actually runs — export each
+// screening-batch task to NDJSON, parse it back, rebuild the task with
+// `TaskLifecycle.fromHistory`, then screen the rebuilt batch. The
+// per-iteration self-check pins three things, so a degenerate replay
+// cannot fake the number: every rebuilt task keeps its id, PAID state,
+// and 8-entry history; re-exporting the rebuilt task reproduces the
+// original NDJSON byte for byte (canonical key order, hashes
+// included); and the rebuilt batch screens to exactly the
+// hand-computed unreconciled ids (BENCH-SCR-03 / -06 / -09 / -12),
+// in batch order — the same set the pre-hop batch screens to, so no
+// task gains or loses a payout reference in serialization.
+function benchNdjsonUnreconciledPayouts(): number {
+  return measure(() => {
+    const rebuilt = screeningBatch.map((task) => {
+      const ndjson = historyToNdjson(task);
+      const restored = TaskLifecycle.fromHistory(
+        task.id,
+        historyFromNdjson(ndjson),
+      );
+      if (
+        restored.id !== task.id ||
+        restored.state !== "PAID" ||
+        restored.history.length !== 8 ||
+        historyToNdjson(restored) !== ndjson
+      ) {
+        throw new Error(
+          "benchmark self-check failed: NDJSON x unreconciledPayouts replay fidelity",
+        );
+      }
+      return restored;
+    });
+    const screened = unreconciledPayouts(rebuilt);
+    if (
+      screened.map((t) => t.id).join(",") !==
+      expectedUnreconciledIds.join(",")
+    ) {
+      throw new Error(
+        "benchmark self-check failed: NDJSON x unreconciledPayouts screening",
+      );
+    }
+  }, ITERATIONS);
+}
+
+// ---------------------------------------------------------------------
 // history getter (defensive copy, 64 entries): `get history()` returns
 // a frozen array of frozen entry copies on every call — the O(n) copy
 // + per-entry Object.freeze the audit-immutability guarantee costs on
@@ -8247,6 +8297,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
+  { path: "NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks)", ops: benchNdjsonUnreconciledPayouts() },
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },

@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- NDJSON x unreconciled-payout screening combination benchmark
+  (backlog #700): `bench/bench.ts` gains
+  `benchNdjsonUnreconciledPayouts` — per iteration, each of the 12
+  screening-batch PAID tasks is exported with `historyToNdjson`,
+  parsed back with `historyFromNdjson`, and rebuilt with
+  `TaskLifecycle.fromHistory`, then the rebuilt batch is screened
+  with `unreconciledPayouts`. The per-iteration self-check pins
+  every rebuilt task's id, PAID state, and 8-entry history,
+  byte-identical re-exported NDJSON, and exactly the hand-computed
+  unreconciled ids (BENCH-SCR-03 / -06 / -09 / -12) in batch order.
+  This run: ~118.9 ops/sec (8408.80 µs/op), Node v24.22.1 / AMD
+  EPYC 9D25 shared host; README Benchmarks table refreshed to the
+  full 68-row run (67 -> 68 rows, dated 2026-10-29). No source
+  change: the combination was untested at bench level, not
+  unimplemented (unit coverage is backlog #687).
 - SLA batch expiry x event-level RBAC combination coverage
   (backlog #699): `test/expireOverdueRolePolicy.test.ts` (6 cases)
   pins that `expireOverdueTasks` — which dispatches EXPIRE as the
