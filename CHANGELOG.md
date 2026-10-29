@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x secret rotation combination coverage
+  (backlog #697): `test/payoutWebhookFanoutRotation.test.ts` (5 cases)
+  pins that one fan-out to a legacy endpoint (old secret) and a
+  migrated endpoint (new secret) delivers byte-identical bodies
+  (shared eventId and `at`), each signed with its own secret; each
+  copy verifies under `{ secrets: [new, old] }` and `[old, new]`,
+  never under the other endpoint's single secret, and a
+  single-candidate window rejects exactly the retired copy
+  (`[new]` rejects legacy only, `[old]` rejects migrated only) while
+  an unrelated secret fails both copies; a 500 legacy endpoint
+  exhausts only its own retries and never blocks the migrated
+  delivery or its rotation verification. No source change: the
+  combination was untested, not unimplemented.
 - NDJSON history export x unreconciled-payout screening combination
   coverage (backlog #687): `test/ndjsonUnreconciled.test.ts` (5 cases)
   pins that a mixed batch (ref PAID, no-ref PAID, request-only-ref
