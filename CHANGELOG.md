@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- DISPUTE rolePolicy x maxDisputes budget ordering combination coverage
+  (backlog #717): new `test/rbacDisputeBudget.test.ts` (6 cases) pins
+  the gate order inside `dispatch()` when both DISPUTE gates would
+  fail: an unauthorized actor (or a missing actor) still gets the
+  `actor not authorized for DISPUTE` error rather than the budget
+  error, the authorized actor gets `dispute budget exhausted: 1 of 1
+  DISPUTEs already used`, neither failed dispatch leaves a history
+  trace or consumes budget, an unauthorized rejection before the
+  budget is spent leaves the single appeal intact, the ordering
+  survives a `toJSON()`/`fromJSON()` round-trip (used count derived
+  from history, policy and budget restored from the snapshot), and
+  the transition check still precedes both gates. No source change:
+  the combination was untested, not unimplemented (`dispatch()`
+  already checks the policy before the budget).
 - Payout webhook fan-out x jitterMs combination coverage (backlog
   #714): new `test/payoutWebhookFanoutJitter.test.ts` (7 cases) pins
   that `deliverPayoutWebhookToMany` forwards call-level and
