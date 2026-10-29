@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x jitterMs combination coverage (backlog
+  #714): new `test/payoutWebhookFanoutJitter.test.ts` (7 cases) pins
+  that `deliverPayoutWebhookToMany` forwards call-level and
+  per-endpoint `jitterMs` into each endpoint's retry schedule: all
+  four endpoints answering 500/500/200 succeed with each endpoint's
+  sleeps inside `[backoff, backoff + jitterMs]` per attempt,
+  `jitterMs: 0` keeps the exact exponential schedule on every
+  endpoint, a per-endpoint value overrides the call-level one in
+  both directions (0 cancels it, a wider/narrower value wins), sleep
+  records never cross-wire between concurrently delivered endpoints
+  (distinct per-endpoint backoffs stay distinct), the jittered
+  fan-out still carries one shared `eventId` with per-endpoint
+  signatures, and one endpoint's jittered retries never delay a
+  sibling. No source change: the combination was untested, not
+  unimplemented (`deliverPayoutWebhookToMany` already resolves
+  `endpoint.jitterMs ?? call-level jitterMs`).
 - Payout webhook fan-out x Retry-After cap combination benchmark
   (backlog #710): `bench/bench.ts` gains
   `benchDeliverPayoutWebhookToManyRetryCap` — per iteration, one
