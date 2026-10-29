@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- DISPUTE budget x payout-reference gate combination coverage
+  (backlog #698): `test/disputePayoutRef.test.ts` (5 cases) pins
+  that a task which spent its one DISPUTE on a won appeal
+  (REJECTED -> DISPUTED -> APPROVED via ARBITRATE_APPROVE) still
+  has PAYOUT_COMPLETE without a payoutRef rejected with the pinned
+  `payout reference required: …` error, leaving history length,
+  seq continuity, and the history-derived DISPUTE count untouched,
+  and then settles with a ref; a rejected payout consumes no
+  idempotency key; the DISPUTE budget stays exhausted after a lost
+  appeal round even with the gate on; the same round without the
+  gate settles without a ref; and `fromHistory` re-attaches both
+  switches together. No source change: the combination was
+  untested, not unimplemented.
 - Payout webhook fan-out x secret rotation combination coverage
   (backlog #697): `test/payoutWebhookFanoutRotation.test.ts` (5 cases)
   pins that one fan-out to a legacy endpoint (old secret) and a
