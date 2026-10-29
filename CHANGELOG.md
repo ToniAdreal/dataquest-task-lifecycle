@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- SLA batch expiry x event-level RBAC combination coverage
+  (backlog #699): `test/expireOverdueRolePolicy.test.ts` (6 cases)
+  pins that `expireOverdueTasks` — which dispatches EXPIRE as the
+  `system` actor — expires exactly the overdue tasks whose EXPIRE
+  policy admits `system` (including a policy listing `system` among
+  other roles, and a policy covering only other events), reports a
+  policy that excludes `system` as a per-task `expired: false`
+  outcome with the pinned `actor not authorized for EXPIRE:
+  "system" is not in [ops-lead]` error (never throwing out of the
+  batch, even when the refused task comes first), leaves the refused
+  task's state and history untouched with no result entry, and leaves
+  it usable afterwards — its allowed actor can still EXPIRE it with
+  no seq gap. No source change: the combination was untested, not
+  unimplemented.
 - DISPUTE budget x payout-reference gate combination coverage
   (backlog #698): `test/disputePayoutRef.test.ts` (5 cases) pins
   that a task which spent its one DISPUTE on a won appeal
