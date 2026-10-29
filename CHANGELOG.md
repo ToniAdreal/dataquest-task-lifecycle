@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Stale-action x RBAC combination coverage (backlog #707): new
+  `test/staleActionRolePolicy.test.ts` (4 cases) pins that
+  `actOnStaleTasks()`'s default `system`-actor ABANDON is gated per task
+  by `rolePolicy`: a batch mixing an admitted task, a refused task, and
+  a policy-free task abandons exactly the admitted ones, reports the
+  RBAC refusal as a per-task outcome (never throwing out of the batch,
+  refused task first or not), leaves the refused task untouched with no
+  seq gap for its allowlisted actor, and that caller-supplied custom
+  actions are not gated by the default `system` actor. No source change:
+  the combination was untested, not unimplemented.
 - Payout webhook fan-out x Retry-After cap combination coverage
   (backlog #704): `test/payoutWebhookFanoutRetryCap.test.ts` (2 cases)
   pins that a 429 `Retry-After: 30` on one fan-out endpoint is
