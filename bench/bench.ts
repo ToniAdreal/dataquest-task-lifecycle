@@ -2740,6 +2740,184 @@ await runFanoutJitter(0);
   }
 }
 
+// Fan-out Retry-After cap fixture: the combination the fan-out jitter
+// row and the single-endpoint Retry-After cap row each cover alone —
+// `deliverPayoutWebhookToMany` to 4 fixed endpoints, one endpoint
+// (billing) answering 429 with a pinned `Retry-After: 30` header (a
+// 30000 ms hint) on its first attempt and 200 on its second, the
+// other three answering 200 immediately, with backoffMs 100 and
+// maxRetryDelayMs 5000 passed at the call level. Deliveries run
+// concurrently and retry budgets are per endpoint, so each endpoint
+// gets its OWN recording sleep: a shared recorder would interleave
+// the four endpoints' sleeps into one unordered list and could not
+// pin that exactly one clamped sleep belongs to the 429 endpoint
+// while the healthy endpoints sleep never. Per iteration, billing
+// must report { ok: true, attempts: 2, status: 200 } with exactly
+// one recorded sleep of exactly 5000 ms — Math.min(30000, 5000),
+// never the raw hint and never the 100 ms backoff base — while
+// every other endpoint reports { ok: true, attempts: 1,
+// status: 200 } with zero sleeps, so a clamped retry on one
+// endpoint never stalls or retries its siblings. All four bodies
+// must be byte-identical copies of the same shared eventId. No
+// network and no real waiting: every sleep only records, so the
+// 5000 ms clamp is asserted as a recorded value, never slept.
+// The exact clamp is pinned by the single-endpoint row too; this
+// row pins that the cap survives the fan-out path, where the
+// option could be dropped at the call level or at a per-endpoint
+// override without any single-endpoint test noticing.
+const FANOUT_RETRY_CAP_ENDPOINTS: Array<{ url: string; secret: string }> = [
+  { url: "https://billing.example.com/hooks/payout", secret: "bench-fanout-retrycap-secret-billing" },
+  { url: "https://risk.example.com/hooks/payout", secret: "bench-fanout-retrycap-secret-risk" },
+  { url: "https://notifications.example.com/hooks/payout", secret: "bench-fanout-retrycap-secret-notifications" },
+  { url: "https://ledger.example.com/hooks/payout", secret: "bench-fanout-retrycap-secret-ledger" },
+];
+const FANOUT_RETRY_CAP_HINT_SECONDS = "30";
+const FANOUT_RETRY_CAP_MAX_MS = 5_000;
+const FANOUT_RETRY_CAP_BACKOFF_MS = 100;
+
+interface FanoutRetryCapSlot {
+  calls: number;
+  sleeps: number[];
+  bodies: string[];
+  signatures: string[];
+}
+
+async function runFanoutRetryCapVariant(billingFirst: {
+  status: number;
+  headers?: Record<string, string>;
+}): Promise<{
+  out: Awaited<ReturnType<typeof deliverPayoutWebhookToMany>>;
+  perEndpoint: FanoutRetryCapSlot[];
+}> {
+  const perEndpoint: FanoutRetryCapSlot[] = FANOUT_RETRY_CAP_ENDPOINTS.map(
+    () => ({ calls: 0, sleeps: [], bodies: [], signatures: [] }),
+  );
+  const endpoints: PayoutWebhookEndpoint[] = FANOUT_RETRY_CAP_ENDPOINTS.map(
+    (endpoint, i) => ({
+      ...endpoint,
+      fetchImpl: async (_url, init) => {
+        const slot = perEndpoint[i];
+        slot.calls++;
+        slot.bodies.push(String(init.body));
+        slot.signatures.push(
+          String(new Headers(init.headers).get("x-hub-signature-256")),
+        );
+        if (i === 0 && slot.calls === 1) {
+          return new Response("rate limited", {
+            status: billingFirst.status,
+            headers: billingFirst.headers,
+          });
+        }
+        return new Response("{}", { status: 200 });
+      },
+      sleepImpl: async (ms: number) => {
+        perEndpoint[i].sleeps.push(ms);
+      },
+    }),
+  );
+  const out = await deliverPayoutWebhookToMany(paidTask, endpoints, {
+    backoffMs: FANOUT_RETRY_CAP_BACKOFF_MS,
+    maxRetryDelayMs: FANOUT_RETRY_CAP_MAX_MS,
+    now: WEBHOOK_NOW,
+    eventId: WEBHOOK_EVENT_ID,
+  });
+  return { out, perEndpoint };
+}
+
+async function runFanoutRetryCap(): Promise<FanoutRetryCapSlot[]> {
+  const { out, perEndpoint } = await runFanoutRetryCapVariant({
+    status: 429,
+    headers: { "retry-after": FANOUT_RETRY_CAP_HINT_SECONDS },
+  });
+  if (
+    out.results.length !== FANOUT_RETRY_CAP_ENDPOINTS.length ||
+    out.delivered !== FANOUT_RETRY_CAP_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results[0].ok !== true ||
+    out.results[0].attempts !== 2 ||
+    out.results[0].status !== 200 ||
+    out.results[0].error !== undefined ||
+    out.results
+      .slice(1)
+      .some(
+        (r) =>
+          !r.ok || r.attempts !== 1 || r.status !== 200 || r.error !== undefined,
+      ) ||
+    perEndpoint[0].calls !== 2 ||
+    perEndpoint.slice(1).some((slot) => slot.calls !== 1) ||
+    perEndpoint[0].sleeps.length !== 1 ||
+    perEndpoint[0].sleeps[0] !== FANOUT_RETRY_CAP_MAX_MS ||
+    perEndpoint.slice(1).some((slot) => slot.sleeps.length !== 0) ||
+    perEndpoint.some((slot) =>
+      slot.bodies.some((body) => body !== perEndpoint[0].bodies[0]),
+    ) ||
+    JSON.parse(perEndpoint[0].bodies[0]).eventId !== WEBHOOK_EVENT_ID
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany maxRetryDelayMs fan-out",
+    );
+  }
+  return perEndpoint;
+}
+
+// One-time fixture validation (outside the timed loop): one clamped
+// fan-out, then a signature probe — every endpoint's final call body
+// carries the shared eventId and verifies under that endpoint's own
+// secret — and two neighbouring-branch probes: a below-cap
+// `Retry-After: 2` hint on the 429 endpoint must be honored exactly
+// at 2000 ms (the cap clamps, it does not replace the hint), and a
+// 500 carrying a `Retry-After: 30` header must ignore the hint and
+// fall back to the 100 ms backoff base, the same rule as the
+// single-endpoint row and test/payoutWebhookFanoutRetryCap.test.ts.
+await runFanoutRetryCap();
+{
+  const probed = await runFanoutRetryCap();
+  for (const [i, endpoint] of FANOUT_RETRY_CAP_ENDPOINTS.entries()) {
+    const slot = probed[i];
+    const last = slot.bodies.length - 1;
+    if (
+      slot.bodies.some((body) => JSON.parse(body).eventId !== WEBHOOK_EVENT_ID)
+    ) {
+      throw new Error(
+        `benchmark fixture failed: fan-out retry-cap endpoint ${i} body eventId mismatch`,
+      );
+    }
+    if (
+      !verifyPayoutWebhook(slot.bodies[last], slot.signatures[last], endpoint.secret)
+    ) {
+      throw new Error(
+        `benchmark fixture failed: fan-out retry-cap endpoint ${i} signature does not verify`,
+      );
+    }
+  }
+  const belowCap = await runFanoutRetryCapVariant({
+    status: 429,
+    headers: { "retry-after": "2" },
+  });
+  if (
+    belowCap.perEndpoint[0].sleeps.length !== 1 ||
+    belowCap.perEndpoint[0].sleeps[0] !== 2_000 ||
+    belowCap.perEndpoint.slice(1).some((slot) => slot.sleeps.length !== 0)
+  ) {
+    throw new Error(
+      "benchmark fixture failed: fan-out retry-cap below-cap hint not honored",
+    );
+  }
+  const ignoredHint = await runFanoutRetryCapVariant({
+    status: 500,
+    headers: { "retry-after": FANOUT_RETRY_CAP_HINT_SECONDS },
+  });
+  if (
+    ignoredHint.perEndpoint[0].sleeps.length !== 1 ||
+    ignoredHint.perEndpoint[0].sleeps[0] !== FANOUT_RETRY_CAP_BACKOFF_MS ||
+    ignoredHint.perEndpoint.slice(1).some((slot) => slot.sleeps.length !== 0)
+  ) {
+    throw new Error(
+      "benchmark fixture failed: fan-out retry-cap 500 hint not ignored",
+    );
+  }
+}
+
 // AbortSignal pre-abort delivery fixture: the same signed webhook
 // (`webhook`, built once above) delivered to the single-target
 // endpoint through an injected counting fake fetch, with an
@@ -3050,6 +3228,10 @@ async function runDeliveryHeaderDelivery() {
   const result = await deliverPayoutWebhook(DELIVERY_HEADER_URL, webhook, {
     sleepImpl: deliveryHeaderNoSleep,
     backoffMs: 0,
+    // Loopback-only explicit opt-in (backlog #701's HTTPS default
+    // otherwise rejects this http://127.0.0.1 row; the same opt-in
+    // the demo and header tests already use for loopback servers).
+    allowInsecureHttp: true,
   });
   const captured = deliveryHeaderCaptures.slice(before);
   if (
@@ -7503,6 +7685,16 @@ async function benchDeliverPayoutWebhookToManyJitter(): Promise<number> {
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToManyRetryCap(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is one clamped fan-out: the 429 endpoint's
+    // single sleep is recorded as exactly 5000 ms, the three
+    // healthy endpoints sleep never (see the fan-out retry-cap
+    // fixture above).
+    await runFanoutRetryCap();
+  }, ITERATIONS);
+}
+
 async function benchDeliverPayoutWebhookAbortPre(): Promise<number> {
   return measureAsync(async () => {
     await runAbortPreDelivery();
@@ -8305,6 +8497,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },
   { path: "deliverPayoutWebhook jitterMs backoff", ops: await benchDeliverPayoutWebhookJitter() },
   { path: "deliverPayoutWebhookToMany jitterMs fan-out (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyJitter() },
+  { path: "deliverPayoutWebhookToMany maxRetryDelayMs fan-out (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyRetryCap() },
   { path: "deliverPayoutWebhook AbortSignal pre-abort", ops: await benchDeliverPayoutWebhookAbortPre() },
   { path: "deliverPayoutWebhook timeoutMs timeout", ops: await benchDeliverPayoutWebhookTimeout() },
   { path: "deliverPayoutWebhook delivery headers (loopback, 500 then 200)", ops: await benchDeliverPayoutWebhookDeliveryHeaders() },

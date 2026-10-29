@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x Retry-After cap combination benchmark
+  (backlog #710): `bench/bench.ts` gains
+  `benchDeliverPayoutWebhookToManyRetryCap` — per iteration, one
+  4-endpoint fan-out where the billing endpoint answers 429 with a
+  `Retry-After: 30` hint then 200 and the other three answer 200
+  immediately, under call-level `maxRetryDelayMs` 5000 and
+  `backoffMs` 100: the 429 endpoint reports
+  `{ ok: true, attempts: 2, status: 200 }` with exactly one recorded
+  sleep of exactly 5000 ms (the hint clamped, never the raw 30 s or
+  the 100 ms base), the healthy endpoints report
+  `{ ok: true, attempts: 1, status: 200 }` with zero sleeps, and all
+  four bodies are byte-identical copies of the shared `eventId`.
+  Outside the timed loop, per-endpoint signatures verify under each
+  endpoint's own secret, a below-cap `Retry-After: 2` hint is
+  honored exactly at 2000 ms, and a 500 carrying a `Retry-After`
+  header ignores the hint for the 100 ms backoff. No source change:
+  the combination was unbenchmarked, not unimplemented. README
+  Benchmarks prose and table refreshed from this run (69 paths;
+  new row 2,842 ops/sec). The same commit also repairs the bench
+  delivery-headers row, which backlog #701's HTTPS default had left
+  red: the loopback `http://127.0.0.1` delivery now passes the
+  explicit `allowInsecureHttp: true` opt-in the demo and header
+  tests already use, so `npm run bench` is green again.
 - Stale-action x RBAC combination coverage (backlog #707): new
   `test/staleActionRolePolicy.test.ts` (4 cases) pins that
   `actOnStaleTasks()`'s default `system`-actor ABANDON is gated per task
