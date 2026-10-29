@@ -6487,10 +6487,12 @@ export async function runDemo(): Promise<DemoResult> {
     idempotencyHeaderFirstResult = await deliverPayoutWebhook(
       idempotencyHeaderUrl,
       idempotencyHeaderWebhook,
+      { allowInsecureHttp: true },
     );
     idempotencyHeaderRetryResult = await deliverPayoutWebhook(
       idempotencyHeaderUrl,
       idempotencyHeaderWebhook,
+      { allowInsecureHttp: true },
     );
   } finally {
     await new Promise<void>((resolve) =>
@@ -6665,10 +6667,12 @@ export async function runDemo(): Promise<DemoResult> {
     eventIdHeaderFirstResult = await deliverPayoutWebhook(
       eventIdHeaderUrl,
       eventIdHeaderWebhook,
+      { allowInsecureHttp: true },
     );
     eventIdHeaderRetryResult = await deliverPayoutWebhook(
       eventIdHeaderUrl,
       eventIdHeaderWebhook,
+      { allowInsecureHttp: true },
     );
   } finally {
     await new Promise<void>((resolve) =>
@@ -6857,6 +6861,7 @@ export async function runDemo(): Promise<DemoResult> {
         backoffMs: 100,
         jitterMs: 1000,
         maxAttempts: 3,
+        allowInsecureHttp: true,
         sleepImpl: async (ms: number) => {
           jitterSleeps.push(ms);
         },
@@ -6869,6 +6874,7 @@ export async function runDemo(): Promise<DemoResult> {
         backoffMs: 100,
         jitterMs: 0,
         maxAttempts: 3,
+        allowInsecureHttp: true,
         sleepImpl: async (ms: number) => {
           exactSleeps.push(ms);
         },
@@ -6880,6 +6886,7 @@ export async function runDemo(): Promise<DemoResult> {
       {
         backoffMs: 100,
         jitterMs: 1000,
+        allowInsecureHttp: true,
         sleepImpl: async (ms: number) => {
           hintSleeps.push(ms);
         },

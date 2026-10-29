@@ -124,6 +124,7 @@ test("single delivery carries X-Event-Id equal to the body eventId", async () =>
     const result = await deliverPayoutWebhook(
       `${server.baseUrl}/hooks/payout`,
       webhook,
+      { allowInsecureHttp: true },
     );
     assert.deepEqual(result, { ok: true, attempts: 1, status: 200 });
     assert.equal(server.requests.length, 1);
@@ -162,7 +163,7 @@ test("retries re-POST the same X-Event-Id on every attempt", async () => {
     const result = await deliverPayoutWebhook(
       `${server.baseUrl}/hooks/payout`,
       webhook,
-      { backoffMs: 1 },
+      { backoffMs: 1, allowInsecureHttp: true },
     );
     assert.deepEqual(result, { ok: true, attempts: 3, status: 200 });
     assert.equal(server.requests.length, 3);
@@ -184,7 +185,7 @@ test("fan-out: every endpoint's request carries the shared eventId header", asyn
         { url: `${server.baseUrl}/billing`, secret: SECRET_BILLING },
         { url: `${server.baseUrl}/risk`, secret: SECRET_RISK },
       ],
-      { eventId: "evt-evt-shared", now: NOW },
+      { eventId: "evt-evt-shared", now: NOW, allowInsecureHttp: true },
     );
     assert.equal(out.delivered, 2);
     assert.equal(out.failed, 0);
@@ -253,7 +254,7 @@ test("fan-out: a failing endpoint never blocks another endpoint's header", async
         { url: `${baseUrl}/bad`, secret: SECRET, maxAttempts: 1 },
         { url: `${baseUrl}/good`, secret: SECRET },
       ],
-      { eventId: "evt-evt-partial", now: NOW },
+      { eventId: "evt-evt-partial", now: NOW, allowInsecureHttp: true },
     );
     assert.equal(out.delivered, 1);
     assert.equal(out.failed, 1);
@@ -280,8 +281,8 @@ test("independent deliveries carry their own, different X-Event-Ids", async () =
       eventId: "evt-evt-b",
       now: NOW,
     });
-    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, first);
-    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, second);
+    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, first, { allowInsecureHttp: true });
+    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, second, { allowInsecureHttp: true });
     assert.equal(server.requests.length, 2);
     assert.equal(server.requests[0].headers["x-event-id"], "evt-evt-a");
     assert.equal(server.requests[1].headers["x-event-id"], "evt-evt-b");
@@ -301,7 +302,7 @@ test("the header is not signed: verification runs over the body alone", async ()
       eventId: "evt-evt-unsigned-header",
       now: NOW,
     });
-    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, webhook);
+    await deliverPayoutWebhook(`${server.baseUrl}/hooks/payout`, webhook, { allowInsecureHttp: true });
     const [req] = server.requests;
     // The captured signature is exactly the build-time signature: the
     // header was added at delivery time and never entered the signed

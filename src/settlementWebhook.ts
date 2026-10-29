@@ -1040,6 +1040,20 @@ export interface DeliverPayoutWebhookOptions {
    * non-negative number.
    */
   jitterMs?: number;
+  /**
+   * Opt-out of the default HTTPS enforcement for this delivery.
+   * Default `false`: an `http:` URL is a caller configuration error
+   * and throws `cannot deliver payout webhook: …` before any request
+   * is made (zero fetch calls), because the payload carries a
+   * settlement amount and the `X-Hub-Signature-256` HMAC header, and
+   * over plaintext that signature header can be captured and replayed
+   * in full. Set `true` only for a loopback/test receiver (or another
+   * endpoint whose transport is secured some other way). Must be a
+   * boolean when present. Honest limit: this only rejects plaintext —
+   * it performs no certificate validation or TLS pinning, so an
+   * `https:` URL to an untrusted endpoint is still accepted.
+   */
+  allowInsecureHttp?: boolean;
   /** Fetch implementation. Defaults to the global `fetch`. */
   fetchImpl?: PayoutWebhookFetchImpl;
   /**
@@ -1199,6 +1213,7 @@ function defaultSleep(ms: number): Promise<void> {
  *   convention, it is reported in the result, not thrown.
  *
  * Invalid URLs (including the empty string), non-http(s) protocols,
+ * `http:` URLs without an explicit `allowInsecureHttp: true` opt-in,
  * and invalid options throw a `cannot deliver payout webhook: …`
  * configuration error before any request is made (zero fetch calls).
  */
@@ -1212,6 +1227,7 @@ interface ResolvedDeliverOptions {
   backoffMs: number;
   maxRetryDelayMs: number;
   jitterMs: number;
+  allowInsecureHttp: boolean;
   fetchImpl: PayoutWebhookFetchImpl;
   sleepImpl: (ms: number) => Promise<void>;
   signal?: AbortSignal;
@@ -1232,6 +1248,7 @@ function resolveDeliverOptions(
   const backoffMs = opts.backoffMs ?? 1000;
   const maxRetryDelayMs = opts.maxRetryDelayMs ?? 60_000;
   const jitterMs = opts.jitterMs ?? 0;
+  const allowInsecureHttp = opts.allowInsecureHttp ?? false;
   const fetchImpl: PayoutWebhookFetchImpl =
     opts.fetchImpl ?? ((u, init) => fetch(u, init));
   const sleepImpl = opts.sleepImpl ?? defaultSleep;
@@ -1271,6 +1288,16 @@ function resolveDeliverOptions(
       )}`,
     );
   }
+  if (
+    opts.allowInsecureHttp !== undefined &&
+    typeof opts.allowInsecureHttp !== "boolean"
+  ) {
+    throw new Error(
+      `cannot deliver payout webhook: allowInsecureHttp must be a boolean, got ${String(
+        opts.allowInsecureHttp,
+      )}`,
+    );
+  }
   if (opts.fetchImpl !== undefined && typeof opts.fetchImpl !== "function") {
     throw new Error(
       "cannot deliver payout webhook: fetchImpl must be a function",
@@ -1294,6 +1321,7 @@ function resolveDeliverOptions(
     backoffMs,
     maxRetryDelayMs,
     jitterMs,
+    allowInsecureHttp,
     fetchImpl,
     sleepImpl,
     signal: opts.signal,
@@ -1348,6 +1376,7 @@ export async function deliverPayoutWebhook(
     backoffMs,
     maxRetryDelayMs,
     jitterMs,
+    allowInsecureHttp,
     fetchImpl,
     sleepImpl,
     signal,
@@ -1374,6 +1403,11 @@ export async function deliverPayoutWebhook(
       `cannot deliver payout webhook: unsupported protocol ${JSON.stringify(
         target.protocol,
       )} (http/https only)`,
+    );
+  }
+  if (target.protocol === "http:" && !allowInsecureHttp) {
+    throw new Error(
+      "cannot deliver payout webhook: insecure http url rejected: use https or set allowInsecureHttp: true",
     );
   }
 
@@ -1489,6 +1523,13 @@ export interface PayoutWebhookEndpoint {
   maxRetryDelayMs?: number;
   /** Per-endpoint override of the call-level `jitterMs`. */
   jitterMs?: number;
+  /**
+   * Per-endpoint override of the call-level `allowInsecureHttp`:
+   * an `http:` endpoint without an explicit opt-in at either level
+   * is reported for that endpoint alone as
+   * `{ ok: false, attempts: 0, error: "cannot deliver payout webhook: insecure http url rejected: …" }`.
+   */
+  allowInsecureHttp?: boolean;
   /** Per-endpoint override of the call-level `signal`. */
   signal?: AbortSignal;
 }
@@ -1762,6 +1803,8 @@ export async function deliverPayoutWebhookToMany(
             backoffMs: endpoint.backoffMs ?? opts.backoffMs,
             maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
             jitterMs: endpoint.jitterMs ?? opts.jitterMs,
+            allowInsecureHttp:
+              endpoint.allowInsecureHttp ?? opts.allowInsecureHttp,
             fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
             sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
             signal,

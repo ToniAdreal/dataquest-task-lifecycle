@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 762 tests, all local
+npm test   # 773 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1159,7 +1159,18 @@ backoff sleep, makes no further attempts, and is reported as
 non-`AbortSignal` value is a configuration error. Delivery outcomes
 are reported in the result object, never thrown; invalid URLs and
 invalid options are caller configuration errors and throw before any
-request is made.
+request is made. Transport security: `deliverPayoutWebhook` (and each
+fan-out endpoint in `deliverPayoutWebhookToMany`) rejects `http:` URLs
+by default — a plaintext payout webhook would expose the settlement
+amount and let the `X-Hub-Signature-256` header be captured and
+replayed in full — throwing
+`cannot deliver payout webhook: insecure http url rejected: use https or set allowInsecureHttp: true`
+before any request is made. Set `allowInsecureHttp: true` (call-level,
+or per endpoint for fan-out) only for a loopback/test receiver or an
+endpoint secured some other way; a non-boolean value is itself a
+configuration error. Honest limit: this only rejects plaintext — it
+performs no certificate validation or TLS pinning, so an `https:` URL
+to an untrusted endpoint is still accepted.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
 with no network and no real sleeps.
 
@@ -1658,7 +1669,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 762 tests covering the happy path, reject→resubmit
+`npm test` runs 773 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

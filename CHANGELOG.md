@@ -11,6 +11,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook HTTPS enforcement by default (backlog #701):
+  `DeliverPayoutWebhookOptions.allowInsecureHttp` (default `false`)
+  rejects an `http:` URL in `deliverPayoutWebhook` before any request
+  is made (zero fetch calls) with the pinned `cannot deliver payout
+  webhook: insecure http url rejected: use https or set
+  allowInsecureHttp: true` configuration error, checked after URL
+  parsing and the http/https protocol whitelist; a non-boolean opt-in
+  is itself a configuration error. `PayoutWebhookEndpoint` gains the
+  same per-endpoint override, resolved as
+  `endpoint.allowInsecureHttp ?? call-level allowInsecureHttp` in
+  `deliverPayoutWebhookToMany`, where a rejected endpoint is reported
+  for that endpoint alone and never blocks the others. Existing
+  loopback-http call sites (the idempotency / X-Event-Id / jitter
+  tests and demo segments) now pass the explicit opt-in. README
+  Webhooks section and SECURITY.md gain the transport-security
+  statement, with the honest limit that plaintext rejection is not
+  certificate validation or TLS pinning. New
+  `test/payoutWebhookHttpsEnforcement.test.ts` (11 cases): default
+  rejection with zero fetch calls, opt-in delivery, https unaffected,
+  fan-out per-endpoint opt-in on/off, call-level opt-in, verbatim
+  rejection message, check order (URL parse -> protocol whitelist ->
+  https check), illegal opt-in type (single + per-endpoint), and an
+  uppercase HTTP scheme still rejected.
 - NDJSON x unreconciled-payout screening combination benchmark
   (backlog #700): `bench/bench.ts` gains
   `benchNdjsonUnreconciledPayouts` — per iteration, each of the 12

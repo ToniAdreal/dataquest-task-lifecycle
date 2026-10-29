@@ -7076,10 +7076,12 @@ test("demo shows the payout webhook Idempotency-Key header segment: both deliver
     const first = await deliverPayoutWebhook(
       `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
       independentWebhook,
+      { allowInsecureHttp: true },
     );
     const retry = await deliverPayoutWebhook(
       `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
       independentWebhook,
+      { allowInsecureHttp: true },
     );
     assert.deepEqual(
       [first.ok, first.attempts, first.status],
@@ -7331,10 +7333,12 @@ test("demo shows the payout webhook X-Event-Id header segment: both deliveries c
     const first = await deliverPayoutWebhook(
       `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
       independentWebhook,
+      { allowInsecureHttp: true },
     );
     const retry = await deliverPayoutWebhook(
       `http://127.0.0.1:${independentAddress.port}/hooks/payout`,
       independentWebhook,
+      { allowInsecureHttp: true },
     );
     assert.deepEqual([first.ok, first.attempts, first.status], [true, 1, 200]);
     assert.deepEqual([retry.ok, retry.attempts, retry.status], [true, 1, 200]);
@@ -7608,6 +7612,7 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
         backoffMs: 100,
         jitterMs: 1000,
         maxAttempts: 3,
+        allowInsecureHttp: true,
         sleepImpl: async (ms: number) => {
           independentSleeps.push(ms);
         },
@@ -7627,6 +7632,7 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
       {
         backoffMs: 100,
         jitterMs: 1000,
+        allowInsecureHttp: true,
         sleepImpl: async (ms: number) => {
           independentHintSleeps.push(ms);
         },

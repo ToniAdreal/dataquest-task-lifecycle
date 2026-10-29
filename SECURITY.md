@@ -118,6 +118,18 @@ webhook signatures (`src/settlementWebhook.ts`).
   are inclusive, the signature is checked first, and an unparseable
   `at` returns `false`. Together the two form a two-sided freshness
   window. Neither bound replaces deduplication on `eventId`.
+- **Payout webhook delivery rejects plaintext by default.**
+  `deliverPayoutWebhook` (and each fan-out endpoint in
+  `deliverPayoutWebhookToMany`) throws a caller configuration error
+  before any request when the URL is `http:` unless the caller
+  explicitly sets `allowInsecureHttp: true` (call-level, or per
+  endpoint for fan-out). The payload carries a settlement amount and
+  the `X-Hub-Signature-256` HMAC header, so plaintext delivery would
+  let the signature be captured and replayed in full. Honest limit:
+  this only rejects plaintext — it performs no certificate validation
+  or TLS pinning, so an `https:` URL to an untrusted endpoint is
+  still accepted, and the opt-in must only be used for loopback/test
+  receivers or endpoints secured some other way.
 - **Event-level RBAC allowlist (when a policy is set).** A task
   constructed with `rolePolicy` rejects a dispatch of a listed event
   whose `actor` is missing or not in the allowlist with
