@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x Retry-After cap combination coverage
+  (backlog #704): `test/payoutWebhookFanoutRetryCap.test.ts` (2 cases)
+  pins that a 429 `Retry-After: 30` on one fan-out endpoint is
+  clamped to the call-level `maxRetryDelayMs` (5000 ms here, not
+  30 seconds) before its retry while the sibling endpoint succeeds
+  untouched, and that a 500 carrying a `Retry-After` header does not
+  take the hint — it falls back to the 100 ms exponential backoff,
+  the same rule as the single-endpoint path. No source change: the
+  combination was untested, not unimplemented
+  (`deliverPayoutWebhookToMany` already resolves
+  `endpoint.maxRetryDelayMs ?? call-level maxRetryDelayMs`).
 - Payout webhook HTTPS enforcement by default (backlog #701):
   `DeliverPayoutWebhookOptions.allowInsecureHttp` (default `false`)
   rejects an `http:` URL in `deliverPayoutWebhook` before any request
