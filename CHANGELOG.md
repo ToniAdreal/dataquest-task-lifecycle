@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `actOnStaleTasks` x `subscribe` combination coverage (backlog
+  #732): new `test/staleActionSubscribe.test.ts` (7 cases) pins the
+  combination the two single-feature suites never exercised together
+  — a watchdog-driven default ABANDON notifies exactly once with the
+  ABANDON audit entry (frozen, matching the history last entry and
+  the executor's reported entry), a batch notifies only its acted
+  tasks once each while fresh and terminal tasks stay silent, a
+  policy-refused task (ABANDON allowlist without `system`) notifies
+  nobody and stays untouched before its allowlisted actor can still
+  abandon it with a notification, a failed ABANDON transition
+  notifies nobody and leaves no trace, a notify-only custom action
+  notifies nobody, an unsubscribed listener stays silent while the
+  executor still abandons, and a throwing listener is isolated so
+  the executor action and its peer still complete. No source change:
+  the combination was untested, not unimplemented.
 - Payout webhook `verifyPayoutWebhook` x `PayoutEventDedupe`
   receiver-flow benchmark row (backlog #729): new
   `benchVerifyPayoutWebhookDedupe` measures one receiver pass per
