@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `deliverPayoutWebhookToMany` x `PayoutEventDedupe`
+  endpoint-isolation coverage (backlog #740): new
+  `test/payoutWebhookFanoutDedupe.test.ts` (5 cases) pins the
+  combination the single-endpoint receiver flow (#726) and the
+  fan-out suite never exercised together — one fan-out to 4
+  endpoints where every receiver accepts its own per-endpoint-signed
+  copy of one shared eventId as a first sighting, re-delivery to
+  the same endpoint reporting duplicate on all four receivers, an
+  eventId recorded at endpoint A alone leaving endpoint B's first
+  delivery of the same eventId accepted (per-receiver dedupe state,
+  never shared across endpoints), a tampered delivery to one
+  endpoint recording nothing anywhere so its true delivery is still
+  first-seen, and a wire body recorded for A being rejected by B's
+  receiver (wrong-endpoint secret) without touching B's dedupe. No
+  source change: the isolation was untested, not unimplemented.
 - `actOnStaleTasks` x `subscribe` combination coverage (backlog
   #732): new `test/staleActionSubscribe.test.ts` (7 cases) pins the
   combination the two single-feature suites never exercised together
