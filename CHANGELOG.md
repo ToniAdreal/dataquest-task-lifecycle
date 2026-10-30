@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `verifyPayoutWebhook` + `PayoutEventDedupe`
+  receiver-flow coverage (backlog #726): new
+  `test/payoutWebhookVerifyDedupe.test.ts` (7 cases) pins the
+  documented verify-then-record order the two single-feature suites
+  never exercised together — a first verified delivery is accepted
+  and its verified re-delivery reports duplicate, a tampered body
+  verifies false and records nothing so the true delivery is still
+  first-seen, a forged delivery for an already-seen eventId is
+  rejected with dedupe stats untouched, the same eventId is
+  first-seen again at exactly the TTL boundary, a rotation-window
+  old-signed delivery is deduplicated exactly like a new-signed
+  one, an all-mismatch candidate pair verifies false and records
+  nothing, and an empty `secrets` array throws a configuration
+  error (not `false`) while recording nothing. No source change:
+  the combination was untested, not unimplemented.
 - Payout webhook `verifyPayoutWebhook` secrets-rotation x
   maxFutureSkewMs combination benchmark row (backlog #723): new
   `benchVerifyPayoutWebhookRotationFutureSkew` measures the
