@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Single-endpoint `deliverPayoutWebhook` maxRetryDelayMs x jitterMs
+  combination coverage (backlog #720): new
+  `test/payoutWebhookMaxRetryJitter.test.ts` (6 cases) pins the
+  combined semantics the two single-option suites never exercised
+  together — an over-cap 429 hint sleeps exactly `maxRetryDelayMs`
+  with jitter configured (jitter never pushes the clamped wait over
+  the cap), an under-cap hint sleeps exactly the hint with no jitter
+  added, a no-hint 500 stays inside the `[backoff, backoff +
+  jitterMs]` window, `jitterMs: 0` with an over-cap hint still sleeps
+  exactly the cap, an unparsable hint falls back to the jittered
+  backoff that the cap never clamps, and invalid cap/jitter
+  combinations throw before any request is made. No source change:
+  the combination was untested, not unimplemented (`retryDelayMs`
+  already clamps hints without jitter and only jitters the
+  hint-less backoff).
 - DISPUTE rolePolicy x maxDisputes budget ordering combination coverage
   (backlog #717): new `test/rbacDisputeBudget.test.ts` (6 cases) pins
   the gate order inside `dispatch()` when both DISPUTE gates would
