@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `verifyPayoutWebhook` secrets-rotation x
+  maxFutureSkewMs combination benchmark row (backlog #723): new
+  `benchVerifyPayoutWebhookRotationFutureSkew` measures the
+  old-signed fixed webhook under `{ secrets: [new, old],
+  maxFutureSkewMs: 300000, now: at - 60s }` — one failed HMAC trial
+  before the second-candidate match, then the freshness gate, in
+  that order — with outside-the-loop probes pinning the inclusive
+  skew boundary under rotation, the 1 ms beyond-window rejection
+  despite a successful rotation match, and the all-mismatch
+  candidate pair failing both inside and beyond the window
+  (skew-independent). No source change: the combination was
+  unbenchmarked, not unimplemented. This run: 55,566 ops/sec
+  (18.00 µs/op), Node v24.22.1; README Benchmarks table refreshed
+  to all 70 rows from this run, dated 2026-10-30.
 - Single-endpoint `deliverPayoutWebhook` maxRetryDelayMs x jitterMs
   combination coverage (backlog #720): new
   `test/payoutWebhookMaxRetryJitter.test.ts` (6 cases) pins the

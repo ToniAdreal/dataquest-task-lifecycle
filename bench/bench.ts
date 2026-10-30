@@ -1149,6 +1149,41 @@
  *      secret. No network and no real waiting: every sleep only
  *      records.
  *
+ *  59. payout webhook secrets-rotation x maxFutureSkewMs
+ *      combination verification — `verifyPayoutWebhook` with
+ *      `{ secrets: [new, old], maxFutureSkewMs, now }` over the
+ *      fixed webhook (signed with the OLD secret at the fixed
+ *      `WEBHOOK_NOW` / `WEBHOOK_EVENT_ID`, so the matching
+ *      candidate is the SECOND one tried) with an injected
+ *      receiver `now` 60 seconds before signing and a 300,000 ms
+ *      (5 minute) future-skew window on every iteration (see
+ *      the rotation x future-skew fixture below). This is the
+ *      steady-state receiver cost inside a rotation window
+ *      when the sender clock runs ahead: every delivery pays
+ *      one failed HMAC trial before the match (the rotation
+ *      row, group 36) AND the freshness gate after the match
+ *      (the future-skew row, group 41) — the semantic anchor
+ *      is that the freshness gate runs only after a signature
+ *      matches, so rotation matching comes first and the skew
+ *      rejection second, and neither row alone exercises the
+ *      pair. Every timed iteration checks the verdict is
+ *      exactly true (a future skew of 60,000 ms inside the
+ *      window, matched by the second candidate). Outside the
+ *      timed loop, a payload skewed exactly `maxFutureSkewMs`
+ *      under rotation is pinned to true (the inclusive
+ *      boundary, same as the single-secret row), a payload
+ *      1 ms beyond the window under rotation is pinned to
+ *      false (the skew gate rejects even a correctly
+ *      rotation-matched signature), and an all-mismatch
+ *      candidate pair under the same skew window is pinned to
+ *      false both inside and beyond the window (the failure
+ *      is signature-driven and skew-independent: no
+ *      freshness window can rescue a signature that never
+ *      matched). No network, no randomness, and no wall
+ *      clock: the signed fixture is built once from pinned
+ *      secret / timestamp / eventId and every receiver `now`
+ *      is an injected fixed instant.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -1550,6 +1585,74 @@ try {
 if (webhookMaxFutureSkewIllegalError !== WEBHOOK_MAX_FUTURE_SKEW_ILLEGAL_ERROR) {
   throw new Error(
     "benchmark fixture failed: webhook maxFutureSkewMs illegal value error mismatch",
+  );
+}
+// secrets-rotation x maxFutureSkewMs fixture checks, outside the
+// timed loop: the main webhook above is signed with WEBHOOK_SECRET,
+// which plays the OLD secret; under { secrets: [new, old],
+// maxFutureSkewMs: 300000, now: WEBHOOK_NOW - 60s } it must verify
+// (a future skew of 60,000 ms inside the 5-minute window, matched
+// by the second candidate — one failed HMAC trial, then the
+// freshness gate, in that order), exactly at the inclusive skew
+// boundary (now = at - maxFutureSkewMs) it must still verify,
+// 1 ms beyond the window it must return false even though the
+// rotation match succeeds (the skew gate runs after the match),
+// and an all-mismatch candidate pair must return false both
+// inside and beyond the window (the failure is signature-driven
+// and skew-independent: freshness never rescues a bad signature).
+const WEBHOOK_ROTATION_FUTURE_SKEW_OPTS = {
+  secrets: [WEBHOOK_ROTATION_NEW_SECRET, WEBHOOK_SECRET],
+  maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+  now: WEBHOOK_MAX_FUTURE_SKEW_NOW,
+};
+if (
+  !verifyPayoutWebhook(
+    webhookBody,
+    webhook.signature,
+    undefined,
+    WEBHOOK_ROTATION_FUTURE_SKEW_OPTS,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook rotation x maxFutureSkewMs verify",
+  );
+}
+if (
+  !verifyPayoutWebhook(webhookBody, webhook.signature, undefined, {
+    secrets: [WEBHOOK_ROTATION_NEW_SECRET, WEBHOOK_SECRET],
+    maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+    now: WEBHOOK_MAX_FUTURE_SKEW_BOUNDARY_NOW,
+  })
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook rotation x maxFutureSkewMs boundary must be true",
+  );
+}
+if (
+  verifyPayoutWebhook(webhookBody, webhook.signature, undefined, {
+    secrets: [WEBHOOK_ROTATION_NEW_SECRET, WEBHOOK_SECRET],
+    maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+    now: WEBHOOK_MAX_FUTURE_SKEW_BEYOND_NOW,
+  })
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook rotation x maxFutureSkewMs beyond-skew must be false",
+  );
+}
+if (
+  verifyPayoutWebhook(webhookBody, webhook.signature, undefined, {
+    secrets: [WEBHOOK_ROTATION_NEW_SECRET, WEBHOOK_ROTATION_UNRELATED_SECRET],
+    maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+    now: WEBHOOK_MAX_FUTURE_SKEW_NOW,
+  }) ||
+  verifyPayoutWebhook(webhookBody, webhook.signature, undefined, {
+    secrets: [WEBHOOK_ROTATION_NEW_SECRET, WEBHOOK_ROTATION_UNRELATED_SECRET],
+    maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+    now: WEBHOOK_MAX_FUTURE_SKEW_BEYOND_NOW,
+  })
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook rotation x maxFutureSkewMs all-mismatch must be false",
   );
 }
 const ndjsonFixture = historyToNdjson(historyFixture);
@@ -7609,6 +7712,23 @@ function benchVerifyPayoutWebhookMaxFutureSkew(): number {
   }, ITERATIONS);
 }
 
+function benchVerifyPayoutWebhookRotationFutureSkew(): number {
+  return measure(() => {
+    if (
+      verifyPayoutWebhook(
+        webhookBody,
+        webhook.signature,
+        undefined,
+        WEBHOOK_ROTATION_FUTURE_SKEW_OPTS,
+      ) !== true
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook secrets rotation x maxFutureSkewMs",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchHistoryToNdjson(): number {
   return measure(() => {
     if (historyToNdjson(historyFixture) !== ndjsonFixture) {
@@ -8485,6 +8605,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyPayoutWebhook (secrets rotation, 2 candidates)", ops: benchVerifyPayoutWebhookSecretsRotation() },
   { path: "verifyPayoutWebhook maxAgeMs freshness window", ops: benchVerifyPayoutWebhookMaxAge() },
   { path: "verifyPayoutWebhook maxFutureSkewMs future-skew window", ops: benchVerifyPayoutWebhookMaxFutureSkew() },
+  { path: "verifyPayoutWebhook (secrets rotation x maxFutureSkewMs)", ops: benchVerifyPayoutWebhookRotationFutureSkew() },
   { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
