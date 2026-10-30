@@ -1184,6 +1184,30 @@
  *      secret / timestamp / eventId and every receiver `now`
  *      is an injected fixed instant.
  *
+ *  60. payout webhook verify x dedupe receiver flow —
+ *      `verifyPayoutWebhook` followed by
+ *      `PayoutEventDedupe.checkAndRecord()` over the fixed signed
+ *      webhook, one measured op per receiver pass (see the
+ *      receiver-flow fixture below). This is the #726 test row's
+ *      bench variant: the per-delivery cost a receiver actually
+ *      pays, which neither the verify-only rows nor the
+ *      dedupe-only rows exercise together. One measured op runs
+ *      three deliveries: a first sighting (the genuine body
+ *      verifies true, a fresh id records as first-seen), its
+ *      redelivery (the same body verifies true again, the same
+ *      id reports duplicate), and a tampered delivery (the
+ *      tampered body verifies false, so the receiver never
+ *      reaches the dedupe step — proven by a later genuine
+ *      delivery carrying the tampered delivery's claimed id
+ *      still recording as first-seen). The dedupe step takes
+ *      the id string, not the body, so the timed path uses
+ *      per-iteration synthetic ids standing in for
+ *      `payload.eventId`; the verify steps run over the real
+ *      fixed signed body and its one-character-tampered twin.
+ *      No network, no randomness, no wall clock: the dedupe
+ *      runs under an injected fixed clock, so no entry expires
+ *      or is evicted in the timed loop.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -3426,6 +3450,42 @@ if (
   throw new Error("benchmark fixture failed: dedupe stats do not match calls");
 }
 let dedupeCursor = 0;
+
+// Receiver-flow fixture: verifyPayoutWebhook x PayoutEventDedupe —
+// the #726 test row's bench variant. The verify steps run over the
+// fixed signed webhook (`webhookBody` / `webhook.signature`) and its
+// one-character-tampered twin (the `eventId` value swapped from
+// `bench-event-001` to `bench-event-002`, so the signature no longer
+// matches). The dedupe step takes the id string, not the body, so
+// the timed path uses per-iteration synthetic ids standing in for
+// `payload.eventId` (see `benchVerifyPayoutWebhookDedupe`). The
+// dedicated dedupe runs under an injected FIXED clock (the same
+// `DEDUPE_NOW_MS` instant, so no entry expires) with capacity
+// 100,000 — one measured op records exactly two ids, and warmup +
+// timed calls total 3,200 ops, so 6,400 live entries stay far under
+// the cap and nothing is evicted in the timed loop. No network, no
+// randomness, no wall clock.
+const WEBHOOK_TAMPERED_BODY = webhookBody.replace(
+  WEBHOOK_EVENT_ID,
+  "bench-event-002",
+);
+if (
+  WEBHOOK_TAMPERED_BODY === webhookBody ||
+  verifyPayoutWebhook(
+    WEBHOOK_TAMPERED_BODY,
+    webhook.signature,
+    WEBHOOK_SECRET,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: tampered webhook body must fail verification",
+  );
+}
+const receiverDedupe = new PayoutEventDedupe({
+  now: () => DEDUPE_NOW_MS,
+  maxEntries: 100_000,
+});
+let receiverDedupeCounter = 0;
 
 // Dedupe-restore fixture: a 1,000-entry snapshot of a dedupe that
 // recorded the fixed ids `bench-restore-0000` ..
@@ -7729,6 +7789,69 @@ function benchVerifyPayoutWebhookRotationFutureSkew(): number {
   }, ITERATIONS);
 }
 
+function benchVerifyPayoutWebhookDedupe(): number {
+  return measure(() => {
+    const n = receiverDedupeCounter++;
+    const freshId = `bench-recv-${n}`;
+    const tamperedId = `bench-recv-tampered-${n}`;
+    // First sighting: the genuine delivery verifies and records as
+    // first-seen (process the event).
+    if (
+      !verifyPayoutWebhook(webhookBody, webhook.signature, WEBHOOK_SECRET)
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe first sighting verify",
+      );
+    }
+    if (receiverDedupe.checkAndRecord(freshId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe first sighting must be new",
+      );
+    }
+    // Redelivery: the same body verifies again, but the same id now
+    // reports duplicate (acknowledge, do not pay out twice).
+    if (
+      !verifyPayoutWebhook(webhookBody, webhook.signature, WEBHOOK_SECRET)
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe redelivery verify",
+      );
+    }
+    if (!receiverDedupe.checkAndRecord(freshId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe redelivery must be duplicate",
+      );
+    }
+    // Tampered delivery: the signature fails, so the receiver never
+    // reaches the dedupe step. Proven by the next step: a genuine
+    // delivery carrying the tampered delivery's claimed id still
+    // records as first-seen, so the rejection recorded nothing.
+    if (
+      verifyPayoutWebhook(
+        WEBHOOK_TAMPERED_BODY,
+        webhook.signature,
+        WEBHOOK_SECRET,
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe tampered body must fail",
+      );
+    }
+    if (
+      !verifyPayoutWebhook(webhookBody, webhook.signature, WEBHOOK_SECRET)
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe post-tamper verify",
+      );
+    }
+    if (receiverDedupe.checkAndRecord(tamperedId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook x dedupe tampered id must still be new",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchHistoryToNdjson(): number {
   return measure(() => {
     if (historyToNdjson(historyFixture) !== ndjsonFixture) {
@@ -8606,6 +8729,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyPayoutWebhook maxAgeMs freshness window", ops: benchVerifyPayoutWebhookMaxAge() },
   { path: "verifyPayoutWebhook maxFutureSkewMs future-skew window", ops: benchVerifyPayoutWebhookMaxFutureSkew() },
   { path: "verifyPayoutWebhook (secrets rotation x maxFutureSkewMs)", ops: benchVerifyPayoutWebhookRotationFutureSkew() },
+  { path: "verifyPayoutWebhook x PayoutEventDedupe receiver flow", ops: benchVerifyPayoutWebhookDedupe() },
   { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },

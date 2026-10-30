@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `verifyPayoutWebhook` x `PayoutEventDedupe`
+  receiver-flow benchmark row (backlog #729): new
+  `benchVerifyPayoutWebhookDedupe` measures one receiver pass per
+  timed op over the fixed signed webhook — a first sighting
+  (genuine body verifies, fresh id records as first-seen), its
+  redelivery (same body verifies again, same id reports
+  duplicate), and a tampered delivery (tampered body verifies
+  false, so the receiver never reaches the dedupe step, proven
+  by a later genuine delivery carrying the tampered delivery's
+  claimed id still recording as first-seen) — the bench variant
+  of the #726 test row, which neither the verify-only rows nor
+  the dedupe-only rows exercise together. No source change:
+  the combination was unbenchmarked, not unimplemented. This
+  run: 18,645 ops/sec (53.63 µs/op), Node v24.22.1. The README
+  Benchmarks table is refreshed from this run (70 -> 71 rows).
 - Payout webhook `verifyPayoutWebhook` + `PayoutEventDedupe`
   receiver-flow coverage (backlog #726): new
   `test/payoutWebhookVerifyDedupe.test.ts` (7 cases) pins the
