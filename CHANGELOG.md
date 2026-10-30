@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `actOnStaleTasks` x `subscribe` benchmark row (backlog #746):
+  new `benchActOnStaleTasksSubscribe` measures one watchdog batch
+  ABANDON pass plus its subscription fan-out per timed op over
+  the fixed 12-task watchdog batch, rebuilt fresh on every
+  iteration with a collecting listener subscribed to every task
+  before the default ABANDON action — self-checked per iteration
+  for exactly 1 notification, the WD-04 ABANDON ACCEPTED ->
+  ABANDONED carrying its audit entry, because only WD-04 can be
+  abandoned and the three failed attempts notify nobody; outside
+  the timed loop, a notify-only action notifies nobody and an
+  unsubscribed batch stays silent while WD-04 is still abandoned.
+  No source change: the combination was unbenchmarked, not
+  unimplemented (the #732 test row pins the same combination).
+  This run: 827.3 ops/sec (1208.80 µs/op), Node v24.22.1. The
+  README Benchmarks table is refreshed from this run (72 -> 73
+  rows).
 - Payout webhook `deliverPayoutWebhookToMany` x `PayoutEventDedupe`
   fan-out receiver-flow benchmark row (backlog #744): new
   `benchDeliverPayoutWebhookToManyDedupe` measures one fan-out
