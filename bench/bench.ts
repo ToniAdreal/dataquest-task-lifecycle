@@ -1208,6 +1208,25 @@
  *      runs under an injected fixed clock, so no entry expires
  *      or is evicted in the timed loop.
  *
+ *  61. payout webhook fan-out x dedupe receiver flow —
+ *      `deliverPayoutWebhookToMany` followed, per endpoint, by
+ *      `verifyPayoutWebhook` under that endpoint's own secret and
+ *      `PayoutEventDedupe.checkAndRecord()` on the shared eventId
+ *      (see the fan-out receiver fixture below). This is the #740
+ *      test row's bench variant: the per-delivery cost each of the
+ *      4 receivers actually pays when one settlement event fans
+ *      out, which neither the fan-out-only row nor the
+ *      single-endpoint receiver-flow row exercises together. One
+ *      measured op runs two fan-outs of one fresh eventId: the
+ *      first fan-out's 4 copies each verify and record as a first
+ *      sighting, and the redelivery fan-out's 4 copies each verify
+ *      again but report duplicate. Each endpoint owns an
+ *      independent dedupe under the same injected fixed clock
+ *      (capacity 100,000, so the 3,200 ids recorded per dedupe
+ *      across warmup + timed calls never evict). No network, no
+ *      randomness, no wall clock: the fan-out uses the injected
+ *      fake fetch that answers 200 immediately.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -3486,6 +3505,104 @@ const receiverDedupe = new PayoutEventDedupe({
   maxEntries: 100_000,
 });
 let receiverDedupeCounter = 0;
+
+// Fan-out receiver fixture: deliverPayoutWebhookToMany x
+// PayoutEventDedupe — the #740 test row's bench variant. One
+// independent dedupe per fan-out endpoint (the #740 isolation
+// rule: endpoint A's first sighting must never mark endpoint B's
+// first delivery of the same eventId a duplicate), each under the
+// same injected FIXED clock (DEDUPE_NOW_MS, so no entry expires)
+// with capacity 100,000 — one measured op records exactly one
+// fresh id per dedupe, and warmup + timed calls total 3,200 ops,
+// so 3,200 live entries per dedupe stay far under the cap and
+// nothing is evicted in the timed loop. The fan-out itself reuses
+// the plain fan-out fixture above (FANOUT_ENDPOINTS, fanoutFetch,
+// fanoutNoSleep, WEBHOOK_NOW) with a per-iteration fresh eventId,
+// so the first fan-out is a genuine first sighting on every
+// receiver and the second fan-out with the same eventId is a
+// genuine redelivery on every receiver. No network, no
+// randomness, no wall clock.
+const fanoutReceiverDedupes: PayoutEventDedupe[] = FANOUT_ENDPOINTS.map(
+  () =>
+    new PayoutEventDedupe({
+      now: () => DEDUPE_NOW_MS,
+      maxEntries: 100_000,
+    }),
+);
+let fanoutReceiverCounter = 0;
+
+async function runFanoutReceiver(eventId: string): Promise<{
+  delivered: number;
+  firstSeen: number;
+  duplicates: number;
+}> {
+  fanoutCalls = [];
+  const out = await deliverPayoutWebhookToMany(paidTask, FANOUT_ENDPOINTS, {
+    fetchImpl: fanoutFetch,
+    sleepImpl: fanoutNoSleep,
+    now: WEBHOOK_NOW,
+    eventId,
+  });
+  if (
+    out.results.length !== FANOUT_ENDPOINTS.length ||
+    out.delivered !== FANOUT_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results.some((r) => !r.ok || r.attempts !== 1 || r.status !== 200) ||
+    fanoutCalls.length !== FANOUT_ENDPOINTS.length
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe fan-out",
+    );
+  }
+  let firstSeen = 0;
+  let duplicates = 0;
+  for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
+    const call = fanoutCalls.find((c) => c.url === endpoint.url);
+    if (
+      !call ||
+      JSON.parse(call.body).eventId !== eventId ||
+      !verifyPayoutWebhook(call.body, call.signature, endpoint.secret)
+    ) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x dedupe endpoint ${i} copy does not verify`,
+      );
+    }
+    if (fanoutReceiverDedupes[i].checkAndRecord(eventId)) {
+      duplicates++;
+    } else {
+      firstSeen++;
+    }
+  }
+  return { delivered: out.delivered, firstSeen, duplicates };
+}
+
+// One-time fixture validation (outside the timed loop): a fresh
+// fan-out records a first sighting on all 4 receivers, and its
+// redelivery reports duplicate on all 4 — the same shapes the
+// timed loop self-checks on every iteration, pinned once here
+// on a fixture eventId the timed loop never reuses.
+{
+  const fixture = await runFanoutReceiver("bench-fanout-recv-fixture");
+  if (
+    fixture.delivered !== 4 ||
+    fixture.firstSeen !== 4 ||
+    fixture.duplicates !== 0
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x dedupe first fan-out",
+    );
+  }
+  const redelivery = await runFanoutReceiver("bench-fanout-recv-fixture");
+  if (
+    redelivery.delivered !== 4 ||
+    redelivery.firstSeen !== 0 ||
+    redelivery.duplicates !== 4
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x dedupe redelivery fan-out",
+    );
+  }
+}
 
 // Dedupe-restore fixture: a 1,000-entry snapshot of a dedupe that
 // recorded the fixed ids `bench-restore-0000` ..
@@ -7938,6 +8055,37 @@ async function benchDeliverPayoutWebhookToManyRetryCap(): Promise<number> {
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToManyDedupe(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is two fan-outs of one fresh eventId: the
+    // first fan-out's 4 copies each verify and record as a first
+    // sighting, and the redelivery fan-out's 4 copies each verify
+    // again but report duplicate (see the fan-out receiver
+    // fixture above).
+    const eventId = `bench-fanout-recv-${fanoutReceiverCounter++}`;
+    const first = await runFanoutReceiver(eventId);
+    if (
+      first.delivered !== 4 ||
+      first.firstSeen !== 4 ||
+      first.duplicates !== 0
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe first sightings",
+      );
+    }
+    const redelivery = await runFanoutReceiver(eventId);
+    if (
+      redelivery.delivered !== 4 ||
+      redelivery.firstSeen !== 0 ||
+      redelivery.duplicates !== 4
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe redelivery must be duplicate",
+      );
+    }
+  }, ITERATIONS);
+}
+
 async function benchDeliverPayoutWebhookAbortPre(): Promise<number> {
   return measureAsync(async () => {
     await runAbortPreDelivery();
@@ -8737,6 +8885,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks)", ops: benchNdjsonUnreconciledPayouts() },
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
+  { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
   { path: "deliverPayoutWebhook (single endpoint)", ops: await benchDeliverPayoutWebhook() },
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },

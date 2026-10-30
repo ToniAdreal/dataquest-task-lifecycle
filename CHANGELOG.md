@@ -12,6 +12,20 @@ change type; no entry describes a feature that is not in the history.
 ### Added
 
 - Payout webhook `deliverPayoutWebhookToMany` x `PayoutEventDedupe`
+  fan-out receiver-flow benchmark row (backlog #744): new
+  `benchDeliverPayoutWebhookToManyDedupe` measures one fan-out
+  receiver pass per timed op over the plain fan-out fixture — a
+  fresh fan-out of one eventId to 4 endpoints, each copy verified
+  under its own endpoint's secret and recorded as a first sighting
+  on that endpoint's independent dedupe, followed by a redelivery
+  fan-out of the same eventId whose 4 copies verify again but
+  report duplicate — the bench variant of the #740 test row,
+  which neither the fan-out-only row nor the single-endpoint
+  receiver-flow row exercises together. No source change: the
+  combination was unbenchmarked, not unimplemented. This run:
+  2,819 ops/sec (354.68 µs/op), Node v24.22.1. The README
+  Benchmarks table is refreshed from this run (71 -> 72 rows).
+- Payout webhook `deliverPayoutWebhookToMany` x `PayoutEventDedupe`
   endpoint-isolation coverage (backlog #740): new
   `test/payoutWebhookFanoutDedupe.test.ts` (5 cases) pins the
   combination the single-endpoint receiver flow (#726) and the
