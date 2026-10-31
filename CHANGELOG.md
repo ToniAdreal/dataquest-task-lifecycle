@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- NDJSON x snapshot RBAC recovery asymmetry coverage (backlog #764):
+  new `test/ndjsonRbacAsymmetry.test.ts` (4 cases) pins the recovery
+  asymmetry the two single-feature suites never exercised together —
+  a JSON snapshot round-trip preserves the `rolePolicy`, so a
+  contributor is still refused the gated arbitration event, while
+  an NDJSON history restored via `fromHistory()` without a
+  re-attached policy restores state and history but is unrestricted
+  (the log carries no policy, and the NDJSON text contains neither
+  the policy field nor the moderator name), and re-attaching the
+  same policy on `fromHistory()` gates again. No source change:
+  the asymmetry is documented behaviour, pinned so NDJSON is never
+  mistaken for a policy-restore channel.
 - `payoutWebhookFanoutLimits` x `PayoutEventDedupe` combination coverage
   (backlog #761): new `test/payoutWebhookFanoutLimitsDedupe.test.ts`
   (2 cases) pins the combination the two single-feature suites never
