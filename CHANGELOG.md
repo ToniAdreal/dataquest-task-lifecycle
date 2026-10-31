@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `payoutWebhookFanoutLimits` x `PayoutEventDedupe` combination coverage
+  (backlog #761): new `test/payoutWebhookFanoutLimitsDedupe.test.ts`
+  (2 cases) pins the combination the two single-feature suites never
+  exercised together — an over-`maxEndpoints` batch refused before
+  any request, leaving all four receivers' dedupes empty, and a
+  3-endpoint batch where one endpoint's retries are exhausted on
+  500s while the other two endpoints record first sightings, the
+  failed endpoint's dedupe stays empty despite two wire attempts,
+  and its later true delivery of the same eventId is still a first
+  sighting. No source change: the combination was untested, not
+  unimplemented (the dataquest-side peer of escrow #758).
 - `payoutWebhookFanoutDedupe` x secret rotation combination coverage
   (backlog #756): new `test/payoutWebhookFanoutDedupeRotation.test.ts`
   (5 cases) pins the combination the two single-feature suites never
