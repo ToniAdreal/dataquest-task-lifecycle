@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x `PayoutEventDedupe` x `jitterMs`
+  combination coverage (backlog #774): new
+  `test/payoutWebhookFanoutDedupeJitter.test.ts` (3 cases) pins the
+  combination the fan-out/dedupe (#740) and fan-out/jitter (#714)
+  suites never exercised together — a 500/500/200 endpoint sleeps
+  twice inside the jitter windows, resends byte-identical bodies,
+  and its successful delivery is still a first sighting (sender-side
+  retries are not receiver-side duplicates); an endpoint that
+  exhausts its retries records nothing, so a later true delivery of
+  the same eventId is still accepted and only its re-presentation
+  reports duplicate, without disturbing sibling dedupes; and one
+  endpoint's jittered retries never make a sibling's first delivery
+  a duplicate. No source change: the combination was untested, not
+  unimplemented.
+
 - Payout webhook `Idempotency-Key` x `PayoutEventDedupe` combination
   coverage (backlog #768): new
   `test/payoutWebhookIdempotencyKeyDedupe.test.ts` (6 cases) pins the
