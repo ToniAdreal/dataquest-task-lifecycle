@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `expireOverdueTasks` x `subscribe` combination coverage (backlog
+  #748): new `test/expireOverdueSubscribe.test.ts` (5 cases) pins the
+  combination the two single-feature suites never exercised together
+  — a watchdog-driven expiry notifies exactly once with the EXPIRE
+  audit entry (frozen, matching the history last entry and the
+  executor's reported entry), a batch notifies only its attempted
+  tasks once each while not-overdue, deadline-free, and terminal
+  tasks stay silent, a failure-isolated IN_REVIEW task notifies
+  nobody and stays untouched while the rest of the batch still
+  expires, an unsubscribed listener stays silent while the executor
+  still expires, and a throwing listener is isolated so the executor
+  action and its peer still complete. No source change: the
+  combination was untested, not unimplemented.
 - `actOnStaleTasks` x `subscribe` benchmark row (backlog #746):
   new `benchActOnStaleTasksSubscribe` measures one watchdog batch
   ABANDON pass plus its subscription fan-out per timed op over
