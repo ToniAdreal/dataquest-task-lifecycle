@@ -1246,6 +1246,34 @@
  *      randomness, no wall clock: the fan-out uses the injected
  *      fake fetch that answers 200 immediately.
  *
+ *  62. payout webhook fan-out x secrets rotation x dedupe receiver
+ *      flow — `deliverPayoutWebhookToMany` followed, per endpoint,
+ *      by `verifyPayoutWebhook` under that endpoint's rotation
+ *      candidate list `[new, old]` (the fan-out signs with the old
+ *      secret, so every copy pays one failed HMAC trial before
+ *      the match) and `PayoutEventDedupe.checkAndRecord()` on the
+ *      shared eventId (see the fan-out rotation receiver fixture
+ *      below). This is the #766 bench row, the dataquest-side
+ *      mirror of the escrow #765 combination row: the
+ *      per-delivery cost each of the 4 receivers actually pays
+ *      inside a rotation window, which neither the fan-out-only
+ *      row, the rotation-verify-only row, nor the fan-out x
+ *      dedupe row exercises together. One measured op runs two
+ *      fan-outs of one fresh eventId plus a tampered-delivery
+ *      probe: the first fan-out's 4 copies each verify through
+ *      the rotation list and record as a first sighting, the
+ *      redelivery fan-out's 4 copies each verify again but
+ *      report duplicate, and a tampered copy fails rotation
+ *      verification, so the receiver never reaches the dedupe
+ *      step — proven by the tampered copy's claimed id still
+ *      recording as first-seen afterwards. Each endpoint owns
+ *      an independent dedupe under the same injected fixed clock
+ *      (capacity 100,000, so the 6,400 ids recorded on the
+ *      tamper-probed dedupe and 3,200 on each other dedupe
+ *      across warmup + timed calls never evict). No network, no
+ *      randomness, no wall clock: the fan-out uses the injected
+ *      fake fetch that answers 200 immediately.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -3619,6 +3647,150 @@ async function runFanoutReceiver(eventId: string): Promise<{
   ) {
     throw new Error(
       "benchmark fixture failed: deliverPayoutWebhookToMany x dedupe redelivery fan-out",
+    );
+  }
+}
+
+// Fan-out rotation receiver fixture: deliverPayoutWebhookToMany x
+// secrets rotation x PayoutEventDedupe — the #766 bench row, the
+// dataquest-side mirror of the escrow #765 combination row. The
+// fan-out itself reuses the plain fan-out fixture above
+// (FANOUT_ENDPOINTS, fanoutFetch, fanoutNoSleep, WEBHOOK_NOW),
+// so each copy is signed with its endpoint's old secret; each
+// endpoint's receiver verifies under its own rotation candidate
+// list [new, old], paying exactly one failed HMAC trial before
+// the match (the same rotation semantics the group 36 row pins).
+// Each endpoint owns an independent dedupe under the same
+// injected FIXED clock (DEDUPE_NOW_MS, so no entry expires)
+// with capacity 100,000 — one measured op records exactly one
+// fresh id per dedupe plus one tampered-probe id on the first
+// dedupe, and warmup + timed calls total 3,200 ops, so 6,400
+// live entries on the first dedupe and 3,200 on each other
+// dedupe stay far under the cap and nothing is evicted in the
+// timed loop. No network, no randomness, no wall clock.
+const FANOUT_ROTATION_SECRETS = FANOUT_ENDPOINTS.map((endpoint, i) => [
+  `bench-fanout-rotation-new-${i}`,
+  endpoint.secret,
+]);
+const fanoutRotationReceiverDedupes: PayoutEventDedupe[] =
+  FANOUT_ENDPOINTS.map(
+    () =>
+      new PayoutEventDedupe({
+        now: () => DEDUPE_NOW_MS,
+        maxEntries: 100_000,
+      }),
+  );
+let fanoutRotationReceiverCounter = 0;
+
+async function runFanoutRotationReceiver(eventId: string): Promise<{
+  delivered: number;
+  firstSeen: number;
+  duplicates: number;
+}> {
+  fanoutCalls = [];
+  const out = await deliverPayoutWebhookToMany(paidTask, FANOUT_ENDPOINTS, {
+    fetchImpl: fanoutFetch,
+    sleepImpl: fanoutNoSleep,
+    now: WEBHOOK_NOW,
+    eventId,
+  });
+  if (
+    out.results.length !== FANOUT_ENDPOINTS.length ||
+    out.delivered !== FANOUT_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results.some((r) => !r.ok || r.attempts !== 1 || r.status !== 200) ||
+    fanoutCalls.length !== FANOUT_ENDPOINTS.length
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe fan-out",
+    );
+  }
+  let firstSeen = 0;
+  let duplicates = 0;
+  for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
+    const call = fanoutCalls.find((c) => c.url === endpoint.url);
+    if (
+      !call ||
+      JSON.parse(call.body).eventId !== eventId ||
+      !verifyPayoutWebhook(call.body, call.signature, undefined, {
+        secrets: FANOUT_ROTATION_SECRETS[i],
+      })
+    ) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe endpoint ${i} copy does not verify under its rotation list`,
+      );
+    }
+    if (fanoutRotationReceiverDedupes[i].checkAndRecord(eventId)) {
+      duplicates++;
+    } else {
+      firstSeen++;
+    }
+  }
+  return { delivered: out.delivered, firstSeen, duplicates };
+}
+
+// One-time fixture validation (outside the timed loop): a fresh
+// fan-out records a first sighting on all 4 rotation receivers,
+// its redelivery reports duplicate on all 4, and a tampered copy
+// of the first endpoint's delivery fails rotation verification
+// while the tampered copy's claimed id still records as
+// first-seen afterwards — the same shapes the timed loop
+// self-checks on every iteration, pinned once here on fixture
+// eventIds the timed loop never reuses.
+{
+  const fixture = await runFanoutRotationReceiver(
+    "bench-fanout-rot-recv-fixture",
+  );
+  if (
+    fixture.delivered !== 4 ||
+    fixture.firstSeen !== 4 ||
+    fixture.duplicates !== 0
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe first fan-out",
+    );
+  }
+  const redelivery = await runFanoutRotationReceiver(
+    "bench-fanout-rot-recv-fixture",
+  );
+  if (
+    redelivery.delivered !== 4 ||
+    redelivery.firstSeen !== 0 ||
+    redelivery.duplicates !== 4
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe redelivery fan-out",
+    );
+  }
+  const tamperedCall = fanoutCalls.find(
+    (c) => c.url === FANOUT_ENDPOINTS[0].url,
+  );
+  if (!tamperedCall) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe fixture copy missing",
+    );
+  }
+  const tamperedBody = tamperedCall.body.replace(
+    "bench-fanout-rot-recv-fixture",
+    "bench-fanout-rot-recv-tampered",
+  );
+  if (
+    tamperedBody === tamperedCall.body ||
+    verifyPayoutWebhook(tamperedBody, tamperedCall.signature, undefined, {
+      secrets: FANOUT_ROTATION_SECRETS[0],
+    })
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe tampered copy must fail",
+    );
+  }
+  if (
+    fanoutRotationReceiverDedupes[0].checkAndRecord(
+      "bench-fanout-rot-recv-tampered",
+    )
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe tampered id must still be new",
     );
   }
 }
@@ -8105,6 +8277,68 @@ async function benchDeliverPayoutWebhookToManyDedupe(): Promise<number> {
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToManyRotationDedupe(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is two rotation fan-outs of one fresh
+    // eventId plus a tampered-delivery probe: the first
+    // fan-out's 4 copies each verify through their rotation
+    // list and record as a first sighting, the redelivery
+    // fan-out's 4 copies each verify again but report
+    // duplicate, and a tampered copy of the first endpoint's
+    // redelivery fails rotation verification, so the receiver
+    // never reaches the dedupe step — proven by the tampered
+    // copy's claimed id still recording as first-seen
+    // afterwards (see the fan-out rotation receiver fixture
+    // above).
+    const eventId = `bench-fanout-rot-recv-${fanoutRotationReceiverCounter++}`;
+    const first = await runFanoutRotationReceiver(eventId);
+    if (
+      first.delivered !== 4 ||
+      first.firstSeen !== 4 ||
+      first.duplicates !== 0
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe first sightings",
+      );
+    }
+    const redelivery = await runFanoutRotationReceiver(eventId);
+    if (
+      redelivery.delivered !== 4 ||
+      redelivery.firstSeen !== 0 ||
+      redelivery.duplicates !== 4
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe redelivery must be duplicate",
+      );
+    }
+    const tamperedCall = fanoutCalls.find(
+      (c) => c.url === FANOUT_ENDPOINTS[0].url,
+    );
+    if (!tamperedCall) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe redelivery copy missing",
+      );
+    }
+    const tamperedId = `${eventId}-tampered`;
+    const tamperedBody = tamperedCall.body.replace(eventId, tamperedId);
+    if (
+      tamperedBody === tamperedCall.body ||
+      verifyPayoutWebhook(tamperedBody, tamperedCall.signature, undefined, {
+        secrets: FANOUT_ROTATION_SECRETS[0],
+      })
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe tampered copy must fail",
+      );
+    }
+    if (fanoutRotationReceiverDedupes[0].checkAndRecord(tamperedId)) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x rotation x dedupe tampered id must still be new",
+      );
+    }
+  }, ITERATIONS);
+}
+
 async function benchDeliverPayoutWebhookAbortPre(): Promise<number> {
   return measureAsync(async () => {
     await runAbortPreDelivery();
@@ -9237,6 +9471,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
+  { path: "deliverPayoutWebhookToMany x secrets rotation x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyRotationDedupe() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
   { path: "deliverPayoutWebhook (single endpoint)", ops: await benchDeliverPayoutWebhook() },
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },

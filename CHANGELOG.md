@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `deliverPayoutWebhookToMany` x secrets rotation x `PayoutEventDedupe`
+  benchmark row (backlog #766): new
+  `benchDeliverPayoutWebhookToManyRotationDedupe` measures the
+  fan-out x rotation x dedupe receiver flow per timed op over the
+  fixed 4-endpoint fan-out fixture — a fresh fan-out's 4 copies
+  each verify through their endpoint's rotation candidate list
+  `[new, old]` (the fan-out signs with the old secret, so every
+  copy pays one failed HMAC trial before the match) and record as
+  first sightings on their independent dedupes, the redelivery
+  fan-out's 4 copies verify again but report duplicate, and a
+  tampered copy fails rotation verification, so the receiver never
+  reaches the dedupe step (proven by the tampered copy's claimed id
+  still recording as first-seen afterwards). No source change: the
+  combination was unbenchmarked, not unimplemented (the #756 test
+  row pins the fan-out x dedupe x rotation combination on the
+  test side). This run: 3,445 ops/sec (290.26 µs/op),
+  Node v24.22.1.
 - NDJSON x snapshot RBAC recovery asymmetry coverage (backlog #764):
   new `test/ndjsonRbacAsymmetry.test.ts` (4 cases) pins the recovery
   asymmetry the two single-feature suites never exercised together —
