@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `expireOverdueTasks` x `subscribe` benchmark row (backlog #754):
+  new `benchExpireOverdueTasksSubscribe` measures one watchdog batch
+  expiry pass plus its subscription fan-out per timed op over the
+  fixed 12-task watchdog batch, rebuilt fresh on every iteration
+  with a collecting listener subscribed to every task before
+  `expireOverdueTasks` — self-checked per iteration for exactly 3
+  notifications, the WD-01 / WD-10 / WD-12 EXPIREs each carrying
+  its audit entry, because only those three can expire and the
+  failed WD-06 attempt notifies nobody; outside the timed loop, a
+  failure-isolated batch notifies nobody for its stuck task while
+  the rest still expires, and an unsubscribed batch stays silent
+  while the executor still expires. No source change: the
+  combination was unbenchmarked, not unimplemented (the #748 test
+  row pins the same combination). This run: 2,753 ops/sec
+  (363.28 µs/op), Node v24.22.1.
 - `expireOverdueTasks` x `subscribe` combination coverage (backlog
   #748): new `test/expireOverdueSubscribe.test.ts` (5 cases) pins the
   combination the two single-feature suites never exercised together
