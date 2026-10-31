@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `Idempotency-Key` x `PayoutEventDedupe` combination
+  coverage (backlog #768): new
+  `test/payoutWebhookIdempotencyKeyDedupe.test.ts` (6 cases) pins the
+  combination the two single-feature suites never exercised together
+  — the same eventId built twice carries a byte-identical
+  `Idempotency-Key` header on both deliveries and the receiver
+  accepts the first and reports the second as a duplicate; different
+  eventIds carry different headers and are both first sightings; a
+  tampered body fails verification, records nothing, and the true
+  delivery afterwards is still a first sighting; the unsigned header
+  never drives the dedupe decision (a redelivery with a spoofed
+  header is still a duplicate on the verified body eventId, and a
+  first delivery with a spoofed header is still accepted); retry
+  attempts carry the same header, so a retry is a redelivery for
+  dedupe purposes; and reusing one eventId across two different
+  tasks still dedupes the second delivery. No source change: the
+  combination was untested, not unimplemented.
 - `deliverPayoutWebhookToMany` x secrets rotation x `PayoutEventDedupe`
   benchmark row (backlog #766): new
   `benchDeliverPayoutWebhookToManyRotationDedupe` measures the
