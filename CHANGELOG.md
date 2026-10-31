@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `payoutWebhookFanoutDedupe` x secret rotation combination coverage
+  (backlog #756): new `test/payoutWebhookFanoutDedupeRotation.test.ts`
+  (5 cases) pins the combination the two single-feature suites never
+  exercised together — one old-signed eventId fanned out to 4
+  endpoints, each receiver verifying under its `[new, old]` candidate
+  list and recording a first sighting in its own `PayoutEventDedupe`;
+  re-delivery reporting duplicate on all four receivers with
+  per-receiver hits/misses; a tampered delivery verifying false,
+  recording nothing, and leaving the true delivery first-seen; a
+  new-signed copy of the same eventId still reporting duplicate on
+  all four receivers while a fresh eventId is processed; and an
+  unrelated-secret copy rejected with the true delivery still
+  first-seen. No source change: the combination was untested, not
+  unimplemented (the dataquest-side peer of escrow #755).
 - `expireOverdueTasks` x `subscribe` benchmark row (backlog #754):
   new `benchExpireOverdueTasksSubscribe` measures one watchdog batch
   expiry pass plus its subscription fan-out per timed op over the
