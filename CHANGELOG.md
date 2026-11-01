@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook x NDJSON restore combination coverage (backlog
+  #802): new `test/payoutWebhookNdjsonRestore.test.ts` pins what
+  no payout-webhook file and no NDJSON file pinned together: a
+  PAID task rebuilt from its shipped NDJSON log (restored under
+  its original id, since the log carries no id) builds a
+  payload-identical, signature-identical payout webhook (same
+  payoutRef, payoutAmount, and quotedAmount, same eventId and
+  timestamp), the restored history is deep-equal with state PAID
+  and the payout fields riding on the PAYOUT_COMPLETE line itself,
+  the restored webhook verifies while a tampered body and a wrong
+  secret both fail, a payout line tampered to a negative amount
+  fails import with its NDJSON line number and a payout line
+  rewritten to another valid amount is caught by the hash chain
+  so no webhook can be produced from either damaged log, a
+  non-PAID task restored from NDJSON still cannot build a
+  webhook, blank-line-tolerant NDJSON restores the same webhook,
+  and two restored tasks keep their own payoutRefs. No source
+  change: the combination was untested, not unimplemented.
+
 - Payout webhook x snapshot restore combination coverage (backlog
   #801): new `test/payoutWebhookSnapshotRestore.test.ts` pins what
   no payout-webhook file and no snapshot file pinned together: a
