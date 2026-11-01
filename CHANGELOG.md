@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x resubmit payoutRef benchmark row
+  (backlog #804): `bench/bench.ts` gains the bench variant of the
+  #803 combination row — a rejected, resubmitted, then paid task
+  fanned out to 4 endpoints under the plain fan-out fixture
+  (fake fetch, zero network, fixed clock), self-checked every
+  timed iteration: one measured op is a fresh eventId's 4 first
+  sightings, each copy carrying the new PAYOUT_COMPLETE
+  payoutRef (never the REJECT entry's ref) and verifying under
+  its own endpoint secret, plus a pre-recorded old eventId's
+  re-fan-out reporting 4 duplicates (the resubmit reopens no
+  dedupe window). The Benchmarks table is refreshed from this
+  run's real output (78 rows).
+
 - Payout webhook fan-out x dedupe x resubmit combination coverage
   (backlog #803): new `test/payoutWebhookFanoutResubmit.test.ts`
   pins what no payout-webhook fan-out file and no resubmit file

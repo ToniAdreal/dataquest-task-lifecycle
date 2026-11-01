@@ -3698,6 +3698,256 @@ async function runFanoutReceiver(eventId: string): Promise<{
   }
 }
 
+// Fan-out resubmit receiver fixture: deliverPayoutWebhookToMany x
+// resubmit payoutRef x PayoutEventDedupe — the #804 bench row, the
+// bench variant of test/payoutWebhookFanoutResubmit.test.ts (#803).
+// PAID is terminal and RESUBMIT only runs from REJECTED to
+// CAPTURING, so a resubmitted task announces exactly one payout:
+// the REJECT entry's payoutRef is never announced, only the
+// PAYOUT_COMPLETE entry's new ref is. The fan-out itself reuses
+// the plain fan-out fixture above (FANOUT_ENDPOINTS, fanoutFetch,
+// fanoutNoSleep, WEBHOOK_NOW) with a per-iteration fresh eventId
+// for the new settlement, plus a re-fan-out of one pre-recorded
+// old eventId (the pre-resubmit notification, recorded by every
+// receiver in the fixture validation below, so its replay is a
+// duplicate on every receiver in every timed iteration). Each
+// endpoint owns an independent dedupe under the same injected
+// FIXED clock (DEDUPE_NOW_MS, so no entry expires) with capacity
+// 100,000 — one measured op records exactly one fresh id per
+// dedupe (the old replay adds nothing), and warmup + timed calls
+// total 3,200 ops, so 3,200 live entries per dedupe stay far
+// under the cap and nothing is evicted in the timed loop. No
+// network, no randomness, no wall clock.
+const RESUBMIT_FANOUT_NEW_PAYOUT_REF = "bench-pay-fanout-resubmit-new";
+const RESUBMIT_FANOUT_REJECTED_PAYOUT_REF =
+  "bench-pay-fanout-resubmit-rejected";
+const RESUBMIT_FANOUT_PAYOUT_AMOUNT = 9000;
+const RESUBMIT_FANOUT_OLD_EVENT_ID = "bench-fanout-resubmit-old";
+
+function runResubmittedLifecycle(): TaskLifecycle {
+  const task = new TaskLifecycle("BENCH-FANOUT-RESUBMIT");
+  const steps: Array<{
+    event: TaskEvent;
+    actor: string;
+    extra?: { quotedAmount?: number; payoutRef?: string; payoutAmount?: number };
+  }> = [
+    { event: "PUBLISH", actor: "researcher" },
+    { event: "ACCEPT", actor: "contributor", extra: { quotedAmount: RESUBMIT_FANOUT_PAYOUT_AMOUNT } },
+    { event: "START_CAPTURE", actor: "contributor" },
+    { event: "SUBMIT", actor: "contributor" },
+    { event: "BEGIN_REVIEW", actor: "reviewer" },
+    { event: "REJECT", actor: "reviewer", extra: { payoutRef: RESUBMIT_FANOUT_REJECTED_PAYOUT_REF } },
+    { event: "RESUBMIT", actor: "contributor" },
+    { event: "SUBMIT", actor: "contributor" },
+    { event: "BEGIN_REVIEW", actor: "reviewer" },
+    { event: "APPROVE", actor: "reviewer" },
+    { event: "REQUEST_PAYOUT", actor: "contributor" },
+    {
+      event: "PAYOUT_COMPLETE",
+      actor: "system",
+      extra: { payoutRef: RESUBMIT_FANOUT_NEW_PAYOUT_REF, payoutAmount: RESUBMIT_FANOUT_PAYOUT_AMOUNT },
+    },
+  ];
+  steps.forEach(({ event, actor, extra }, i) => {
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  return task;
+}
+
+const resubmittedPaidTask = runResubmittedLifecycle();
+if (
+  resubmittedPaidTask.state !== "PAID" ||
+  resubmittedPaidTask.history.length !== 12 ||
+  resubmittedPaidTask.history.find((e) => e.event === "REJECT")?.payoutRef !==
+    RESUBMIT_FANOUT_REJECTED_PAYOUT_REF ||
+  resubmittedPaidTask.history.find((e) => e.event === "PAYOUT_COMPLETE")
+    ?.payoutRef !== RESUBMIT_FANOUT_NEW_PAYOUT_REF
+) {
+  throw new Error(
+    "benchmark fixture failed: resubmitted lifecycle did not reach PAID with the new payoutRef",
+  );
+}
+
+const fanoutResubmitReceiverDedupes: PayoutEventDedupe[] =
+  FANOUT_ENDPOINTS.map(
+    () =>
+      new PayoutEventDedupe({
+        now: () => DEDUPE_NOW_MS,
+        maxEntries: 100_000,
+      }),
+  );
+
+async function runFanoutResubmit(eventId: string): Promise<{
+  delivered: number;
+  firstSeen: number;
+  duplicates: number;
+}> {
+  fanoutCalls = [];
+  const out = await deliverPayoutWebhookToMany(
+    resubmittedPaidTask,
+    FANOUT_ENDPOINTS,
+    {
+      fetchImpl: fanoutFetch,
+      sleepImpl: fanoutNoSleep,
+      now: WEBHOOK_NOW,
+      eventId,
+    },
+  );
+  if (
+    out.results.length !== FANOUT_ENDPOINTS.length ||
+    out.delivered !== FANOUT_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results.some((r) => !r.ok || r.attempts !== 1 || r.status !== 200) ||
+    fanoutCalls.length !== FANOUT_ENDPOINTS.length ||
+    fanoutCalls.some((c) => c.body !== fanoutCalls[0].body)
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x resubmit fan-out",
+    );
+  }
+  let firstSeen = 0;
+  let duplicates = 0;
+  for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
+    const call = fanoutCalls.find((c) => c.url === endpoint.url);
+    if (!call) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x resubmit endpoint ${i} copy missing`,
+      );
+    }
+    const payload = JSON.parse(call.body) as {
+      eventId: string;
+      taskId: string;
+      payoutRef: string;
+      payoutAmount: number;
+    };
+    if (
+      payload.eventId !== eventId ||
+      payload.taskId !== "BENCH-FANOUT-RESUBMIT" ||
+      payload.payoutRef !== RESUBMIT_FANOUT_NEW_PAYOUT_REF ||
+      payload.payoutAmount !== RESUBMIT_FANOUT_PAYOUT_AMOUNT ||
+      !verifyPayoutWebhook(call.body, call.signature, endpoint.secret)
+    ) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x resubmit endpoint ${i} copy does not verify or carries the wrong payoutRef`,
+      );
+    }
+    if (fanoutResubmitReceiverDedupes[i].checkAndRecord(eventId)) {
+      duplicates++;
+    } else {
+      firstSeen++;
+    }
+  }
+  return { delivered: out.delivered, firstSeen, duplicates };
+}
+
+// One-time fixture validation (outside the timed loop): the
+// resubmitted task's payout fanned out under a fixture eventId
+// records a first sighting on all 4 receivers, its redelivery
+// reports duplicate on all 4, and the pre-resubmit old eventId
+// records once and then replays as a duplicate on all 4 — the
+// same shapes the timed loop self-checks on every iteration,
+// pinned once here on fixture eventIds the timed loop never
+// reuses. The cross-endpoint signing check also runs once here:
+// each copy verifies under its own secret and under no other
+// endpoint's secret.
+{
+  const fixture = await runFanoutResubmit("bench-fanout-resubmit-fixture-new");
+  if (
+    fixture.delivered !== 4 ||
+    fixture.firstSeen !== 4 ||
+    fixture.duplicates !== 0
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x resubmit first fan-out",
+    );
+  }
+  for (const [i, endpoint] of FANOUT_ENDPOINTS.entries()) {
+    const call = fanoutCalls.find((c) => c.url === endpoint.url);
+    if (
+      !call ||
+      verifyPayoutWebhook(
+        call.body,
+        call.signature,
+        FANOUT_ENDPOINTS[(i + 1) % 4].secret,
+      )
+    ) {
+      throw new Error(
+        "benchmark fixture failed: deliverPayoutWebhookToMany x resubmit copy must not verify under another endpoint's secret",
+      );
+    }
+  }
+  const fixtureRedelivery = await runFanoutResubmit(
+    "bench-fanout-resubmit-fixture-new",
+  );
+  if (
+    fixtureRedelivery.delivered !== 4 ||
+    fixtureRedelivery.firstSeen !== 0 ||
+    fixtureRedelivery.duplicates !== 4
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x resubmit redelivery fan-out",
+    );
+  }
+  const oldFirst = await runFanoutResubmit(RESUBMIT_FANOUT_OLD_EVENT_ID);
+  if (
+    oldFirst.delivered !== 4 ||
+    oldFirst.firstSeen !== 4 ||
+    oldFirst.duplicates !== 0
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x resubmit old event first recording",
+    );
+  }
+  const oldReplay = await runFanoutResubmit(RESUBMIT_FANOUT_OLD_EVENT_ID);
+  if (
+    oldReplay.delivered !== 4 ||
+    oldReplay.firstSeen !== 0 ||
+    oldReplay.duplicates !== 4
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x resubmit old event replay must be duplicate",
+    );
+  }
+}
+
+let fanoutResubmitCounter = 0;
+
+async function benchDeliverPayoutWebhookToManyResubmitDedupe(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is two fan-outs of the resubmitted task's
+    // payout: a fresh eventId's 4 first sightings (each copy
+    // carrying the new PAYOUT_COMPLETE payoutRef, never the
+    // REJECT entry's ref), plus the pre-recorded old eventId's
+    // re-fan-out reporting 4 duplicates (the resubmit does not
+    // reopen any dedupe window).
+    const eventId = `bench-fanout-resubmit-${fanoutResubmitCounter++}`;
+    const first = await runFanoutResubmit(eventId);
+    if (
+      first.delivered !== 4 ||
+      first.firstSeen !== 4 ||
+      first.duplicates !== 0
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x resubmit first sightings",
+      );
+    }
+    const old = await runFanoutResubmit(RESUBMIT_FANOUT_OLD_EVENT_ID);
+    if (
+      old.delivered !== 4 ||
+      old.firstSeen !== 0 ||
+      old.duplicates !== 4
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x resubmit old event replay must be duplicate",
+      );
+    }
+  }, ITERATIONS);
+}
+
 // Fan-out rotation receiver fixture: deliverPayoutWebhookToMany x
 // secrets rotation x PayoutEventDedupe — the #766 bench row, the
 // dataquest-side mirror of the escrow #765 combination row. The
@@ -9779,6 +10029,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
+  { path: "deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyResubmitDedupe() },
   { path: "deliverPayoutWebhookToMany x secrets rotation x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyRotationDedupe() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe x jitterMs fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyJitterDedupe() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
