@@ -11,6 +11,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook `X-Event-Id` x `PayoutEventDedupe` combination
+  coverage (backlog #779): new
+  `test/payoutWebhookEventIdDedupe.test.ts` (7 cases) pins the
+  combination the two single-feature suites never exercised together
+  — the same eventId built twice carries a byte-identical
+  `X-Event-Id` header on both deliveries and the receiver accepts
+  the first and reports the second as a duplicate; different
+  eventIds carry different headers and are both first sightings; a
+  tampered body fails verification, records nothing, and the true
+  delivery afterwards is still a first sighting; the unsigned header
+  never drives the dedupe decision (a redelivery with a spoofed
+  header is still a duplicate on the verified body eventId, and a
+  first delivery with a spoofed header is still accepted); a missing
+  header never blocks dedupe either (a headerless delivery is still
+  accepted on its verified body eventId and its redelivery is still
+  a duplicate); retry attempts carry the same header, so a retry is
+  a redelivery for dedupe purposes; and reusing one eventId across
+  two different tasks still dedupes the second delivery. No source
+  change: the combination was untested, not unimplemented.
+
 - `deliverPayoutWebhookToMany` x `PayoutEventDedupe` x `jitterMs`
   benchmark row (backlog #778): new
   `benchDeliverPayoutWebhookToManyJitterDedupe` measures the
