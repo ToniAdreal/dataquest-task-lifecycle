@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x dedupe x resubmit combination coverage
+  (backlog #803): new `test/payoutWebhookFanoutResubmit.test.ts`
+  pins what no payout-webhook fan-out file and no resubmit file
+  pinned together: a resubmitted task's payout fanned out to 4
+  endpoints is accepted as a first sighting by every receiver, the
+  payload carries the new PAYOUT_COMPLETE payoutRef (not the REJECT
+  entry's ref) under one shared eventId with per-endpoint
+  signatures, an old eventId recorded before the resubmit stays a
+  duplicate on all four receivers after the new fan-out while the
+  new eventId's own replay is a duplicate too, a second fan-out of
+  the same eventId yields byte-identical wire bodies that every
+  receiver reports as duplicates, two distinct eventIds for the
+  same resubmitted settlement are both first sightings on fresh
+  receivers (dedupe keys on eventId, not taskId/payoutRef), and a
+  resubmitted task still in CAPTURING cannot fan out at all (the
+  only-PAID error fires before any fetch). No source change: the
+  combination was untested, not unimplemented.
+
 - Payout webhook x NDJSON restore combination coverage (backlog
   #802): new `test/payoutWebhookNdjsonRestore.test.ts` pins what
   no payout-webhook file and no NDJSON file pinned together: a
