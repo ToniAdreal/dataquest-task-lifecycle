@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook fan-out x limits x secret rotation combination
+  coverage (backlog #792): new
+  `test/payoutWebhookFanoutLimitsRotation.test.ts` pins the
+  combination the limits file and the rotation file leave unpinned:
+  an over-`maxEndpoints` batch (4 endpoints under a cap of 3)
+  throws before any request with zero fetch calls and zero dedupe
+  records, before rotation (old secrets) and after it (new
+  secrets); a rotated in-limit batch of 3 endpoints delivers
+  byte-identical bodies (shared eventId) with per-endpoint
+  signatures, each copy verifying under its own new secret and
+  failing under its retired old secret (single-secret and
+  candidate-list forms, with no cross-endpoint verification); and
+  a refused over-cap batch after rotation adds zero dedupe
+  records — prior first sightings stay at size 1, the
+  never-delivered fourth receiver stays at size 0, and replaying
+  the rotated eventId is still a duplicate. No source change: the
+  combination was untested, not unimplemented.
+
 - Payout webhook x resubmit combination coverage (backlog #791):
   new `test/payoutWebhookResubmit.test.ts` pins the resubmitted
   task's webhook: its payload carries the new PAYOUT_COMPLETE
