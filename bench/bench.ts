@@ -1274,6 +1274,31 @@
  *      randomness, no wall clock: the fan-out uses the injected
  *      fake fetch that answers 200 immediately.
  *
+ *  63. payout webhook fan-out x dedupe x jitterMs receiver flow —
+ *      `deliverPayoutWebhookToMany` with jittered backoff retries,
+ *      followed, per endpoint, by `verifyPayoutWebhook` under that
+ *      endpoint's own secret and `PayoutEventDedupe.checkAndRecord()`
+ *      on the shared eventId (see the fan-out jitter dedupe
+ *      receiver fixture below). This is the #778 bench row, the
+ *      bench variant of the #774 test row: the per-delivery cost
+ *      each of the 4 receivers actually pays when one settlement
+ *      event fans out under jittered retries, which neither the
+ *      fan-out jitter row, the fan-out x dedupe row, nor the
+ *      single-endpoint receiver-flow row exercises together. One
+ *      measured op runs two jittered fan-outs of one fresh
+ *      eventId: the first fan-out's retrying endpoint answers
+ *      500 / 500 / 200 with two sleeps inside [100, 1100] and
+ *      [200, 1200], its three attempts carry byte-identical
+ *      bodies, and its successful delivery records as a first
+ *      sighting (sender retries are not receiver duplicates);
+ *      the redelivery fan-out's 4 copies each verify again but
+ *      report duplicate. Each endpoint owns an independent
+ *      dedupe under the same injected fixed clock (capacity
+ *      100,000, so the 3,200 ids recorded per dedupe across
+ *      warmup + timed calls never evict). No network, no real
+ *      waiting: every sleep only records, and the fan-out uses
+ *      the injected fake fetch.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -3791,6 +3816,186 @@ async function runFanoutRotationReceiver(eventId: string): Promise<{
   ) {
     throw new Error(
       "benchmark fixture failed: deliverPayoutWebhookToMany x rotation x dedupe tampered id must still be new",
+    );
+  }
+}
+
+// Fan-out jitter dedupe receiver fixture: deliverPayoutWebhookToMany x
+// PayoutEventDedupe x jitterMs — the #774 test row's bench variant.
+// One independent dedupe per fan-out endpoint (the #740 isolation
+// rule: endpoint A's first sighting must never mark endpoint B's
+// first delivery of the same eventId a duplicate), each under the
+// same injected FIXED clock (DEDUPE_NOW_MS, so no entry expires)
+// with capacity 100,000 — one measured op records exactly one
+// fresh id per dedupe, and warmup + timed calls total 3,200 ops,
+// so 3,200 live entries per dedupe stay far under the cap and
+// nothing is evicted in the timed loop. Each fan-out reuses the
+// fan-out jitter endpoint set (FANOUT_JITTER_ENDPOINTS) with one
+// twist the plain jitter row lacks: only the first endpoint
+// retries (500 / 500 / 200, jitterMs 1000, backoffMs 100,
+// maxAttempts 3), the other three answer 200 immediately — the
+// #774 shape, where a retrying endpoint's successful delivery
+// must still be a first sighting and healthy endpoints must
+// never sleep. No network, no real waiting: every sleep only
+// records.
+const fanoutJitterDedupeDedupes: PayoutEventDedupe[] =
+  FANOUT_JITTER_ENDPOINTS.map(
+    () =>
+      new PayoutEventDedupe({
+        now: () => DEDUPE_NOW_MS,
+        maxEntries: 100_000,
+      }),
+  );
+let fanoutJitterDedupeCounter = 0;
+
+async function runJitteredFanoutForDedupe(
+  eventId: string,
+): Promise<Array<{ body: string; signature: string }>> {
+  const perEndpoint: Array<{
+    calls: number;
+    sleeps: number[];
+    bodies: string[];
+    signatures: string[];
+  }> = FANOUT_JITTER_ENDPOINTS.map(() => ({
+    calls: 0,
+    sleeps: [],
+    bodies: [],
+    signatures: [],
+  }));
+  const endpoints: PayoutWebhookEndpoint[] = FANOUT_JITTER_ENDPOINTS.map(
+    (endpoint, i) => ({
+      ...endpoint,
+      fetchImpl: async (_url, init) => {
+        const slot = perEndpoint[i];
+        slot.calls++;
+        slot.bodies.push(String(init.body));
+        slot.signatures.push(
+          String(new Headers(init.headers).get("x-hub-signature-256")),
+        );
+        if (i === 0 && slot.calls % 3 !== 0) {
+          return new Response("boom", { status: 500 });
+        }
+        return new Response("{}", { status: 200 });
+      },
+      sleepImpl: async (ms: number) => {
+        perEndpoint[i].sleeps.push(ms);
+      },
+    }),
+  );
+  const out = await deliverPayoutWebhookToMany(paidTask, endpoints, {
+    backoffMs: JITTER_BACKOFF_MS,
+    jitterMs: JITTER_JITTER_MS,
+    maxAttempts: JITTER_MAX_ATTEMPTS,
+    now: WEBHOOK_NOW,
+    eventId,
+  });
+  if (
+    out.results.length !== FANOUT_JITTER_ENDPOINTS.length ||
+    out.delivered !== FANOUT_JITTER_ENDPOINTS.length ||
+    out.failed !== 0 ||
+    out.results.some(
+      (r, i) =>
+        !r.ok ||
+        r.attempts !== (i === 0 ? JITTER_MAX_ATTEMPTS : 1) ||
+        r.status !== 200 ||
+        r.error !== undefined,
+    ) ||
+    perEndpoint[0].calls !== JITTER_MAX_ATTEMPTS ||
+    perEndpoint.slice(1).some((slot) => slot.calls !== 1) ||
+    perEndpoint[0].sleeps.length !== JITTER_MAX_ATTEMPTS - 1 ||
+    perEndpoint.slice(1).some((slot) => slot.sleeps.length !== 0) ||
+    perEndpoint[0].bodies.some((body) => body !== perEndpoint[0].bodies[0])
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs fan-out",
+    );
+  }
+  const bases = [JITTER_BACKOFF_MS, JITTER_BACKOFF_MS * 2];
+  if (
+    !perEndpoint[0].sleeps.every(
+      (sleep, i) => sleep >= bases[i] && sleep <= bases[i] + JITTER_JITTER_MS,
+    )
+  ) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs sleep outside [backoff, backoff + jitterMs]",
+    );
+  }
+  return perEndpoint.map((slot, i) => {
+    const last = slot.bodies.length - 1;
+    if (JSON.parse(slot.bodies[last]).eventId !== eventId) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs endpoint ${i} body eventId mismatch`,
+      );
+    }
+    return { body: slot.bodies[last], signature: slot.signatures[last] };
+  });
+}
+
+async function runFanoutJitterDedupe(eventId: string): Promise<{
+  delivered: number;
+  firstSeen: number;
+  duplicates: number;
+}> {
+  const first = await runJitteredFanoutForDedupe(eventId);
+  let firstSeen = 0;
+  for (const [i, endpoint] of FANOUT_JITTER_ENDPOINTS.entries()) {
+    if (!verifyPayoutWebhook(first[i].body, first[i].signature, endpoint.secret)) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs endpoint ${i} first copy does not verify`,
+      );
+    }
+    if (!fanoutJitterDedupeDedupes[i].checkAndRecord(eventId)) {
+      firstSeen++;
+    }
+  }
+  if (firstSeen !== FANOUT_JITTER_ENDPOINTS.length) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs first sightings",
+    );
+  }
+  const redelivery = await runJitteredFanoutForDedupe(eventId);
+  let duplicates = 0;
+  for (const [i, endpoint] of FANOUT_JITTER_ENDPOINTS.entries()) {
+    if (
+      !verifyPayoutWebhook(
+        redelivery[i].body,
+        redelivery[i].signature,
+        endpoint.secret,
+      )
+    ) {
+      throw new Error(
+        `benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs endpoint ${i} redelivery copy does not verify`,
+      );
+    }
+    if (fanoutJitterDedupeDedupes[i].checkAndRecord(eventId)) {
+      duplicates++;
+    }
+  }
+  if (duplicates !== FANOUT_JITTER_ENDPOINTS.length) {
+    throw new Error(
+      "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs redelivery must be duplicate",
+    );
+  }
+  return { delivered: 4, firstSeen, duplicates };
+}
+
+// One-time fixture validation (outside the timed loop): a jittered
+// fan-out records a first sighting on all 4 receivers even though
+// its first endpoint needed three sender attempts, and its jittered
+// redelivery reports duplicate on all 4 — the same shapes the timed
+// loop self-checks on every iteration, pinned once here on a
+// fixture eventId the timed loop never reuses.
+{
+  const fixture = await runFanoutJitterDedupe(
+    "bench-fanout-jitter-dedupe-fixture",
+  );
+  if (
+    fixture.delivered !== 4 ||
+    fixture.firstSeen !== 4 ||
+    fixture.duplicates !== 4
+  ) {
+    throw new Error(
+      "benchmark fixture failed: deliverPayoutWebhookToMany x dedupe x jitterMs fan-out",
     );
   }
 }
@@ -8339,6 +8544,28 @@ async function benchDeliverPayoutWebhookToManyRotationDedupe(): Promise<number> 
   }, ITERATIONS);
 }
 
+async function benchDeliverPayoutWebhookToManyJitterDedupe(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is two jittered fan-outs of one fresh
+    // eventId: the first fan-out's retrying endpoint succeeds
+    // after 500 / 500 / 200 and records as a first sighting on
+    // every receiver, and the redelivery fan-out's 4 copies each
+    // verify again but report duplicate (see the fan-out jitter
+    // dedupe receiver fixture above).
+    const eventId = `bench-fanout-jitter-dedupe-${fanoutJitterDedupeCounter++}`;
+    const out = await runFanoutJitterDedupe(eventId);
+    if (
+      out.delivered !== 4 ||
+      out.firstSeen !== 4 ||
+      out.duplicates !== 4
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany x dedupe x jitterMs first sightings / redelivery",
+      );
+    }
+  }, ITERATIONS);
+}
+
 async function benchDeliverPayoutWebhookAbortPre(): Promise<number> {
   return measureAsync(async () => {
     await runAbortPreDelivery();
@@ -9472,6 +9699,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
   { path: "deliverPayoutWebhookToMany x secrets rotation x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyRotationDedupe() },
+  { path: "deliverPayoutWebhookToMany x PayoutEventDedupe x jitterMs fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyJitterDedupe() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
   { path: "deliverPayoutWebhook (single endpoint)", ops: await benchDeliverPayoutWebhook() },
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },

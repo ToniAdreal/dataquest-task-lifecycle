@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `deliverPayoutWebhookToMany` x `PayoutEventDedupe` x `jitterMs`
+  benchmark row (backlog #778): new
+  `benchDeliverPayoutWebhookToManyJitterDedupe` measures the
+  fan-out x dedupe x jitter receiver flow per timed op over the
+  fixed 4-endpoint fan-out fixture — a jittered fan-out (one
+  endpoint on a 500 / 500 / 200 script with call-level
+  `jitterMs` 1000, two sleeps inside [100, 1100] and [200, 1200],
+  byte-identical retry bodies) records 4 first sightings, one
+  per endpoint's independent dedupe, and its jittered redelivery
+  reports 4 duplicates; the README Benchmarks table is refreshed
+  from this run (76 rows, new row 3,530 ops/sec). No source
+  change: the combination was unbenchmarked, not unimplemented
+  (the #774 test row pins the fan-out x dedupe x jitter
+  combination on the test side).
+
 - Payout webhook fan-out x `PayoutEventDedupe` x `jitterMs`
   combination coverage (backlog #774): new
   `test/payoutWebhookFanoutDedupeJitter.test.ts` (3 cases) pins the
