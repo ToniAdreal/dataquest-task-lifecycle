@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook x snapshot restore combination coverage (backlog
+  #801): new `test/payoutWebhookSnapshotRestore.test.ts` pins what
+  no payout-webhook file and no snapshot file pinned together: a
+  PAID task restored through a JSON stringify/parse round-trip
+  builds a payload-identical, signature-identical payout webhook
+  (same payoutRef, payoutAmount, and quotedAmount, same eventId
+  and timestamp), the restored webhook verifies while a tampered
+  body and a wrong secret both fail, a failed dispatch on the
+  restored PAID task (PAID is terminal) leaves an already-built
+  webhook untouched, snapshots with a tampered payoutAmount or a
+  history entry removed mid-chain fail restore so no webhook can
+  be produced from them, and a non-PAID task restored from a
+  snapshot still cannot build a webhook. No source change: the
+  combination was untested, not unimplemented.
+
 - Payout webhook fan-out x limits x secret rotation combination
   coverage (backlog #792): new
   `test/payoutWebhookFanoutLimitsRotation.test.ts` pins the
