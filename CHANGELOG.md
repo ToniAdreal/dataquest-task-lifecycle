@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `deliverPayoutWebhookToMany` limits x `PayoutEventDedupe`
+  benchmark row (backlog #790): new
+  `benchDeliverPayoutWebhookToManyLimitsDedupe` measures the
+  fan-out limits x dedupe receiver flow per timed op over the
+  fixed 4-endpoint fan-out fixture — an over-cap batch (4
+  endpoints under `maxEndpoints` 3) throws the pinned
+  configuration error with zero fetch calls and zero dedupe
+  records, then the in-limit fan-out records 4 first sightings,
+  one per endpoint's independent dedupe, and its redelivery
+  reports 4 duplicates; the README Benchmarks table is refreshed
+  from this run (77 rows, new row 2,035 ops/sec). No source
+  change: the combination was unbenchmarked, not unimplemented
+  (the #761 test row pins the fan-out limits x dedupe
+  combination on the test side).
+
 - Payout webhook `X-Event-Id` x `PayoutEventDedupe` combination
   coverage (backlog #779): new
   `test/payoutWebhookEventIdDedupe.test.ts` (7 cases) pins the

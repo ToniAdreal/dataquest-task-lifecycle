@@ -1299,6 +1299,28 @@
  *      waiting: every sleep only records, and the fan-out uses
  *      the injected fake fetch.
  *
+ *  64. payout webhook fan-out limits x dedupe receiver flow —
+ *      `deliverPayoutWebhookToMany` under `maxEndpoints` followed,
+ *      per endpoint, by `verifyPayoutWebhook` under that endpoint's
+ *      own secret and `PayoutEventDedupe.checkAndRecord()` on the
+ *      shared eventId (see the fan-out receiver fixture below).
+ *      This is the #790 bench row, the bench variant of the #761
+ *      test row: the per-delivery cost each of the 4 receivers
+ *      actually pays when a capped fan-out is refused, which
+ *      neither the fan-out limits row nor the fan-out x dedupe row
+ *      exercises together. One measured op runs three passes over
+ *      one fresh eventId: an over-cap batch (4 endpoints under
+ *      `maxEndpoints` 3) that throws the pinned configuration error
+ *      with zero fetch calls and zero dedupe records — proven by
+ *      the dedupe sizes standing still and by the same eventId
+ *      still recording as a first sighting afterwards — then the
+ *      in-limit fan-out's 4 first sightings, then its redelivery's
+ *      4 duplicates. Each endpoint owns an independent dedupe
+ *      under the same injected fixed clock (capacity 100,000, so
+ *      the ids recorded across warmup + timed calls never evict).
+ *      No network, no randomness, no wall clock: the fan-out uses
+ *      the injected fake fetch that answers 200 immediately.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -8482,6 +8504,65 @@ async function benchDeliverPayoutWebhookToManyDedupe(): Promise<number> {
   }, ITERATIONS);
 }
 
+let fanoutLimitsDedupeCounter = 0;
+
+async function benchDeliverPayoutWebhookToManyLimitsDedupe(): Promise<number> {
+  return measureAsync(async () => {
+    // One timed pass is three passes over one fresh eventId: an
+    // over-cap batch that must throw before any request and record
+    // nothing, then the in-limit fan-out's 4 first sightings, then
+    // its redelivery's 4 duplicates (see the fan-out receiver
+    // fixture above and the #761 test row for the same contract).
+    const eventId = `bench-fanout-limits-dedupe-${fanoutLimitsDedupeCounter++}`;
+    const sizesBefore = fanoutReceiverDedupes.map((dedupe) => dedupe.size);
+    fanoutCalls = [];
+    let overCapError = "";
+    try {
+      await deliverPayoutWebhookToMany(paidTask, FANOUT_ENDPOINTS, {
+        fetchImpl: fanoutFetch,
+        sleepImpl: fanoutNoSleep,
+        now: WEBHOOK_NOW,
+        eventId,
+        maxEndpoints: 3,
+      });
+    } catch (err) {
+      overCapError = err instanceof Error ? err.message : String(err);
+    }
+    if (
+      overCapError !==
+        "cannot deliver payout webhook to many endpoints: 4 endpoints exceed maxEndpoints 3" ||
+      fanoutCalls.length !== 0 ||
+      fanoutReceiverDedupes.some(
+        (dedupe, i) => dedupe.size !== sizesBefore[i],
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany limits x dedupe over-cap batch must throw with zero fetches and zero dedupe records",
+      );
+    }
+    const first = await runFanoutReceiver(eventId);
+    if (
+      first.delivered !== 4 ||
+      first.firstSeen !== 4 ||
+      first.duplicates !== 0
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany limits x dedupe first sightings",
+      );
+    }
+    const redelivery = await runFanoutReceiver(eventId);
+    if (
+      redelivery.delivered !== 4 ||
+      redelivery.firstSeen !== 0 ||
+      redelivery.duplicates !== 4
+    ) {
+      throw new Error(
+        "benchmark self-check failed: deliverPayoutWebhookToMany limits x dedupe redelivery must be duplicate",
+      );
+    }
+  }, ITERATIONS);
+}
+
 async function benchDeliverPayoutWebhookToManyRotationDedupe(): Promise<number> {
   return measureAsync(async () => {
     // One timed pass is two rotation fan-outs of one fresh
@@ -9701,6 +9782,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "deliverPayoutWebhookToMany x secrets rotation x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyRotationDedupe() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe x jitterMs fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyJitterDedupe() },
   { path: "deliverPayoutWebhookToMany limits (maxEndpoints / overallDeadlineMs)", ops: await benchDeliverPayoutWebhookToManyLimits() },
+  { path: "deliverPayoutWebhookToMany limits x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyLimitsDedupe() },
   { path: "deliverPayoutWebhook (single endpoint)", ops: await benchDeliverPayoutWebhook() },
   { path: "deliverPayoutWebhook maxRetryDelayMs cap", ops: await benchDeliverPayoutWebhookRetryCap() },
   { path: "deliverPayoutWebhook jitterMs backoff", ops: await benchDeliverPayoutWebhookJitter() },
