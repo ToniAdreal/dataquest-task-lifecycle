@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook x resubmit combination coverage (backlog #791):
+  new `test/payoutWebhookResubmit.test.ts` pins the resubmitted
+  task's webhook: its payload carries the new PAYOUT_COMPLETE
+  payoutRef (not a ref on the earlier REJECT entry), its first
+  delivery is a first sighting and its redelivery a duplicate, an
+  eventId recorded before the resubmit is still a duplicate when
+  replayed afterwards while the new eventId is a first sighting,
+  two distinct eventIds for the same resubmitted settlement are
+  both first sightings (dedupe keys on eventId, not taskId or
+  payoutRef), a tampered resubmitted webhook records nothing, and
+  a task mid-resubmit (CAPTURING or PAYOUT_PENDING) still throws
+  the only-PAID build error. No source change: the combination
+  was untested, not unimplemented.
+
 - `deliverPayoutWebhookToMany` limits x `PayoutEventDedupe`
   benchmark row (backlog #790): new
   `benchDeliverPayoutWebhookToManyLimitsDedupe` measures the
