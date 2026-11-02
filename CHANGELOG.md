@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook x `expireOverdueTasks` combination coverage
+  (backlog #815): new `test/payoutWebhookExpireOverdue.test.ts`
+  pins what no payout-webhook file and no watchdog file pinned
+  together: in a mixed batch (overdue OPEN + PAID + not-overdue
+  OPEN) the watchdog expires only the overdue task and its result
+  carries the EXPIRE audit entry (OPEN -> EXPIRED, `system`
+  actor) that also ends the task history; the expired task builds
+  no payout webhook (the only-PAID guard refuses it with an
+  explicit non-PAID error); the PAID task is never attempted by
+  the watchdog and its webhook still builds and verifies; the
+  not-overdue task keeps its state and history and builds no
+  webhook; a PAID task with a past deadline for its own state is
+  still terminal, never attempted, and keeps its webhook; and an
+  expired task cannot reach PAID afterwards, so no webhook can
+  ever follow the expiry.
+
 - Payout webhook secret rotation x future-skew combination coverage
   (backlog #814): new `test/payoutWebhookRotationFutureSkew.test.ts`
   pins what no rotation file and no future-skew file pinned
