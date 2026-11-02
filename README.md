@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 912 tests, all local
+npm test   # 927 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -495,6 +495,17 @@ intended wiring is a watchdog (cron, queue consumer) that polls
 `isOverdue()` and dispatches `EXPIRE` itself, which is exactly what
 `test/sla.test.ts` demonstrates in its last case.
 
+Deadlines can also be attached at construction instead of one
+`setSlaDeadline` call at a time:
+`new TaskLifecycle(id, { slaDeadlines: { OPEN: "…", ACCEPTED: "…" } })`.
+The option applies the same validation and canonical-ISO normalization
+as `setSlaDeadline` — an unknown state or unparseable date throws at
+construction and no task is created. It is also how a history-only
+rebuild re-attaches deadlines: the audit log itself carries none, so
+`fromHistory(id, history, { slaDeadlines })` passes the option through
+the constructor (see "Replay" below); a snapshot restore does not need
+it, because `toJSON()` already carries `slaDeadlines`.
+
 For batch polling there is a dedicated helper — `expiredTasks(tasks, now)`
 returns the "non-terminal and past deadline" subset of a task list. It is a
 pure filter (it never mutates or dispatches); the watchdog executor
@@ -775,7 +786,9 @@ a broken log throws a specific `invalid history: …` error instead of a
 guessed state. Replay restores state + history only: the task id is not
 recoverable from the log (entries carry no id), so it is passed
 explicitly, and advisory SLA deadlines are not part of the audit log, so
-they are not restored (use `fromJSON()` for the full snapshot).
+they are not restored from the log — re-attach them with
+`fromHistory(id, history, { slaDeadlines })`, or use `fromJSON()` for
+the full snapshot.
 
 ## Settlement payout references
 
@@ -1607,7 +1620,8 @@ webhooks, retries). That remains the caller's infrastructure.
   Snapshots carry the full task (state, history, SLA deadlines,
   configured budgets/policy); NDJSON carries the audit history only —
   replay restores state + history, while the task id and SLA deadlines
-  are not part of the log and are not restored from it.
+  are not part of the log and are not restored from it (re-attach
+  deadlines via `fromHistory`'s `slaDeadlines` option).
 
 - **Does event-level RBAC authenticate who is calling?**
   No. `rolePolicy` is a caller-supplied actor allowlist, not identity:
@@ -1669,7 +1683,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 912 tests covering the happy path, reject→resubmit
+`npm test` runs 927 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

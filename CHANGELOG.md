@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `TaskLifecycleOptions.slaDeadlines` constructor option (backlog
+  #829): per-state advisory SLA deadlines attached up front
+  (`{ OPEN: …, ACCEPTED: … }`), validated and normalized to
+  canonical ISO by the same bar `setSlaDeadline` applies singly —
+  an unknown state, a non-Date/non-string value, a non-object map,
+  or an unparseable date throws at construction and no task is
+  created. `fromHistory(id, history, { slaDeadlines })` passes the
+  option through the constructor, closing the gap where deadlines
+  were the one piece of configuration that could not be re-attached
+  after a history-only rebuild (unlike rolePolicy/maxDisputes);
+  `toJSON()` shape is unchanged (it already carries
+  `slaDeadlines`). `setSlaDeadline` itself now also fails fast on
+  an unknown state instead of silently storing it; `test/
+  constructorSlaDeadlines.test.ts` pins the option, the
+  `isOverdue`/`expiredTasks` agreement, the fromHistory
+  re-attach + continued dispatch, and the snapshot round-trip.
+
 - `expectedSeq` guard through settlement demo segment (backlog #826):
   new DEMO-060 section in `src/demo.ts` carries the optimistic
   concurrency guard past CAPTURING to the settlement it exists to

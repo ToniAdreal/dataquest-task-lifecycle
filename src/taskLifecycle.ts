@@ -975,6 +975,21 @@ export interface TaskLifecycleOptions {
   requirePayoutRef?: boolean;
   idempotencyKeys?: string[];
   auditSecret?: AuditSecret;
+  /**
+   * Per-state advisory SLA deadlines, attached at construction. Keys
+   * are states, values are `Date` or parseable date strings, stored
+   * canonical-ISO exactly like `setSlaDeadline` stores them. This is
+   * the only way to carry deadlines across a history-only rebuild:
+   * `fromHistory(id, history, { slaDeadlines })` passes this option
+   * through the constructor, because the audit log itself carries no
+   * deadlines. Deadlines stay advisory (see `setSlaDeadline`): they
+   * never move the task, and expiry still requires an explicit
+   * `EXPIRE` dispatch. Like the other options, deadlines are task
+   * configuration, not audit data — but unlike `auditSecret` they
+   * ARE written into the `toJSON()` snapshot, so a snapshot restore
+   * recovers them without this option.
+   */
+  slaDeadlines?: Partial<Record<TaskState, Date | string>>;
 }
 
 function assertRequirePayoutRef(value: unknown, tag: string): boolean {
@@ -1016,6 +1031,49 @@ function assertIdempotencyKeys(
     keys.add(key);
   }
   return keys;
+}
+
+/**
+ * Validate a per-state SLA deadline map into normalized ISO strings.
+ *
+ * `undefined` means "no deadlines" (the default). Otherwise the value
+ * must be a plain record whose keys are known states and whose values
+ * are `Date` objects or parseable date strings — the same bar
+ * `setSlaDeadline` applies to a single deadline, with the same
+ * canonical-ISO normalization. Anything else throws
+ * `<tag>: slaDeadlines …`, fail-fast at construction, so a bad map
+ * can never produce a task that looks configured but is not.
+ */
+function assertSlaDeadlines(
+  value: unknown,
+  tag: string,
+): Map<TaskState, string> {
+  const deadlines = new Map<TaskState, string>();
+  if (value === undefined) return deadlines;
+  if (!isRecord(value)) {
+    throw new Error(
+      `${tag}: slaDeadlines must be an object, got ${typeof value}`,
+    );
+  }
+  for (const [state, deadline] of Object.entries(value)) {
+    if (!STATES.has(state as TaskState)) {
+      throw new Error(`${tag}: slaDeadlines has unknown state ${state}`);
+    }
+    if (!(deadline instanceof Date) && typeof deadline !== "string") {
+      throw new Error(
+        `${tag}: slaDeadlines[${state}] must be a Date or string, got ${typeof deadline}`,
+      );
+    }
+    const ms =
+      deadline instanceof Date ? deadline.getTime() : Date.parse(deadline);
+    if (Number.isNaN(ms)) {
+      throw new Error(
+        `${tag}: slaDeadlines[${state}] is not a parseable date: ${String(deadline)}`,
+      );
+    }
+    deadlines.set(state as TaskState, new Date(ms).toISOString());
+  }
+  return deadlines;
 }
 
 function assertMaxResubmits(value: unknown, tag: string): number {
@@ -1962,6 +2020,12 @@ export class TaskLifecycle {
         : Buffer.isBuffer(opts.auditSecret)
           ? Buffer.from(opts.auditSecret)
           : opts.auditSecret;
+    // Per-state SLA deadlines, attached up front (validated + normalized
+    // by assertSlaDeadlines, the same bar setSlaDeadline applies singly).
+    // A throwing map aborts construction, so no half-configured task
+    // ever escapes; fromHistory() passes its opts through here, which
+    // is how a history-only rebuild re-attaches deadlines.
+    this._slaDeadlines = assertSlaDeadlines(opts?.slaDeadlines, "invalid option");
   }
 
   get state(): TaskState {
@@ -1998,9 +2062,18 @@ export class TaskLifecycle {
   /**
    * Attach an SLA deadline to a state (defaults to the task's current
    * state). Overwrites any existing deadline for that state.
-   * Throws on unparseable input; stores the normalized ISO string.
+   * Throws on an unknown state, a non-Date/non-string value, or
+   * unparseable input; stores the normalized ISO string. The
+   * constructor's `slaDeadlines` option applies this same bar to
+   * every entry up front.
    */
   setSlaDeadline(deadline: Date | string, forState: TaskState = this._state): void {
+    if (!STATES.has(forState)) {
+      throw new Error(`invalid SLA deadline: unknown state ${String(forState)}`);
+    }
+    if (!(deadline instanceof Date) && typeof deadline !== "string") {
+      throw new Error(`invalid SLA deadline: ${String(deadline)}`);
+    }
     const ms = deadline instanceof Date ? deadline.getTime() : Date.parse(deadline);
     if (Number.isNaN(ms)) {
       throw new Error(`invalid SLA deadline: ${String(deadline)}`);
@@ -2599,7 +2672,9 @@ export class TaskLifecycle {
    * The task id is not recoverable from the log (history entries carry
    * no id), so it is passed explicitly rather than invented. Advisory
    * SLA deadlines are not part of the audit log and are therefore not
-   * restored — use fromJSON() when the snapshot envelope is available.
+   * restored from the log — re-attach them with
+   * `opts.slaDeadlines` (see `TaskLifecycleOptions`), or use
+   * fromJSON() when the snapshot envelope is available.
    * Throws a specific `invalid history: …` error on any malformed or
    * inconsistent input — see parseHistory for the full checklist.
    *
@@ -2624,6 +2699,9 @@ export class TaskLifecycle {
    * way; a keyed log restored without it (or with the wrong secret) is
    * rejected as a broken hash chain, and a legacy hashless log restored
    * with a secret is chained in keyed mode on rehydration.
+   * `opts.slaDeadlines` re-attaches per-state advisory SLA deadlines
+   * the same way; omit it and the rehydrated task has no deadlines
+   * (the log carries none, so they cannot be restored on their own).
    */
   static fromHistory(
     id: string,
