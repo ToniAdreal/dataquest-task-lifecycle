@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook x `expectedSeq` combination coverage
+  (backlog #813): new `test/payoutWebhookExpectedSeq.test.ts`
+  pins what no payout-webhook file and no `expectedSeq` file
+  pinned together: a stale-seq PAYOUT_COMPLETE throws a dispatch
+  conflict, leaves the task in PAYOUT_PENDING with history
+  untouched, and builds no webhook (the only-PAID guard refuses
+  it); an ahead seq conflicts the same way; a fresh-seq retry
+  settles to PAID and its webhook carries the settlement
+  payoutRef/payoutAmount and the ACCEPT quote and verifies
+  (tampered body and wrong secret both fail); and a conflict
+  consumes no idempotency key, so the same key retries
+  successfully and only then is consumed.
+
 - Payout webhook fan-out x resubmit payoutRef benchmark row
   (backlog #804): `bench/bench.ts` gains the bench variant of the
   #803 combination row — a rejected, resubmitted, then paid task
