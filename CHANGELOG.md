@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook secret rotation x future-skew combination coverage
+  (backlog #814): new `test/payoutWebhookRotationFutureSkew.test.ts`
+  pins what no rotation file and no future-skew file pinned
+  together: an old-secret notification stamped inside the future
+  window passes under `secrets: [new, old]` in either list order,
+  as does a new-secret one; a stamp beyond the window fails
+  whichever listed secret signed it; the future boundary stays
+  inclusive for a rotated secret (exactly at it passes, 1ms past
+  fails); an expired rotated payload is still bounded by
+  `maxAgeMs` when a future window is also set, while a fresh
+  rotated payload passes both bounds; and a wrong-secret list and
+  a tampered body both fail inside the window, so the passes are
+  not vacuous.
+
 - Payout webhook x `expectedSeq` combination coverage
   (backlog #813): new `test/payoutWebhookExpectedSeq.test.ts`
   pins what no payout-webhook file and no `expectedSeq` file
