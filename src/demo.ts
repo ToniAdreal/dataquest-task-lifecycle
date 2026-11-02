@@ -438,6 +438,19 @@
  * optimistic lock against the in-memory history —
  * cross-process writers still need compare-and-swap
  * in the durable store itself.
+ * and an expectedSeq-guarded settlement segment:
+ * one more task (DEMO-060) driven to PAYOUT_PENDING
+ * under fixed timestamps, whose PAYOUT_COMPLETE
+ * with a stale expectedSeq and an idempotency key
+ * is rejected with the pinned dispatch-conflict
+ * error and consumes nothing — not even the key —
+ * so building its payout webhook while it is still
+ * PAYOUT_PENDING is refused with the pinned
+ * not-PAID error; the same key retried with the
+ * fresh seq settles it to PAID, its signed webhook
+ * builds and verifies, and a same-key repeat with
+ * the fresh seq is a no-op — the successful retry
+ * consumed the key, the conflict never did.
  * a stale patrol segment: five further
  * tasks screened by `staleTasks()` alone at the
  * stale branches' fixed `now` under a patrol budget
@@ -1198,6 +1211,28 @@ export interface DemoResult {
   expectedSeqUnguardedTask: TaskLifecycle;
   /** Return of DEMO-037's START_CAPTURE with no expectedSeq (CAPTURING). */
   expectedSeqUnguardedReturn: TaskState;
+  /** Guarded-settlement task of the expectedSeq settlement segment (DEMO-060, PAID, 8 entries). */
+  settlementGuardTask: TaskLifecycle;
+  /** Error from DEMO-060's stale expectedSeq PAYOUT_COMPLETE ("" if accepted). */
+  settlementGuardConflictError: string;
+  /** DEMO-060's state after the conflict (PAYOUT_PENDING). */
+  settlementGuardStateAfterConflict: TaskState;
+  /** DEMO-060's history length after the conflict (7). */
+  settlementGuardHistoryLengthAfterConflict: number;
+  /** Error from building DEMO-060's payout webhook while PAYOUT_PENDING ("" if built). */
+  settlementGuardWebhookRefusalError: string;
+  /** Return of DEMO-060's fresh-seq PAYOUT_COMPLETE retry (PAID). */
+  settlementGuardPaidReturn: TaskState;
+  /** Idempotency key DEMO-060's settlement retry consumes ("demo-seq-settle"). */
+  settlementGuardKey: string;
+  /** Signed payout webhook built for DEMO-060 once PAID. */
+  settlementGuardWebhook: PayoutWebhook;
+  /** Verdict of verifying DEMO-060's webhook over its payload (true). */
+  settlementGuardWebhookVerified: boolean;
+  /** Return of DEMO-060's same-key fresh-seq repeat PAYOUT_COMPLETE (PAID). */
+  settlementGuardRepeatReturn: TaskState;
+  /** DEMO-060's history length after the repeat (8). */
+  settlementGuardHistoryLengthAfterRepeat: number;
   /** The closing stale patrol segment's five tasks, in patrol order. */
   patrolTasks: TaskLifecycle[];
   /** `staleTasks` selection over {@link DemoResult.patrolTasks} (only DEMO-038). */
@@ -6057,6 +6092,196 @@ export async function runDemo(): Promise<DemoResult> {
     `  no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> ${expectedSeqUnguardedReturn}, history entries: ${expectedSeqUnguardedTask.history.length} (omitting expectedSeq preserves the exact pre-guard behavior)`,
   );
 
+  // Dispatch expectedSeq guard through settlement segment:
+  // the expectedSeq segment above stops at CAPTURING, so a
+  // reader never sees the guard at the moment it matters
+  // most — a settlement decision made on a stale snapshot.
+  // One dedicated task (DEMO-060, the next free number
+  // after DEMO-059) is driven PUBLISH -> ACCEPT ->
+  // START_CAPTURE -> SUBMIT -> BEGIN_REVIEW -> APPROVE ->
+  // REQUEST_PAYOUT under fixed timestamps to a pinned
+  // 7-entry PAYOUT_PENDING history, and then:
+  //   - a stale settlement: PAYOUT_COMPLETE with
+  //     expectedSeq 6 and idempotencyKey "demo-seq-settle"
+  //     is rejected with the pinned dispatch-conflict
+  //     error and changes nothing — state stays
+  //     PAYOUT_PENDING, history stays at 7 entries and
+  //     is byte-identical through the canonical NDJSON
+  //     serializer — and, because the guard runs before
+  //     the idempotency dedupe, the key is NOT consumed;
+  //   - a webhook refused before settlement:
+  //     buildPayoutWebhook on the still-PAYOUT_PENDING
+  //     task throws the pinned not-PAID error — only a
+  //     PAID task has a completed settlement to announce;
+  //   - a fresh retry: PAYOUT_COMPLETE with
+  //     expectedSeq 7 and the same key settles the task
+  //     to PAID (8 entries, the last carrying payoutRef
+  //     xfer-demo-seq-settle and payoutAmount 106.3), and
+  //     its signed webhook builds under a fixed eventId
+  //     and verifies over its payload;
+  //   - a same-key repeat: PAYOUT_COMPLETE with
+  //     expectedSeq 8 and the same key returns PAID as a
+  //     no-op — the successful retry consumed the key,
+  //     so no second entry and no second settlement is
+  //     recorded, while the conflict above consumed
+  //     nothing, which is why the retry could run at all.
+  // Hand-written expectations — written out here from
+  // the DispatchOptions docs and cross-checked against
+  // test/expectedSeq.test.ts and
+  // test/settlementWebhook.test.ts, never derived from
+  // the dispatches themselves. The segment asserts all of
+  // this here, outside the printed lines: a guard verdict
+  // that drifted would fail the demo itself, not just a
+  // test. Honest limit, as in the DispatchOptions docs:
+  // this is a single-process optimistic lock against the
+  // in-memory history; cross-process writers still need
+  // compare-and-swap in the durable store itself.
+  const settlementGuardAt = (offsetSeconds: number): string =>
+    new Date(
+      Date.parse("2026-03-27T09:00:00.000Z") + offsetSeconds * 1000,
+    ).toISOString();
+  const settlementGuardKey = "demo-seq-settle";
+  const settlementGuardTask = new TaskLifecycle("DEMO-060");
+  settlementGuardTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: settlementGuardAt(0),
+  });
+  settlementGuardTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: settlementGuardAt(1),
+  });
+  settlementGuardTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: settlementGuardAt(2),
+  });
+  settlementGuardTask.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: settlementGuardAt(3),
+  });
+  settlementGuardTask.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: settlementGuardAt(4),
+  });
+  settlementGuardTask.dispatch("APPROVE", {
+    actor: "reviewer",
+    at: settlementGuardAt(5),
+  });
+  settlementGuardTask.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: settlementGuardAt(6),
+  });
+  const settlementGuardHistoryBefore = historyToNdjson(
+    settlementGuardTask.history,
+  );
+  let settlementGuardConflictError = "";
+  try {
+    settlementGuardTask.dispatch("PAYOUT_COMPLETE", {
+      actor: "contributor",
+      at: settlementGuardAt(7),
+      expectedSeq: 6,
+      idempotencyKey: settlementGuardKey,
+    });
+  } catch (err) {
+    settlementGuardConflictError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const settlementGuardStateAfterConflict = settlementGuardTask.state;
+  const settlementGuardHistoryLengthAfterConflict =
+    settlementGuardTask.history.length;
+  const settlementGuardHistoryAfterConflict = historyToNdjson(
+    settlementGuardTask.history,
+  );
+  let settlementGuardWebhookRefusalError = "";
+  try {
+    buildPayoutWebhook(settlementGuardTask, DEMO_WEBHOOK_SECRET, {
+      now: settlementGuardAt(7),
+      eventId: "evt_demo_seq_settle_001",
+    });
+  } catch (err) {
+    settlementGuardWebhookRefusalError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const settlementGuardPaidReturn = settlementGuardTask.dispatch(
+    "PAYOUT_COMPLETE",
+    {
+      actor: "contributor",
+      at: settlementGuardAt(7),
+      expectedSeq: 7,
+      idempotencyKey: settlementGuardKey,
+      payoutRef: "xfer-demo-seq-settle",
+      payoutAmount: 106.3,
+    },
+  );
+  const settlementGuardWebhook = buildPayoutWebhook(
+    settlementGuardTask,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: settlementGuardAt(8),
+      eventId: "evt_demo_seq_settle_001",
+    },
+  );
+  const settlementGuardWebhookVerified = verifyPayoutWebhook(
+    settlementGuardWebhook.payload,
+    settlementGuardWebhook.signature,
+    DEMO_WEBHOOK_SECRET,
+  );
+  const settlementGuardRepeatReturn = settlementGuardTask.dispatch(
+    "PAYOUT_COMPLETE",
+    {
+      actor: "contributor",
+      at: settlementGuardAt(9),
+      expectedSeq: 8,
+      idempotencyKey: settlementGuardKey,
+      payoutRef: "xfer-demo-seq-settle",
+      payoutAmount: 106.3,
+    },
+  );
+  const settlementGuardHistoryLengthAfterRepeat =
+    settlementGuardTask.history.length;
+  const settlementGuardLast = settlementGuardTask.history[7];
+  if (
+    settlementGuardConflictError !==
+      "dispatch conflict: expected seq 6 but task is at seq 7" ||
+    settlementGuardStateAfterConflict !== "PAYOUT_PENDING" ||
+    settlementGuardHistoryLengthAfterConflict !== 7 ||
+    settlementGuardHistoryAfterConflict !== settlementGuardHistoryBefore ||
+    settlementGuardWebhookRefusalError !==
+      "cannot build payout webhook: task DEMO-060 is in state PAYOUT_PENDING, only PAID tasks have a completed settlement to announce" ||
+    settlementGuardPaidReturn !== "PAID" ||
+    settlementGuardTask.state !== "PAID" ||
+    settlementGuardTask.history.length !== 8 ||
+    settlementGuardLast.seq !== 8 ||
+    settlementGuardLast.event !== "PAYOUT_COMPLETE" ||
+    settlementGuardLast.from !== "PAYOUT_PENDING" ||
+    settlementGuardLast.to !== "PAID" ||
+    settlementGuardLast.at !== settlementGuardAt(7) ||
+    settlementGuardLast.actor !== "contributor" ||
+    settlementGuardLast.payoutRef !== "xfer-demo-seq-settle" ||
+    settlementGuardLast.payoutAmount !== 106.3 ||
+    settlementGuardWebhook.payload.event !== "PAYOUT_COMPLETE" ||
+    settlementGuardWebhook.payload.taskId !== "DEMO-060" ||
+    settlementGuardWebhook.payload.payoutRef !== "xfer-demo-seq-settle" ||
+    settlementGuardWebhook.payload.payoutAmount !== 106.3 ||
+    settlementGuardWebhook.payload.eventId !== "evt_demo_seq_settle_001" ||
+    settlementGuardWebhookVerified !== true ||
+    settlementGuardRepeatReturn !== "PAID" ||
+    settlementGuardHistoryLengthAfterRepeat !== 8
+  ) {
+    throw new Error(
+      "demo fixture broken: expectedSeq-guarded settlement does not match the hand-pinned contract (a stale expectedSeq 6 settlement with an idempotency key must throw the pinned dispatch-conflict error and leave state PAYOUT_PENDING, history at 7 byte-identical entries, and the key unconsumed; building a payout webhook while PAYOUT_PENDING must throw the pinned not-PAID error; the same key retried with the fresh expectedSeq 7 must settle to PAID with a pinned seq-8 last entry carrying payoutRef xfer-demo-seq-settle and payoutAmount 106.3, its signed webhook must build under eventId evt_demo_seq_settle_001 and verify; and a same-key repeat with expectedSeq 8 must return PAID as a no-op with history still at 8 entries)",
+    );
+  }
+  lines.push(
+    "",
+    "Dispatch expectedSeq guard through settlement (a stale settlement attempt builds no webhook — fixed timestamps, no network):",
+    `  driven to payout (DEMO-060): PUBLISH -> ACCEPT -> START_CAPTURE -> SUBMIT -> BEGIN_REVIEW -> APPROVE -> REQUEST_PAYOUT under fixed timestamps to seq 7 (state PAYOUT_PENDING, history entries: 7)`,
+    `  stale settlement (DEMO-060): PAYOUT_COMPLETE with expectedSeq 6 and idempotencyKey "${settlementGuardKey}" -> rejected: "${settlementGuardConflictError}"; state after: ${settlementGuardStateAfterConflict}, history entries: ${settlementGuardHistoryLengthAfterConflict} (the guard runs before the idempotency dedupe, so the conflict consumes nothing — not even the key — and the same key stays free for the retry)`,
+    `  webhook refused before settlement (DEMO-060): buildPayoutWebhook on the PAYOUT_PENDING task -> rejected: "${settlementGuardWebhookRefusalError}" (only a PAID task has a completed settlement to announce)`,
+    `  fresh retry settles (DEMO-060): PAYOUT_COMPLETE with expectedSeq 7 and the same idempotencyKey "${settlementGuardKey}" -> ${settlementGuardPaidReturn}, history entries: ${settlementGuardTask.history.length}; last entry: seq 8 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID carrying payoutRef xfer-demo-seq-settle and payoutAmount 106.3 (the conflict above consumed nothing, which is why this retry could run at all)`,
+    `  webhook after settlement (DEMO-060): buildPayoutWebhook -> event ${settlementGuardWebhook.payload.event}, taskId ${settlementGuardWebhook.payload.taskId}, payoutRef ${settlementGuardWebhook.payload.payoutRef}, payoutAmount ${settlementGuardWebhook.payload.payoutAmount}, eventId ${settlementGuardWebhook.payload.eventId}; verifyPayoutWebhook over the payload: ${settlementGuardWebhookVerified} (the receiver checks the signed bytes, not the story around them)`,
+    `  same-key repeat (DEMO-060): PAYOUT_COMPLETE with expectedSeq 8 and idempotencyKey "${settlementGuardKey}" -> ${settlementGuardRepeatReturn}, history entries: ${settlementGuardHistoryLengthAfterRepeat} (the successful retry consumed the key, so the repeat is a no-op — no second entry, no second settlement)`,
+  );
+
   // --- Stale patrol: staleTasks / maxAgeByState edge forms ---
   // A dedicated patrol over five further tasks on the same fixed
   // ---------------------------------------------------------------------------
@@ -7071,7 +7296,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
 }
 
 async function main(): Promise<void> {

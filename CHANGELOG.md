@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `expectedSeq` guard through settlement demo segment (backlog #826):
+  new DEMO-060 section in `src/demo.ts` carries the optimistic
+  concurrency guard past CAPTURING to the settlement it exists to
+  protect — a stale `expectedSeq` 6 `PAYOUT_COMPLETE` carrying an
+  idempotency key is rejected with the pinned dispatch-conflict
+  error and consumes nothing, not even the key, so building a
+  payout webhook while the task is still PAYOUT_PENDING is
+  refused with the pinned not-PAID error; the same key retried
+  with the fresh `expectedSeq` 7 settles the task to PAID
+  (payoutRef `xfer-demo-seq-settle`, payoutAmount 106.3), its
+  signed webhook builds under a fixed eventId and verifies over
+  its payload, and a same-key repeat with `expectedSeq` 8 is a
+  no-op with history still at 8 entries; `test/demo.test.ts`
+  pins the segment in-process, its printed lines verbatim, the
+  golden demo output, and two-run determinism.
+
 - Payout webhook freshness window x `PayoutEventDedupe` receiver-flow
   benchmark row (backlog #824): new
   `benchVerifyPayoutWebhookFreshnessDedupe` in `bench/bench.ts`

@@ -649,6 +649,14 @@ Dispatch expectedSeq optimistic concurrency (dispatch pins the history length th
   illegal guards (DEMO-036): PUBLISH with expectedSeq -1 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got -1"; PUBLISH with expectedSeq 1.5 -> rejected: "invalid dispatch options: expectedSeq must be a non-negative integer, got 1.5"; state after both: DRAFT, history entries: 0 (a non-integer or negative expectedSeq is a caller configuration error, thrown up front before anything mutates)
   no guard (DEMO-037): the same pinned 2-entry history; START_CAPTURE with no expectedSeq -> CAPTURING, history entries: 3 (omitting expectedSeq preserves the exact pre-guard behavior)
 
+Dispatch expectedSeq guard through settlement (a stale settlement attempt builds no webhook — fixed timestamps, no network):
+  driven to payout (DEMO-060): PUBLISH -> ACCEPT -> START_CAPTURE -> SUBMIT -> BEGIN_REVIEW -> APPROVE -> REQUEST_PAYOUT under fixed timestamps to seq 7 (state PAYOUT_PENDING, history entries: 7)
+  stale settlement (DEMO-060): PAYOUT_COMPLETE with expectedSeq 6 and idempotencyKey "demo-seq-settle" -> rejected: "dispatch conflict: expected seq 6 but task is at seq 7"; state after: PAYOUT_PENDING, history entries: 7 (the guard runs before the idempotency dedupe, so the conflict consumes nothing — not even the key — and the same key stays free for the retry)
+  webhook refused before settlement (DEMO-060): buildPayoutWebhook on the PAYOUT_PENDING task -> rejected: "cannot build payout webhook: task DEMO-060 is in state PAYOUT_PENDING, only PAID tasks have a completed settlement to announce" (only a PAID task has a completed settlement to announce)
+  fresh retry settles (DEMO-060): PAYOUT_COMPLETE with expectedSeq 7 and the same idempotencyKey "demo-seq-settle" -> PAID, history entries: 8; last entry: seq 8 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID carrying payoutRef xfer-demo-seq-settle and payoutAmount 106.3 (the conflict above consumed nothing, which is why this retry could run at all)
+  webhook after settlement (DEMO-060): buildPayoutWebhook -> event PAYOUT_COMPLETE, taskId DEMO-060, payoutRef xfer-demo-seq-settle, payoutAmount 106.3, eventId evt_demo_seq_settle_001; verifyPayoutWebhook over the payload: true (the receiver checks the signed bytes, not the story around them)
+  same-key repeat (DEMO-060): PAYOUT_COMPLETE with expectedSeq 8 and idempotencyKey "demo-seq-settle" -> PAID, history entries: 8 (the successful retry consumed the key, so the repeat is a no-op — no second entry, no second settlement)
+
 Constructor id fail-fast (the first door of the audit chain):
   new TaskLifecycle("") throws: invalid task: id must be a non-empty string
   new TaskLifecycle(undefined) throws: invalid task: id must be a non-empty string
@@ -705,7 +713,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 589);
+  assert.equal(lines.length, 597);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2605,7 +2613,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 589);
+  assert.equal(out.trimEnd().split("\n").length, 597);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -6559,7 +6567,13 @@ test("demo dispatch expectedSeq segment is deterministic: two runs print byte-id
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):"),
-      ls.indexOf("Constructor id fail-fast (the first door of the audit chain):") - 1,
+      // The slice ends before the blank line that opens the
+      // settlement-guard segment (which now follows the
+      // expectedSeq segment); without the end bound the
+      // segment would swallow the new section's lines.
+      ls.indexOf(
+        "Dispatch expectedSeq guard through settlement (a stale settlement attempt builds no webhook — fixed timestamps, no network):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -6588,6 +6602,217 @@ test("demo dispatch expectedSeq segment is deterministic: two runs print byte-id
   assert.deepEqual(
     a.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
     b.expectedSeqTask.history.map((h) => [h.seq, h.event, h.at]),
+  );
+});
+
+test("demo shows the expectedSeq-guarded settlement segment in-process: a stale settlement conflicts untouched and builds no webhook, a fresh retry settles and verifies, and a same-key repeat is a no-op", async () => {
+  const {
+    settlementGuardTask,
+    settlementGuardConflictError,
+    settlementGuardStateAfterConflict,
+    settlementGuardHistoryLengthAfterConflict,
+    settlementGuardWebhookRefusalError,
+    settlementGuardPaidReturn,
+    settlementGuardKey,
+    settlementGuardWebhook,
+    settlementGuardWebhookVerified,
+    settlementGuardRepeatReturn,
+    settlementGuardHistoryLengthAfterRepeat,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // DispatchOptions docs in src/taskLifecycle.ts and
+  // test/settlementWebhook.test.ts, never derived from the
+  // demo's own dispatches.
+  const AT = (s: number) =>
+    new Date(Date.parse("2026-03-27T09:00:00.000Z") + s * 1000).toISOString();
+  assert.equal(settlementGuardTask.id, "DEMO-060");
+  assert.equal(settlementGuardTask.state, "PAID");
+  assert.equal(settlementGuardTask.history.length, 8);
+  assert.deepEqual(
+    settlementGuardTask.history.map((h) => [h.seq, h.event, h.from, h.to, h.at, h.actor]),
+    [
+      [1, "PUBLISH", "DRAFT", "OPEN", AT(0), "researcher"],
+      [2, "ACCEPT", "OPEN", "ACCEPTED", AT(1), "contributor"],
+      [3, "START_CAPTURE", "ACCEPTED", "CAPTURING", AT(2), "contributor"],
+      [4, "SUBMIT", "CAPTURING", "SUBMITTED", AT(3), "contributor"],
+      [5, "BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW", AT(4), "reviewer"],
+      [6, "APPROVE", "IN_REVIEW", "APPROVED", AT(5), "reviewer"],
+      [7, "REQUEST_PAYOUT", "APPROVED", "PAYOUT_PENDING", AT(6), "contributor"],
+      [8, "PAYOUT_COMPLETE", "PAYOUT_PENDING", "PAID", AT(7), "contributor"],
+    ],
+  );
+  assert.equal(
+    settlementGuardTask.history[7].payoutRef,
+    "xfer-demo-seq-settle",
+  );
+  assert.equal(settlementGuardTask.history[7].payoutAmount, 106.3);
+  assert.equal(
+    settlementGuardConflictError,
+    "dispatch conflict: expected seq 6 but task is at seq 7",
+  );
+  assert.equal(settlementGuardStateAfterConflict, "PAYOUT_PENDING");
+  assert.equal(settlementGuardHistoryLengthAfterConflict, 7);
+  assert.equal(
+    settlementGuardWebhookRefusalError,
+    "cannot build payout webhook: task DEMO-060 is in state PAYOUT_PENDING, only PAID tasks have a completed settlement to announce",
+  );
+  assert.equal(settlementGuardPaidReturn, "PAID");
+  assert.equal(settlementGuardKey, "demo-seq-settle");
+  assert.equal(settlementGuardWebhook.payload.event, "PAYOUT_COMPLETE");
+  assert.equal(settlementGuardWebhook.payload.taskId, "DEMO-060");
+  assert.equal(
+    settlementGuardWebhook.payload.payoutRef,
+    "xfer-demo-seq-settle",
+  );
+  assert.equal(settlementGuardWebhook.payload.payoutAmount, 106.3);
+  assert.equal(
+    settlementGuardWebhook.payload.eventId,
+    "evt_demo_seq_settle_001",
+  );
+  assert.equal(settlementGuardWebhookVerified, true);
+  assert.equal(settlementGuardRepeatReturn, "PAID");
+  assert.equal(settlementGuardHistoryLengthAfterRepeat, 8);
+  // The segment follows the expectedSeq segment and prints
+  // its lines verbatim.
+  const header =
+    "Dispatch expectedSeq guard through settlement (a stale settlement attempt builds no webhook — fixed timestamps, no network):";
+  assert.ok(
+    text.indexOf(header) >
+      text.indexOf(
+        "Dispatch expectedSeq optimistic concurrency (dispatch pins the history length the caller read — fixed timestamps, no network):",
+      ),
+    "settlement-guard segment must follow the expectedSeq segment",
+  );
+  for (const line of [
+    `  driven to payout (DEMO-060): PUBLISH -> ACCEPT -> START_CAPTURE -> SUBMIT -> BEGIN_REVIEW -> APPROVE -> REQUEST_PAYOUT under fixed timestamps to seq 7 (state PAYOUT_PENDING, history entries: 7)`,
+    `  stale settlement (DEMO-060): PAYOUT_COMPLETE with expectedSeq 6 and idempotencyKey "demo-seq-settle" -> rejected: "dispatch conflict: expected seq 6 but task is at seq 7"; state after: PAYOUT_PENDING, history entries: 7 (the guard runs before the idempotency dedupe, so the conflict consumes nothing — not even the key — and the same key stays free for the retry)`,
+    `  webhook refused before settlement (DEMO-060): buildPayoutWebhook on the PAYOUT_PENDING task -> rejected: "cannot build payout webhook: task DEMO-060 is in state PAYOUT_PENDING, only PAID tasks have a completed settlement to announce" (only a PAID task has a completed settlement to announce)`,
+    `  fresh retry settles (DEMO-060): PAYOUT_COMPLETE with expectedSeq 7 and the same idempotencyKey "demo-seq-settle" -> PAID, history entries: 8; last entry: seq 8 PAYOUT_COMPLETE PAYOUT_PENDING -> PAID carrying payoutRef xfer-demo-seq-settle and payoutAmount 106.3 (the conflict above consumed nothing, which is why this retry could run at all)`,
+    `  webhook after settlement (DEMO-060): buildPayoutWebhook -> event PAYOUT_COMPLETE, taskId DEMO-060, payoutRef xfer-demo-seq-settle, payoutAmount 106.3, eventId evt_demo_seq_settle_001; verifyPayoutWebhook over the payload: true (the receiver checks the signed bytes, not the story around them)`,
+    `  same-key repeat (DEMO-060): PAYOUT_COMPLETE with expectedSeq 8 and idempotencyKey "demo-seq-settle" -> PAID, history entries: 8 (the successful retry consumed the key, so the repeat is a no-op — no second entry, no second settlement)`,
+  ]) {
+    assert.ok(text.includes(line), `missing settlement-guard line: ${line}`);
+  }
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: the same four forms are driven
+  // here on a fresh task.
+  const independent = new TaskLifecycle("TEST-SEQ-SET-001");
+  independent.dispatch("PUBLISH", { actor: "researcher", at: AT(0) });
+  independent.dispatch("ACCEPT", { actor: "contributor", at: AT(1) });
+  independent.dispatch("START_CAPTURE", { actor: "contributor", at: AT(2) });
+  independent.dispatch("SUBMIT", { actor: "contributor", at: AT(3) });
+  independent.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: AT(4) });
+  independent.dispatch("APPROVE", { actor: "reviewer", at: AT(5) });
+  independent.dispatch("REQUEST_PAYOUT", { actor: "contributor", at: AT(6) });
+  const independentHistoryBefore = historyToNdjson(independent.history);
+  assert.throws(
+    () =>
+      independent.dispatch("PAYOUT_COMPLETE", {
+        actor: "contributor",
+        at: AT(7),
+        expectedSeq: 6,
+        idempotencyKey: "test-seq-settle",
+      }),
+    (err: unknown) =>
+      err instanceof Error && err.message === settlementGuardConflictError,
+  );
+  assert.equal(independent.state, "PAYOUT_PENDING");
+  assert.equal(historyToNdjson(independent.history), independentHistoryBefore);
+  assert.throws(
+    () =>
+      buildPayoutWebhook(independent, DEMO_WEBHOOK_SECRET, {
+        now: AT(7),
+        eventId: "evt_test_seq_settle_001",
+      }),
+    (err: unknown) =>
+      err instanceof Error &&
+      err.message ===
+        "cannot build payout webhook: task TEST-SEQ-SET-001 is in state PAYOUT_PENDING, only PAID tasks have a completed settlement to announce",
+  );
+  assert.equal(
+    independent.dispatch("PAYOUT_COMPLETE", {
+      actor: "contributor",
+      at: AT(7),
+      expectedSeq: 7,
+      idempotencyKey: "test-seq-settle",
+      payoutRef: "xfer-test-seq-settle",
+      payoutAmount: 106.3,
+    }),
+    settlementGuardPaidReturn,
+  );
+  const independentWebhook = buildPayoutWebhook(
+    independent,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: AT(8),
+      eventId: "evt_test_seq_settle_001",
+    },
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      independentWebhook.payload,
+      independentWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    settlementGuardWebhookVerified,
+  );
+  assert.equal(
+    independent.dispatch("PAYOUT_COMPLETE", {
+      actor: "contributor",
+      at: AT(9),
+      expectedSeq: 8,
+      idempotencyKey: "test-seq-settle",
+      payoutRef: "xfer-test-seq-settle",
+      payoutAmount: 106.3,
+    }),
+    settlementGuardRepeatReturn,
+  );
+  assert.equal(independent.history.length, 8);
+});
+
+test("demo expectedSeq-guarded settlement segment is deterministic: two runs print byte-identical settlement-guard lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Dispatch expectedSeq guard through settlement (a stale settlement attempt builds no webhook — fixed timestamps, no network):",
+      ),
+      ls.indexOf(
+        "Constructor id fail-fast (the first door of the audit chain):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + driven / stale / refused / fresh / webhook /
+  // repeat lines; every value is a pinned literal (fixed
+  // timestamps, the pinned conflict and not-PAID error
+  // texts, the fixed eventId), so no normalization is
+  // needed.
+  assert.equal(segA.length, 7);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(
+    a.settlementGuardConflictError,
+    b.settlementGuardConflictError,
+  );
+  assert.equal(
+    a.settlementGuardWebhookRefusalError,
+    b.settlementGuardWebhookRefusalError,
+  );
+  assert.equal(a.settlementGuardPaidReturn, b.settlementGuardPaidReturn);
+  assert.equal(
+    a.settlementGuardWebhookVerified,
+    b.settlementGuardWebhookVerified,
+  );
+  assert.equal(
+    a.settlementGuardRepeatReturn,
+    b.settlementGuardRepeatReturn,
+  );
+  assert.deepEqual(
+    a.settlementGuardTask.history.map((h) => [h.seq, h.event, h.at]),
+    b.settlementGuardTask.history.map((h) => [h.seq, h.event, h.at]),
   );
 });
 
