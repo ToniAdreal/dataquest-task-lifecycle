@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook freshness window x `PayoutEventDedupe` receiver-flow
+  benchmark row (backlog #824): new
+  `benchVerifyPayoutWebhookFreshnessDedupe` in `bench/bench.ts`
+  measures what the freshness-only rows and the verify x dedupe row
+  never measured together — one measured op runs an in-window
+  delivery that verifies under the two-sided window
+  (`{ maxAgeMs, maxFutureSkewMs, now }`) and records as a first
+  sighting, its redelivery that verifies again and reports
+  duplicate, and an over-age delivery (signed 1 ms past `maxAgeMs`)
+  that verifies false and records nothing, proven by its claimed
+  id still recording as first-seen afterwards; outside the timed
+  loop the over-age body is pinned to verify without a window but
+  fail under it, and the exactly-`maxAgeMs`-old boundary body is
+  pinned to verify and record.
+
 - Payout webhook freshness window x `PayoutEventDedupe` combination
   coverage (backlog #819): new
   `test/payoutWebhookFreshnessDedupe.test.ts` pins what no freshness

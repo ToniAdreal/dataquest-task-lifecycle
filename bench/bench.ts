@@ -1321,6 +1321,34 @@
  *      No network, no randomness, no wall clock: the fan-out uses
  *      the injected fake fetch that answers 200 immediately.
  *
+ *  65. payout webhook freshness x dedupe receiver flow —
+ *      `verifyPayoutWebhook` under the two-sided freshness window
+ *      (`{ maxAgeMs, maxFutureSkewMs, now }`) followed by
+ *      `PayoutEventDedupe.checkAndRecord()` over the fixed signed
+ *      webhook, one measured op per receiver pass (see the
+ *      freshness-dedupe receiver fixture below). This is the #824
+ *      bench row, the bench variant of the #819 test row: the
+ *      per-delivery cost a freshness-checking receiver actually
+ *      pays, which neither the freshness-only rows nor the
+ *      verify x dedupe row exercises together. One measured op
+ *      runs three receiver passes: an in-window delivery (the
+ *      genuine body verifies true under the window, its id
+ *      records as a first sighting), its redelivery (the same
+ *      body verifies true again, the same id reports
+ *      duplicate), and an over-age delivery (a legitimately-
+ *      signed body stamped 1 ms past `maxAgeMs` verifies
+ *      false, so the receiver never reaches the dedupe step —
+ *      proven by a later in-window delivery carrying the stale
+ *      delivery's claimed id still recording as first-seen).
+ *      The dedupe step takes the id string, not the body, so
+ *      the timed path uses per-iteration synthetic ids standing
+ *      in for `payload.eventId`; the verify steps run over the
+ *      real fixed signed bodies (in-window, over-age, and the
+ *      exactly-`maxAgeMs`-old boundary body pinned outside the
+ *      timed loop). No network, no randomness, no wall clock:
+ *      the dedupe runs under an injected fixed clock, so no
+ *      entry expires or is evicted in the timed loop.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -3599,6 +3627,152 @@ const receiverDedupe = new PayoutEventDedupe({
   maxEntries: 100_000,
 });
 let receiverDedupeCounter = 0;
+
+// Freshness-dedupe receiver fixture: verifyPayoutWebhook x
+// PayoutEventDedupe under a two-sided freshness window — the #824
+// bench row, the bench variant of the #819 test row. The receiver
+// `now` is the same fixed instant as the dedupe clock
+// (DEDUPE_NOW_MS, 60 seconds after the in-window webhook's signing
+// time WEBHOOK_NOW), so the genuine body sits 60,000 ms inside a
+// 300,000 ms window on both sides. The over-age body is signed 1 ms
+// past `maxAgeMs` (age 300,001 ms at receiver `now`): its signature
+// alone is valid, only the age gate rejects it. The boundary body
+// is signed exactly `maxAgeMs` old (age 300,000 ms): the inclusive
+// boundary still verifies and records. The dedicated dedupe runs
+// under the same injected FIXED clock with capacity 100,000 — one
+// measured op records exactly two ids, and warmup + timed calls
+// total 3,200 ops, so 6,400 live entries stay far under the cap
+// and nothing is evicted in the timed loop. No network, no
+// randomness, no wall clock.
+const WEBHOOK_FRESHNESS_DEDUPE_OPTS = {
+  maxAgeMs: WEBHOOK_MAX_AGE_MS,
+  maxFutureSkewMs: WEBHOOK_MAX_FUTURE_SKEW_MS,
+  now: new Date(DEDUPE_NOW_MS),
+};
+const freshnessStaleWebhook = buildPayoutWebhook(paidTask, WEBHOOK_SECRET, {
+  now: new Date(DEDUPE_NOW_MS - WEBHOOK_MAX_AGE_MS - 1),
+  eventId: "bench-event-stale-001",
+});
+const WEBHOOK_FRESHNESS_STALE_BODY = JSON.stringify(
+  freshnessStaleWebhook.payload,
+);
+const freshnessBoundaryWebhook = buildPayoutWebhook(
+  paidTask,
+  WEBHOOK_SECRET,
+  {
+    now: new Date(DEDUPE_NOW_MS - WEBHOOK_MAX_AGE_MS),
+    eventId: "bench-event-boundary-001",
+  },
+);
+const WEBHOOK_FRESHNESS_BOUNDARY_BODY = JSON.stringify(
+  freshnessBoundaryWebhook.payload,
+);
+// Semantics self-checks (outside the timed loop): the in-window body
+// verifies under the two-sided window; the over-age body verifies
+// without any window (its signature alone is valid) but fails under
+// the window and under a maxAgeMs-only window; the boundary body
+// verifies under the two-sided window (inclusive boundary). On a
+// scratch dedupe, a rejected over-age delivery records nothing —
+// its claimed id still records as a first sighting afterwards —
+// while the boundary body records as a first sighting and then
+// reports duplicate, exactly the #819 receiver order.
+if (
+  !verifyPayoutWebhook(
+    webhookBody,
+    webhook.signature,
+    WEBHOOK_SECRET,
+    WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: freshness x dedupe in-window verify",
+  );
+}
+if (
+  !verifyPayoutWebhook(
+    WEBHOOK_FRESHNESS_STALE_BODY,
+    freshnessStaleWebhook.signature,
+    WEBHOOK_SECRET,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: freshness x dedupe stale body must verify without a window",
+  );
+}
+if (
+  verifyPayoutWebhook(
+    WEBHOOK_FRESHNESS_STALE_BODY,
+    freshnessStaleWebhook.signature,
+    WEBHOOK_SECRET,
+    WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+  ) ||
+  verifyPayoutWebhook(
+    WEBHOOK_FRESHNESS_STALE_BODY,
+    freshnessStaleWebhook.signature,
+    WEBHOOK_SECRET,
+    { maxAgeMs: WEBHOOK_MAX_AGE_MS, now: new Date(DEDUPE_NOW_MS) },
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: freshness x dedupe stale body must fail under the window",
+  );
+}
+if (
+  !verifyPayoutWebhook(
+    WEBHOOK_FRESHNESS_BOUNDARY_BODY,
+    freshnessBoundaryWebhook.signature,
+    WEBHOOK_SECRET,
+    WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: freshness x dedupe boundary body must verify",
+  );
+}
+{
+  const scratch = new PayoutEventDedupe({
+    now: () => DEDUPE_NOW_MS,
+    maxEntries: 100_000,
+  });
+  const staleId = (
+    JSON.parse(WEBHOOK_FRESHNESS_STALE_BODY) as { eventId: string }
+  ).eventId;
+  if (
+    verifyPayoutWebhook(
+      WEBHOOK_FRESHNESS_STALE_BODY,
+      freshnessStaleWebhook.signature,
+      WEBHOOK_SECRET,
+      WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+    )
+  ) {
+    throw new Error(
+      "benchmark fixture failed: freshness x dedupe stale receive must fail",
+    );
+  }
+  if (scratch.checkAndRecord(staleId)) {
+    throw new Error(
+      "benchmark fixture failed: freshness x dedupe stale id must still be new",
+    );
+  }
+  const boundaryId = (
+    JSON.parse(WEBHOOK_FRESHNESS_BOUNDARY_BODY) as { eventId: string }
+  ).eventId;
+  if (scratch.checkAndRecord(boundaryId)) {
+    throw new Error(
+      "benchmark fixture failed: freshness x dedupe boundary id must be new",
+    );
+  }
+  if (!scratch.checkAndRecord(boundaryId)) {
+    throw new Error(
+      "benchmark fixture failed: freshness x dedupe boundary redelivery must be duplicate",
+    );
+  }
+}
+const freshnessReceiverDedupe = new PayoutEventDedupe({
+  now: () => DEDUPE_NOW_MS,
+  maxEntries: 100_000,
+});
+let freshnessReceiverDedupeCounter = 0;
 
 // Fan-out receiver fixture: deliverPayoutWebhookToMany x
 // PayoutEventDedupe — the #740 test row's bench variant. One
@@ -8637,6 +8811,89 @@ function benchVerifyPayoutWebhookDedupe(): number {
   }, ITERATIONS);
 }
 
+function benchVerifyPayoutWebhookFreshnessDedupe(): number {
+  return measure(() => {
+    const n = freshnessReceiverDedupeCounter++;
+    const freshId = `bench-fresh-recv-${n}`;
+    const staleClaimedId = `bench-fresh-recv-stale-${n}`;
+    // First sighting: the in-window delivery verifies under the
+    // two-sided freshness window and records as first-seen
+    // (process the event).
+    if (
+      !verifyPayoutWebhook(
+        webhookBody,
+        webhook.signature,
+        WEBHOOK_SECRET,
+        WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe first sighting verify",
+      );
+    }
+    if (freshnessReceiverDedupe.checkAndRecord(freshId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe first sighting must be new",
+      );
+    }
+    // Redelivery: the same body verifies again under the window,
+    // but the same id now reports duplicate (acknowledge, do not
+    // pay out twice).
+    if (
+      !verifyPayoutWebhook(
+        webhookBody,
+        webhook.signature,
+        WEBHOOK_SECRET,
+        WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe redelivery verify",
+      );
+    }
+    if (!freshnessReceiverDedupe.checkAndRecord(freshId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe redelivery must be duplicate",
+      );
+    }
+    // Over-age delivery: the legitimately-signed body is 1 ms past
+    // `maxAgeMs`, so it verifies false and the receiver never
+    // reaches the dedupe step. Proven by the next step: an
+    // in-window delivery carrying the stale delivery's claimed id
+    // still records as first-seen, so the rejection recorded
+    // nothing.
+    if (
+      verifyPayoutWebhook(
+        WEBHOOK_FRESHNESS_STALE_BODY,
+        freshnessStaleWebhook.signature,
+        WEBHOOK_SECRET,
+        WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe over-age body must fail",
+      );
+    }
+    if (
+      !verifyPayoutWebhook(
+        webhookBody,
+        webhook.signature,
+        WEBHOOK_SECRET,
+        WEBHOOK_FRESHNESS_DEDUPE_OPTS,
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe post-stale verify",
+      );
+    }
+    if (freshnessReceiverDedupe.checkAndRecord(staleClaimedId)) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook freshness x dedupe stale id must still be new",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchHistoryToNdjson(): number {
   return measure(() => {
     if (historyToNdjson(historyFixture) !== ndjsonFixture) {
@@ -10021,6 +10278,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyPayoutWebhook maxFutureSkewMs future-skew window", ops: benchVerifyPayoutWebhookMaxFutureSkew() },
   { path: "verifyPayoutWebhook (secrets rotation x maxFutureSkewMs)", ops: benchVerifyPayoutWebhookRotationFutureSkew() },
   { path: "verifyPayoutWebhook x PayoutEventDedupe receiver flow", ops: benchVerifyPayoutWebhookDedupe() },
+  { path: "verifyPayoutWebhook freshness x PayoutEventDedupe receiver flow", ops: benchVerifyPayoutWebhookFreshnessDedupe() },
   { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
   { path: "historyFromNdjson (8 entries, chain re-verify)", ops: benchHistoryFromNdjson() },
   { path: "mismatchedPayouts (12 PAID tasks)", ops: benchMismatchedPayouts() },
