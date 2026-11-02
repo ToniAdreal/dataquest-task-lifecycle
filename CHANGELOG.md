@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook freshness window x `PayoutEventDedupe` combination
+  coverage (backlog #819): new
+  `test/payoutWebhookFreshnessDedupe.test.ts` pins what no freshness
+  file and no dedupe file pinned together: a stale payload
+  (`now - at > maxAgeMs`) and an over-future-window payload
+  (`at - now > maxFutureSkewMs`) both verify false and record
+  nothing, so the same eventId re-signed with a fresh `at` is still
+  a first sighting; an in-window payload is accepted once and then
+  reported duplicate; freshness failures pollute neither the dedupe
+  counters nor an already-seen verdict; and the inclusive
+  boundaries (exactly `maxAgeMs` old, exactly `maxFutureSkewMs`
+  ahead) both verify and record.
+
 - Payout webhook x `expireOverdueTasks` combination coverage
   (backlog #815): new `test/payoutWebhookExpireOverdue.test.ts`
   pins what no payout-webhook file and no watchdog file pinned
