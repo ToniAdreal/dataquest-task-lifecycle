@@ -11,6 +11,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `TaskLifecycleOptions.maxVisitsByState` per-state visit budget
+  (backlog #832): a map of state → positive-integer cap on how many
+  times the task may enter that state — the state-level counterpart to
+  the `maxResubmits`/`maxDisputes` event budgets, for tasks bouncing
+  between states (CAPTURING ↔ REJECTED) without bound. A visit counts
+  as 1 for the task's initial state (the first history entry's `from`,
+  or the current state when the history is still empty) plus 1 per
+  history entry landing in that state, so the used counts derive from
+  the append-only history and survive persistence: `toJSON()` stores a
+  non-empty map in the snapshot envelope (an empty map is omitted),
+  `fromJSON()` restores it, and `fromHistory(id, history,
+  { maxVisitsByState })` re-attaches it; a snapshot whose history
+  already exceeds a budget still rehydrates (the budget governs future
+  dispatches only). Invalid maps (unknown state, non-positive or
+  non-integer budget, non-object) throw `invalid option:
+  maxVisitsByState …` at construction, and malformed envelopes throw
+  `invalid snapshot: maxVisitsByState …`; the dispatch check runs
+  after the transition, RBAC, and event-budget checks and appends
+  nothing on rejection. `test/stateVisitBudget.test.ts` pins the
+  counting rule (including the already-spent budget-1 CAPTURING case),
+  the DRAFT initial-count rule, unlisted-state freedom, check
+  ordering, snapshot/fromHistory round-trips, and the REJECTED and
+  IN_REVIEW re-entry cases.
+
 - `TaskLifecycleOptions.slaDeadlines` constructor option (backlog
   #829): per-state advisory SLA deadlines attached up front
   (`{ OPEN: …, ACCEPTED: … }`), validated and normalized to

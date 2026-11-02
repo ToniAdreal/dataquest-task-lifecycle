@@ -921,6 +921,26 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * stored in the snapshot envelope. This is the task-level answer to the
  * "bound appeals" production habit.
  *
+ * `maxVisitsByState` caps how many times the task may ENTER each listed
+ * state — a per-state visit budget, for the "a task bouncing between
+ * CAPTURING and REJECTED forever" shape that the event budgets cannot
+ * express: `maxResubmits` counts RESUBMIT actions, but one resubmit can
+ * carry the task through several states, and a task can re-enter a state
+ * without any budgeted event at all. A visit is counted as 1 for the
+ * task's initial state (the first history entry's `from`, or the current
+ * state when the history is still empty) plus 1 per history entry whose
+ * `to` is that state — so the count is derived from the append-only
+ * history, exactly like the event budgets, and survives `toJSON()` /
+ * `fromJSON()` round-trips without resetting. States absent from the map
+ * are unlimited, and omitting the map disables the check entirely (the
+ * pre-budget behavior). Each budget must be a positive integer — 0
+ * would already be spent by the initial visit itself, so it is a
+ * construction error, not a usable budget; anything else throws
+ * `invalid option: …` at construction. Only a non-empty map is stored
+ * in the snapshot envelope (an empty map is omitted, keeping legacy
+ * snapshots byte-identical), and `fromHistory()` re-attaches it via
+ * opts like the other budgets.
+ *
  * `rolePolicy` is an optional {@link RolePolicy}: event → allowed actor
  * names. Events not listed are unrestricted; omitting the policy disables
  * the check entirely (the pre-policy behavior). Invalid policies throw
@@ -971,6 +991,7 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
 export interface TaskLifecycleOptions {
   maxResubmits?: number;
   maxDisputes?: number;
+  maxVisitsByState?: Partial<Record<TaskState, number>>;
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
   idempotencyKeys?: string[];
@@ -1102,6 +1123,49 @@ function assertMaxDisputes(value: unknown, tag: string): number {
     );
   }
   return value;
+}
+
+/**
+ * Validate a per-state visit-budget map into a normalized lookup map.
+ *
+ * `undefined` means "no budgets" (the default: every state unlimited).
+ * Otherwise the value must be a plain record whose keys are known states
+ * and whose values are positive integers — 0 is rejected, not just
+ * non-integers: the task's initial state already counts as one visit,
+ * so a 0 budget could never admit even the state the task starts in.
+ * Anything else throws `<tag>: maxVisitsByState …`, fail-fast at
+ * construction, so a bad map can never produce a task that looks
+ * budgeted but is not. An empty map is legal and means "no budgets".
+ */
+function assertMaxVisitsByState(
+  value: unknown,
+  tag: string,
+): Map<TaskState, number> {
+  const budgets = new Map<TaskState, number>();
+  if (value === undefined) return budgets;
+  if (!isRecord(value)) {
+    throw new Error(
+      `${tag}: maxVisitsByState must be an object, got ${typeof value}`,
+    );
+  }
+  for (const [state, budget] of Object.entries(value)) {
+    if (!STATES.has(state as TaskState)) {
+      throw new Error(
+        `${tag}: maxVisitsByState has unknown state ${state}`,
+      );
+    }
+    if (
+      typeof budget !== "number" ||
+      !Number.isInteger(budget) ||
+      budget < 1
+    ) {
+      throw new Error(
+        `${tag}: maxVisitsByState[${state}] must be a positive integer, got ${String(budget)}`,
+      );
+    }
+    budgets.set(state as TaskState, budget);
+  }
+  return budgets;
 }
 
 /**
@@ -1292,6 +1356,12 @@ export interface SubscribeOptions {
  * `maxDisputes` follows the same convention for the DISPUTE appeal
  * budget (finite budgets only; used appeal rounds derived from history).
  *
+ * `maxVisitsByState` is present only when the task carries at least one
+ * per-state visit budget (an empty map is omitted, keeping legacy
+ * snapshots byte-identical). The used visit counts are NOT stored
+ * separately — they are derived from the history on rehydration, so
+ * they can never drift from the audit trail.
+ *
  * `rolePolicy` is present only when the task carries an RBAC policy; it
  * rehydrates through the same strict validation as the constructor, so a
  * tampered policy in a stored snapshot is rejected, not silently applied.
@@ -1333,6 +1403,7 @@ export interface TaskSnapshot {
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits?: number;
   maxDisputes?: number;
+  maxVisitsByState?: Partial<Record<TaskState, number>>;
   rolePolicy?: RolePolicy;
   idempotencyKeys?: string[];
 }
@@ -1357,6 +1428,7 @@ const SNAPSHOT_FIELDS = new Set([
   "slaDeadlines",
   "maxResubmits",
   "maxDisputes",
+  "maxVisitsByState",
   "rolePolicy",
   "idempotencyKeys",
 ]);
@@ -1837,11 +1909,11 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
  *    than a misleading structural or chain error.
  *  - unknown top-level fields are rejected (fail-closed), never silently
  *    dropped: only `v`/`id`/`state`/`history`/`slaDeadlines`/
- *    `maxResubmits`/`maxDisputes`/`rolePolicy`/`idempotencyKeys` are
- *    allowed (`unknown field "<name>"`), checked right after the
- *    version gate and before any field is consumed, so a typo like
- *    `deadlline` fails loudly instead of quietly losing the SLA
- *    deadlines it was meant to carry
+ *    `maxResubmits`/`maxDisputes`/`maxVisitsByState`/`rolePolicy`/
+ *    `idempotencyKeys` are allowed (`unknown field "<name>"`), checked
+ *    right after the version gate and before any field is consumed, so a
+ *    typo like `deadlline` fails loudly instead of quietly losing the
+ *    SLA deadlines it was meant to carry
  *  - history entry violations — see parseHistory for the full checklist
  *  - the history's replayed state must land on the snapshot's state
  *  - SLA deadlines must name real states with parseable dates (values
@@ -1852,6 +1924,10 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
  *    governs future dispatches)
  *  - maxDisputes, when present, follows the exact same rule for the
  *    DISPUTE appeal budget
+ *  - maxVisitsByState, when present, must be an object mapping known
+ *    states to positive integers (absent means no visit budgets; a
+ *    history that already exceeds a budget does NOT fail rehydration —
+ *    the budget only governs future dispatches into that state)
  *  - idempotencyKeys, when present, must be an array of non-empty
  *    strings (duplicates are deduped on rehydration)
  *
@@ -1864,6 +1940,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   slaDeadlines: Partial<Record<TaskState, string>>;
   maxResubmits: number;
   maxDisputes: number;
+  maxVisitsByState: Map<TaskState, number>;
   rolePolicy: Map<TaskEvent, string[]>;
   idempotencyKeys: Set<string>;
 } {
@@ -1948,6 +2025,15 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     "invalid snapshot",
   );
 
+  // The per-state visit budget is configuration for future dispatches,
+  // exactly like the event budgets: a snapshot whose history already
+  // exceeds a state's budget is still a valid record — rehydration does
+  // not throw; the next dispatch into that state will.
+  const maxVisitsByState = assertMaxVisitsByState(
+    snapshot.maxVisitsByState,
+    "invalid snapshot",
+  );
+
   // Same for the RBAC policy: configuration for future dispatches, so it
   // is validated strictly but never consulted against the stored history.
   const rolePolicy = assertRolePolicy(snapshot.rolePolicy, "invalid snapshot");
@@ -1961,7 +2047,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     "invalid snapshot",
   );
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, rolePolicy, idempotencyKeys };
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, maxVisitsByState, rolePolicy, idempotencyKeys };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -1971,6 +2057,7 @@ export class TaskLifecycle {
   private _history: TaskHistoryEntry[] = [];
   private _maxResubmits: number;
   private _maxDisputes: number;
+  private _maxVisitsByState: Map<TaskState, number>;
   private _rolePolicy: Map<TaskEvent, string[]>;
   /**
    * Up-front enforcement for PAYOUT_COMPLETE evidence. Task configuration:
@@ -1999,6 +2086,7 @@ export class TaskLifecycle {
     this.id = id;
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
     this._maxDisputes = assertMaxDisputes(opts?.maxDisputes, "invalid option");
+    this._maxVisitsByState = assertMaxVisitsByState(opts?.maxVisitsByState, "invalid option");
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
     this._requirePayoutRef = assertRequirePayoutRef(
       opts?.requirePayoutRef,
@@ -2123,6 +2211,27 @@ export class TaskLifecycle {
   }
 
   /**
+   * How many times the task has visited a state so far (derived from the
+   * append-only history, exactly like `_resubmitCount`): 1 for the
+   * task's initial state — the first history entry's `from`, or the
+   * current state when the history is still empty — plus 1 per history
+   * entry whose `to` is that state. A state the task never entered
+   * counts 0. The dispatch-time budget check compares this count
+   * against the budget for the TARGET state before appending, so a
+   * count already at the budget blocks the next entry into that state.
+   */
+  private _stateVisitCount(state: TaskState): number {
+    if (this._history.length === 0) {
+      return this._state === state ? 1 : 0;
+    }
+    let n = this._history[0].from === state ? 1 : 0;
+    for (const e of this._history) {
+      if (e.to === state) n++;
+    }
+    return n;
+  }
+
+  /**
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they
@@ -2218,6 +2327,18 @@ export class TaskLifecycle {
    * check; the two budgets govern disjoint events, so the order is
    * unobservable). This is checked before appending, so a rejected
    * dispatch leaves no trace in the history.
+   *
+   * State visit budget: when this task was constructed with a
+   * `maxVisitsByState` budget for the TARGET state and the history
+   * already records that many visits to it (initial visit plus one per
+   * entry landing there — see `_stateVisitCount`), dispatch throws
+   * `state visit budget exhausted: …` (checked after the transition
+   * legality, RBAC, and event-budget checks, so an event budget that
+   * also blocks the dispatch reports first). This is checked before
+   * appending, so a rejected dispatch leaves no trace in the history.
+   * Unlike the event budgets, this one governs states, not events: it
+   * blocks re-entry into a state the task has already visited too
+   * often, whatever event would take it there.
    *
    * Event-level RBAC: when the task carries a `rolePolicy` that lists this
    * event, `opts.actor` must be present and exactly match one of the
@@ -2394,6 +2515,15 @@ export class TaskLifecycle {
       throw new Error(
         `dispute budget exhausted: ${this._disputeCount} of ${this._maxDisputes} DISPUTEs already used`,
       );
+    }
+    const visitBudget = this._maxVisitsByState.get(to);
+    if (visitBudget !== undefined) {
+      const visits = this._stateVisitCount(to);
+      if (visits >= visitBudget) {
+        throw new Error(
+          `state visit budget exhausted: ${to} already visited ${visits} of ${visitBudget} times`,
+        );
+      }
     }
     if (
       event === "PAYOUT_COMPLETE" &&
@@ -2577,6 +2707,10 @@ export class TaskLifecycle {
    * `maxDisputes` is stored only when finite, and the used appeal count
    * is derived from the history on rehydration.
    *
+   * The same convention applies to the per-state visit budget:
+   * `maxVisitsByState` is stored only when the map is non-empty, and
+   * the used visit counts are derived from the history on rehydration.
+   *
    * A task-level RBAC policy is included as a plain record when set
    * (absent means unrestricted, exactly the constructor default).
    *
@@ -2615,6 +2749,9 @@ export class TaskLifecycle {
     }
     if (Number.isFinite(this._maxDisputes)) {
       snapshot.maxDisputes = this._maxDisputes;
+    }
+    if (this._maxVisitsByState.size > 0) {
+      snapshot.maxVisitsByState = Object.fromEntries(this._maxVisitsByState);
     }
     if (this._rolePolicy.size > 0) {
       snapshot.rolePolicy = Object.fromEntries(this._rolePolicy);
@@ -2657,6 +2794,7 @@ export class TaskLifecycle {
     // the entry fields), so the live history is always fully chained and
     // later dispatches keep linking to it.
     task._history = chainHistoryEntries(parsed.history, opts?.auditSecret);
+    task._maxVisitsByState = parsed.maxVisitsByState;
     task._rolePolicy = parsed.rolePolicy;
     for (const [state, deadline] of Object.entries(parsed.slaDeadlines)) {
       task.setSlaDeadline(deadline, state as TaskState);
@@ -2683,6 +2821,11 @@ export class TaskLifecycle {
    * rule as fromJSON()). Omit it for the unlimited default.
    * `opts.maxDisputes` re-attaches a DISPUTE appeal budget the same way;
    * omit it and the rehydrated task disputes without limit.
+   * `opts.maxVisitsByState` re-attaches a per-state visit budget the
+   * same way; the used visit counts derive from the replayed log, so a
+   * state the log already visited to its budget blocks the next entry
+   * into it. Omit it and the rehydrated task re-enters states without
+   * limit.
    * `opts.rolePolicy`
    * re-attaches an event-level RBAC policy the same way; omit it and the
    * rehydrated task is unrestricted (policy is caller configuration, not

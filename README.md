@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 927 tests, all local
+npm test   # 943 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -635,7 +635,7 @@ task.dispatch("PUBLISH", { actor: "researcher" });
 task.setSlaDeadline("2026-12-01T00:00:00.000Z"); // advisory SLA deadline
 
 // snapshot: { v, id, state, history, slaDeadlines, [maxResubmits],
-//   [maxDisputes], [rolePolicy], [idempotencyKeys] } — plain JSON, no Maps, no class
+//   [maxDisputes], [maxVisitsByState], [rolePolicy], [idempotencyKeys] } — plain JSON, no Maps, no class
 //   instances. The bracketed fields appear only when the corresponding
 //   option is configured (see TaskSnapshot). Also what
 //   JSON.stringify(task) produces.
@@ -1486,6 +1486,37 @@ and RBAC checks and before anything is appended, so a rejected dispatch
 leaves no trace in the history. It is independent of `maxResubmits`: the
 two budgets govern disjoint events on the same task.
 
+## State visit budgets
+
+The event budgets cap actions; a task can still bounce between states
+without bound (CAPTURING → REJECTED → CAPTURING → …). A per-state visit
+budget caps entries into a state instead — the production "a task stuck
+in a loop" guard, as task-level policy:
+
+```ts
+const task = new TaskLifecycle("task-042", { maxVisitsByState: { CAPTURING: 2 } });
+// …first pass through CAPTURING (visit 1 of 2), REJECTED → RESUBMIT → CAPTURING (visit 2 of 2)…
+// the next dispatch("RESUBMIT") throws:
+//   state visit budget exhausted: CAPTURING already visited 2 of 2 times
+```
+
+A visit is counted as 1 for the task's initial state (the first history
+entry's `from`, or the current state when the history is still empty)
+plus 1 per history entry landing in that state — so the count is derived
+from the append-only history and survives persistence with the budget:
+`toJSON()` stores a non-empty map in the snapshot envelope (an empty map
+is omitted, keeping legacy snapshots byte-identical), and `fromJSON()` /
+`TaskLifecycle.fromHistory(id, log, { maxVisitsByState })` rehydrate it
+without resetting either. States absent from the map are unlimited, and
+omitting the map disables the check entirely (the pre-budget behavior).
+Each budget must be a positive integer — 0 is a construction error, since
+the initial visit alone would already spend it. The check runs after the
+transition legality, RBAC, and event-budget checks and before anything is
+appended, so a rejected dispatch leaves no trace in the history. Note the
+consequence: a budget of 1 for a state the task already passed through is
+already spent — the budget counts total visits, not re-entries on top of
+the first visit.
+
 ## Event-level RBAC
 
 Tasks can gate individual events on named actors — the "only a senior
@@ -1660,8 +1691,10 @@ Security scope, the caller-trust model, and what this library does
   arbitration → REJECTED) can be capped per task with `maxDisputes`
   (default unlimited; used-round count derived from the append-only
   history so it survives persistence) — see "Dispute budgets" above.
-  Production would additionally add per-state retry budgets and keep the
-  bound in a durable policy store rather than task configuration. (Task-level
+  Per-state visit budgets also exist (`maxVisitsByState` — see "State
+  visit budgets" above) for tasks bouncing between states without bound.
+  Production would additionally keep these bounds in a durable policy
+  store rather than task configuration. (Task-level
   RESUBMIT retry budgets exist since v0.1.0 — see "Retry budgets" above;
   per-state SLA deadlines also exist — see "SLA deadlines"; expiry remains
   explicit.)
@@ -1683,13 +1716,18 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 927 tests covering the happy path, reject→resubmit
+`npm test` runs 943 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
 exhaustion-before-append semantics, invalid-budget rejection, snapshot
 round-trips that preserve the budget and used count, `fromHistory`
-re-attachment, and independence from the RESUBMIT budget),
+re-attachment, and independence from the RESUBMIT budget), the per-state
+visit budget (`maxVisitsByState`: total-visit counting including the
+initial visit, state-based (not event-based) blocking, check ordering
+after transition/RBAC/event budgets, snapshot round-trips that preserve
+the budget and used count, `fromHistory` re-attachment, and
+malformed-envelope rejection),
 dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
