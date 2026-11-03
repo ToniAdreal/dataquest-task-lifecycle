@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 961 tests, all local
+npm test   # 963 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -104,8 +104,17 @@ the two screens' subsets: `tasksApproachingDeadline()` selects
 only the first two (the upper bound is inclusive) while
 `expiredTasks()` selects only the last two (the lower bound is
 exclusive, so a deadline exactly at `now` is already overdue;
-both screens are pure; no task is dispatched or mutated), an
-actor-filter branch that drives four more tasks under
+both screens are pure; no task is dispatched or mutated), a
+next-SLA-deadline scheduler branch that drives seven more tasks
+under the same fixed screening `now` — one OPEN task with a
+deadline 12 hours out, one ACCEPTED task whose earlier deadline
+sits on OPEN (a state already left), one terminal ABANDONED task
+with the earliest deadline of all, one overdue OPEN task, one
+OPEN task with no deadline, and two OPEN tasks sharing the same
+deadline — and prints `nextSlaDeadline()`'s pick (the 12-hour-out
+task, not the earliest timestamp in the batch) plus the tie-break
+(input order wins; both calls are pure, no task is dispatched or
+mutated), an actor-filter branch that drives four more tasks under
 fixed-literal timestamps and slices the same batch two ways —
 `tasksByActor()` selects every task a given actor touched
 (DEMO-050, DEMO-051, DEMO-053 for "moderator"; DEMO-051 alone
@@ -1733,7 +1742,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 961 tests covering the happy path, reject→resubmit
+`npm test` runs 963 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -615,6 +615,7 @@ import {
   isTerminal,
   MAX_NOTE_LENGTH,
   mismatchedPayouts,
+  nextSlaDeadline,
   parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
@@ -636,6 +637,7 @@ import {
   type DeliverPayoutWebhookToManyResult,
   type DeliverWebhookResult,
   type ExpireOverdueResult,
+  type NextSlaDeadline,
   type PayoutEventDedupeSnapshot,
   type PayoutEventDedupeStats,
   type PayoutMismatch,
@@ -1285,6 +1287,14 @@ export interface DemoResult {
   approachingFound: TaskLifecycle[];
   /** `expiredTasks` selection over {@link DemoResult.approachingTasks} (DEMO-048, DEMO-049). */
   approachingOverdueFound: TaskLifecycle[];
+  /** The next-SLA-deadline scheduler branch's five tasks, in screening order. */
+  nextSlaTasks: TaskLifecycle[];
+  /** `nextSlaDeadline` pick over {@link DemoResult.nextSlaTasks} (DEMO-061). */
+  nextSlaNext: NextSlaDeadline | undefined;
+  /** The next-SLA-deadline scheduler branch's two tie tasks, in screening order. */
+  nextSlaTieTasks: TaskLifecycle[];
+  /** `nextSlaDeadline` pick over {@link DemoResult.nextSlaTieTasks} (DEMO-066, input order wins). */
+  nextSlaTieNext: NextSlaDeadline | undefined;
   /** The actor-filter branch's four tasks, in filter order. */
   actorFilterTasks: TaskLifecycle[];
   /** `tasksByActor` selection over {@link DemoResult.actorFilterTasks} (DEMO-050, DEMO-051, DEMO-053). */
@@ -2534,6 +2544,156 @@ export async function runDemo(): Promise<DemoResult> {
   );
   lines.push(
     "  screening is pure: no task was dispatched or mutated by either screen",
+  );
+
+  // Next-SLA-deadline scheduler branch: the watchdog screens above
+  // answer "already past" and "inside a warning window"; neither
+  // tells a scheduler which task expires FIRST. This branch shows
+  // `nextSlaDeadline()` on five more tasks at the SAME fixed now
+  // as the approaching branch (2026-03-22T09:00:00.000Z), plus a
+  // two-task tie batch. Hand-written expectations:
+  //   DEMO-061 sits in OPEN with an OPEN deadline 12 hours out
+  //     (2026-03-22T21:00:00.000Z) — the only candidate, so the
+  //     winner, even though it is not the earliest timestamp in
+  //     the batch.
+  //   DEMO-062 sits in ACCEPTED with an OPEN deadline 3 hours out
+  //     (2026-03-22T12:00:00.000Z) — earlier, but on a state the
+  //     task has already left, so it never counts.
+  //   DEMO-063 sits in ABANDONED (terminal) with an ABANDONED
+  //     deadline 1 hour out (2026-03-22T10:00:00.000Z) — the
+  //     earliest timestamp of all, but a terminal task's deadline
+  //     never counts.
+  //   DEMO-064 sits in OPEN with an OPEN deadline a day past
+  //     (2026-03-21T09:00:00.000Z) — overdue, so it belongs to
+  //     `expiredTasks`, not here.
+  //   DEMO-065 sits in OPEN with no deadline at all — nothing
+  //     to schedule.
+  //   DEMO-066 and DEMO-067 share the same OPEN deadline 6 hours
+  //     out (2026-03-22T15:00:00.000Z); input order wins, so
+  //     DEMO-066 is next. Both calls are pure: neither dispatches
+  //     nor mutates, so all seven tasks keep their states and
+  //     history lengths (the demo tests pin this).
+  const NEXT_SLA_BRANCH_NOW = new Date("2026-03-22T09:00:00.000Z");
+  const driveNextSlaTask = (
+    id: string,
+    events: Array<{ event: TaskEvent; at: string }>,
+    deadline: string | undefined,
+    deadlineState?: TaskState,
+  ): TaskLifecycle => {
+    const driven = new TaskLifecycle(id);
+    lines.push(`Task ${driven.id}: ${driven.state}`);
+    for (const { event, at } of events) {
+      const from = driven.state;
+      const to = driven.dispatch(event, { actor: "researcher", at });
+      lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (researcher)`);
+    }
+    if (deadline !== undefined) {
+      const state = deadlineState ?? driven.state;
+      driven.setSlaDeadline(deadline, state);
+      lines.push(`  SLA deadline (${state}): ${driven.getSlaDeadline(state)}`);
+    } else {
+      lines.push(`  SLA deadline (${driven.state}): none`);
+    }
+    return driven;
+  };
+  lines.push("", "Next-SLA-deadline scheduler branch (seven more tasks, earliest future current-state deadline):");
+  lines.push(
+    `  screened at: ${NEXT_SLA_BRANCH_NOW.toISOString()} (fixed now; no wall clock)`,
+  );
+  const nextSlaWinnerTask = driveNextSlaTask(
+    "DEMO-061",
+    [{ event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" }],
+    "2026-03-22T21:00:00.000Z",
+    "OPEN",
+  );
+  const nextSlaLeftStateTask = driveNextSlaTask(
+    "DEMO-062",
+    [
+      { event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" },
+      { event: "ACCEPT", at: "2026-03-21T10:00:00.000Z" },
+    ],
+    "2026-03-22T12:00:00.000Z",
+    "OPEN",
+  );
+  const nextSlaTerminalTask = driveNextSlaTask(
+    "DEMO-063",
+    [
+      { event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" },
+      { event: "ACCEPT", at: "2026-03-21T10:00:00.000Z" },
+      { event: "ABANDON", at: "2026-03-21T11:00:00.000Z" },
+    ],
+    "2026-03-22T10:00:00.000Z",
+    "ABANDONED",
+  );
+  const nextSlaOverdueTask = driveNextSlaTask(
+    "DEMO-064",
+    [{ event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" }],
+    "2026-03-21T09:00:00.000Z",
+    "OPEN",
+  );
+  const nextSlaNoDeadlineTask = driveNextSlaTask(
+    "DEMO-065",
+    [{ event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" }],
+    undefined,
+  );
+  const nextSlaTieFirstTask = driveNextSlaTask(
+    "DEMO-066",
+    [{ event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" }],
+    "2026-03-22T15:00:00.000Z",
+    "OPEN",
+  );
+  const nextSlaTieSecondTask = driveNextSlaTask(
+    "DEMO-067",
+    [{ event: "PUBLISH", at: "2026-03-21T09:00:00.000Z" }],
+    "2026-03-22T15:00:00.000Z",
+    "OPEN",
+  );
+  const nextSlaTasks = [
+    nextSlaWinnerTask,
+    nextSlaLeftStateTask,
+    nextSlaTerminalTask,
+    nextSlaOverdueTask,
+    nextSlaNoDeadlineTask,
+  ];
+  const nextSlaTieTasks = [nextSlaTieFirstTask, nextSlaTieSecondTask];
+  const nextSlaNext = nextSlaDeadline(nextSlaTasks, NEXT_SLA_BRANCH_NOW);
+  const nextSlaTieNext = nextSlaDeadline(nextSlaTieTasks, NEXT_SLA_BRANCH_NOW);
+  if (
+    nextSlaNext === undefined ||
+    nextSlaNext.task.id !== "DEMO-061" ||
+    nextSlaNext.deadline !== "2026-03-22T21:00:00.000Z" ||
+    nextSlaTieNext === undefined ||
+    nextSlaTieNext.task.id !== "DEMO-066" ||
+    nextSlaTieNext.deadline !== "2026-03-22T15:00:00.000Z"
+  ) {
+    throw new Error(
+      "demo next-SLA-deadline segment broken: expected DEMO-061 @ 2026-03-22T21:00:00.000Z and tie DEMO-066 @ 2026-03-22T15:00:00.000Z",
+    );
+  }
+  const nextSlaVerdicts = [
+    "candidate (future deadline on the current state)",
+    "excluded: its 2026-03-22T12:00:00.000Z deadline sits on OPEN, a state already left",
+    "excluded: terminal task (ABANDONED)",
+    "excluded: overdue (belongs to expiredTasks)",
+    "excluded: no deadline on any state",
+  ];
+  for (let i = 0; i < nextSlaTasks.length; i++) {
+    const t = nextSlaTasks[i];
+    lines.push(
+      `  ${t.id}: state ${t.state}, current-state deadline ${t.getSlaDeadline(t.state) ?? "none"} -> ${nextSlaVerdicts[i]}`,
+    );
+  }
+  lines.push(
+    `  nextSlaDeadline([${nextSlaTasks.map((t) => t.id).join(", ")}], ${NEXT_SLA_BRANCH_NOW.toISOString()}): ${nextSlaNext.task.id} @ ${nextSlaNext.deadline}`,
+  );
+  lines.push(
+    `  tie-break: nextSlaDeadline([${nextSlaTieTasks.map((t) => t.id).join(", ")}], ${NEXT_SLA_BRANCH_NOW.toISOString()}): ${nextSlaTieNext.task.id} @ ${nextSlaTieNext.deadline} (same deadline — input order wins)`,
+  );
+  lines.push(
+    "  contrast: the earliest timestamp in the batch does not win — DEMO-063's 1-hour-out deadline is terminal and DEMO-062's 3-hour-out deadline is on a left state, so the scheduler wakes for DEMO-061 at 12 hours out, and DEMO-064's past deadline stays with expiredTasks",
+  );
+  lines.push(
+    "  scheduling is pure: no task was dispatched or mutated by either call",
   );
 
   // Actor-filter branch: the state lens and the actor lens slice
@@ -7296,7 +7456,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
 }
 
 async function main(): Promise<void> {

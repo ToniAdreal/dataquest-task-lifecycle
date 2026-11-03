@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo `nextSlaDeadline` scheduler branch (backlog #841): the
+  demo now shows the #835 helper on seven tasks under the same
+  fixed screening `now` as the approaching branch — DEMO-061
+  (OPEN, deadline 12 hours out) wins over DEMO-062 (ACCEPTED,
+  earlier deadline on OPEN, a left state), DEMO-063 (ABANDONED
+  terminal, earliest deadline of all), DEMO-064 (overdue) and
+  DEMO-065 (no deadline), and DEMO-066 wins the DEMO-066/DEMO-067
+  tie on input order. `DemoResult` gains `nextSlaTasks` /
+  `nextSlaNext` / `nextSlaTieTasks` / `nextSlaTieNext`, and
+  `test/demo.test.ts` pins the branch in-process, its
+  byte-identical double run, and the golden demo output.
+
 - `nextSlaDeadline(tasks, now)` scheduler helper (backlog #835): the
   escrow `nextEscrowDeadline` counterpart for the SLA side — it returns
   the single task whose current-state SLA deadline comes next as
