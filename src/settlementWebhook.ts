@@ -50,7 +50,11 @@
  *   entry carries no `payoutRef`/`payoutAmount` still builds (the payload
  *   just omits those fields) — consistent with the advisory semantics of
  *   both fields: the library cannot observe the external payment, so a
- *   missing reference is unevidenced, not a build-time failure.
+ *   missing reference is unevidenced, not a build-time failure. Callers
+ *   that want "no reference, no notification" instead can opt into the
+ *   {@link BuildPayoutWebhookOptions.requirePayoutRef} gate, which turns
+ *   a missing `payoutRef` into a build-time error (per task in the
+ *   batch path, never blocking the rest of the batch).
  */
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
@@ -124,6 +128,19 @@ export interface BuildPayoutWebhookOptions {
    * string when provided.
    */
   eventId?: string;
+  /**
+   * Opt-in "no reference, no notification" gate. Defaults to `false`
+   * (the advisory omission rule above): a PAID task whose
+   * PAYOUT_COMPLETE entry carries no `payoutRef` still builds, with
+   * the field omitted. When `true`, such a task fails to build with a
+   * clear error instead of producing a reference-less notification —
+   * for callers whose receivers cannot act on a payout they cannot
+   * trace to an external transfer. The gate checks the reference only:
+   * a missing `payoutAmount` never blocks a build, and a task with no
+   * PAYOUT_COMPLETE entry at all fails the gate the same way (there
+   * is no reference to carry).
+   */
+  requirePayoutRef?: boolean;
 }
 
 function assertSecret(secret: string | Buffer): void {
@@ -184,7 +201,9 @@ function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
  * Build the signed payout webhook for a PAID task.
  *
  * Throws when the task is not PAID, the secret is empty, `now` is not a
- * valid timestamp, or an injected `eventId` is not a non-empty string.
+ * valid timestamp, an injected `eventId` is not a non-empty string, or
+ * — with `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
+ * entry carries no `payoutRef`.
  */
 export function buildPayoutWebhook(
   task: TaskLifecycle,
@@ -217,6 +236,11 @@ export function buildPayoutWebhook(
   const eventId = options.eventId ?? randomUUID();
 
   const complete = completionEntry(task);
+  if (options.requirePayoutRef === true && complete?.payoutRef === undefined) {
+    throw new Error(
+      `cannot build payout webhook: task ${task.id} has no payoutRef on its PAYOUT_COMPLETE entry, and requirePayoutRef is set`,
+    );
+  }
   const quotedAmount = quotedAmountFromHistory(task);
   // Fixed literal key order — this order IS the signed serialization.
   const payload: PayoutWebhookPayload = {
@@ -260,6 +284,16 @@ export interface BuildPayoutWebhooksOptions {
    * call-level configuration error and throws.
    */
   eventIdFactory?: () => string;
+  /**
+   * Per-task pass-through of
+   * {@link BuildPayoutWebhookOptions.requirePayoutRef}: when `true`,
+   * a task whose PAYOUT_COMPLETE entry carries no `payoutRef` records
+   * its gate error as that task's `{ taskId, error }` result and never
+   * blocks the rest of the batch — the same per-task isolation every
+   * other single-build failure gets. Defaults to `false` (all PAID
+   * tasks build, ref or not).
+   */
+  requirePayoutRef?: boolean;
 }
 
 /**
@@ -347,6 +381,7 @@ export function buildPayoutWebhooks(
       const webhook = buildPayoutWebhook(task, secret, {
         now: options.now,
         eventId: eventIdFactory(),
+        requirePayoutRef: options.requirePayoutRef,
       });
       return { taskId, webhook };
     } catch (err) {

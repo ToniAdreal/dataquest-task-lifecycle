@@ -29,6 +29,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in `requirePayoutRef` gate for payout webhooks (backlog
+  #856): `buildPayoutWebhook(task, secret, { requirePayoutRef: true
+  })` now refuses to build a notification for a `PAID` task whose
+  `PAYOUT_COMPLETE` entry carries no `payoutRef` — the build-side
+  counterpart to the dispatch-side gate, for callers whose receivers
+  cannot act on a payout they cannot trace to an external transfer.
+  The batch path `buildPayoutWebhooks` passes the option through
+  per task, so a gated task records a `{ taskId, error }` result and
+  never blocks the rest of the batch. Default off: ref-less `PAID`
+  tasks keep building with the field omitted, exactly as before, and
+  a missing `payoutAmount` alone never trips the gate.
+  `test/payoutWebhookRequirePayoutRef.test.ts` pins the single-build
+  throw, the with-ref build-and-verify, the default/explicit-off
+  unchanged behavior, the amount-only throw, the non-`PAID` state
+  error taking precedence, and the batch per-task isolation with
+  input order preserved.
+
 - Strict decimal amount parser `parseMinorUnits(text)` (backlog
   #853): the string counterpart to `toMinorUnits` for
   reconciliation and CSV-import callers — `"12.34"` becomes `1234`,

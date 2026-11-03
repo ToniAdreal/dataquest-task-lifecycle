@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 987 tests, all local
+npm test   # 995 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -997,7 +997,12 @@ the key is omitted entirely (legacy `PAID` tasks keep building
 unchanged), and every present field is covered by the signature. The
 payload only carries the data — whether a `quotedAmount` /
 `payoutAmount` difference is a problem, and what to do about it,
-remains the receiver's adjudication.
+remains the receiver's adjudication. Opt-in gate: pass
+`{ requirePayoutRef: true }` to refuse building a notification for a
+`PAID` task whose `PAYOUT_COMPLETE` entry carries no `payoutRef`
+(single build throws; the batch path records it as that task's
+`{ taskId, error }` without blocking the rest). Default off, so
+legacy ref-less `PAID` tasks keep building unchanged.
 
 Field-set audit (checked field by field against the audit history
 and escrow's `SettlementWebhookPayload`): every identifier and
@@ -1762,7 +1767,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 987 tests covering the happy path, reject→resubmit
+`npm test` runs 995 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
