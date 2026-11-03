@@ -707,9 +707,28 @@ export function unreconciledPayouts(
  * them the conversion is exact; for a legacy amount read from an old
  * snapshot (sub-cent precision, see {@link TaskHistoryEntry.payoutAmount})
  * it rounds to the nearest cent per entry, never at the batch total.
+ *
+ * Finite-only: a non-finite input (NaN, ±Infinity) is a caller error,
+ * and a finite input whose minor-unit product overflows the double
+ * range (`1e308` → `Infinity` cents) is rejected too — either way the
+ * converter throws `minor units conversion overflowed: …` instead of
+ * handing a silent `Infinity` downstream. `parseHistory`'s legacy
+ * acceptance is deliberately untouched: an old log carrying `1e308`
+ * still parses; only converting or summing it fails, loudly.
  */
 export function toMinorUnits(amount: number): number {
-  return Math.round(amount * 100);
+  if (!Number.isFinite(amount)) {
+    throw new Error(
+      `minor units conversion overflowed: amount must be a finite number, got ${String(amount)}`,
+    );
+  }
+  const minorUnits = Math.round(amount * 100);
+  if (!Number.isFinite(minorUnits)) {
+    throw new Error(
+      `minor units conversion overflowed: ${String(amount)} is too large to represent in minor units`,
+    );
+  }
+  return minorUnits;
 }
 
 /**
@@ -791,7 +810,11 @@ export function formatMinorUnits(minorUnits: number): string {
  * instead of returning `Infinity` and poisoning a reconciliation
  * total. The check runs after every addition, so a single overflowing
  * entry is caught at its own addition rather than only at the return,
- * and no partial total is ever returned. This changes only the
+ * and no partial total is ever returned. Since backlog #844,
+ * `toMinorUnits` itself fails fast on the conversion overflow, so the
+ * single-entry case is translated back into this same message here —
+ * the read-side error contract is unchanged; only the accumulation
+ * case still relies on the per-addition check. This changes only the
  * read side: legacy snapshots stay readable (their acceptance is
  * unchanged); only summing them fails, loudly.
  *
@@ -806,7 +829,16 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
       if (entry.event === "PAYOUT_COMPLETE") complete = entry;
     }
     if (complete?.payoutAmount !== undefined) {
-      totalMinorUnits += toMinorUnits(complete.payoutAmount);
+      // The converter fails fast on a legacy giant (backlog #844); a
+      // settled entry's conversion failure is this function's own
+      // overflow error, so the #838 read-side contract is unchanged.
+      let entryMinorUnits: number;
+      try {
+        entryMinorUnits = toMinorUnits(complete.payoutAmount);
+      } catch {
+        throw new Error("total paid out computation overflowed: inputs too large");
+      }
+      totalMinorUnits += entryMinorUnits;
       if (!Number.isFinite(totalMinorUnits)) {
         throw new Error("total paid out computation overflowed: inputs too large");
       }

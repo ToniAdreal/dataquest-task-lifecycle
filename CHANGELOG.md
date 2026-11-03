@@ -9,6 +9,24 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
+### Fixed
+
+- `toMinorUnits` rejects non-finite input (backlog #844): the
+  converter was `Math.round(amount * 100)` with no finiteness check,
+  so `toMinorUnits(1e308)` silently returned `Infinity` and any
+  caller downstream of the conversion could carry it onward. It now
+  throws `minor units conversion overflowed: …` for a non-finite
+  input (NaN, ±Infinity) and for a finite input whose minor-unit
+  product overflows the double range, while normal, negative,
+  sub-cent-rounding, and large-but-finite conversions are unchanged.
+  `totalPaidOut` translates a settled entry's conversion failure back
+  into its documented #838 message, so its read-side error contract
+  is unchanged; `parseHistory`'s legacy acceptance is untouched.
+  `test/toMinorUnitsFinite.test.ts` pins the overflow/NaN rejections,
+  the large-finite boundary, the unchanged round-trips, the
+  no-partial-result throw, and the `totalPaidOut` message
+  translation.
+
 ### Added
 
 - CLI demo `nextSlaDeadline` scheduler branch (backlog #841): the
