@@ -251,6 +251,75 @@ export function tasksApproachingDeadline(
   });
 }
 
+/** A task together with its next SLA deadline, as returned by {@link nextSlaDeadline}. */
+export interface NextSlaDeadline {
+  task: TaskLifecycle;
+  /** Canonical ISO deadline attached to the task's current state. */
+  deadline: string;
+}
+
+/**
+ * Scheduler helper: from a batch of tasks, return the single task whose
+ * SLA deadline comes next — the earliest current-state deadline strictly
+ * after `now` — together with that deadline.
+ *
+ * This is the "when do I wake up next" counterpart to the watchdog
+ * screens: `expiredTasks()` answers "past deadline", and
+ * `tasksApproachingDeadline()` answers "inside a warning window", but a
+ * scheduler that polls needs one concrete answer — which task expires
+ * first, and when — without hand-rolling a min over the batch and
+ * risking the same traps: a deadline set for a state the task has
+ * already left, a terminal task's deadline, or an already-overdue task
+ * that `expiredTasks()` already owns. All three are excluded here: only
+ * non-terminal tasks with a deadline attached to their CURRENT state,
+ * strictly after `now`, are candidates. A deadline exactly at `now` is
+ * overdue, not next, and belongs to `expiredTasks()`.
+ *
+ * Ties keep input order: when two tasks share the earliest deadline,
+ * the first one in the input array wins, so repeated calls over an
+ * unchanged batch are stable. Returns undefined when no task qualifies
+ * (empty input, no current-state deadlines, or every deadline at or
+ * before `now`).
+ *
+ * Pure: reads the tasks, never mutates or dispatches. The returned
+ * `task` is the same object from the input array, so the caller can act
+ * on it directly; the returned `deadline` is the canonical ISO string
+ * `getSlaDeadline()` already stores. This helper itself never
+ * dispatches — when the deadline arrives, expiry still goes through
+ * `expireOverdueTasks()`:
+ *
+ *   const next = nextSlaDeadline(allTasks, now);
+ *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
+ *
+ * An invalid `now` fails fast instead of silently returning undefined.
+ */
+export function nextSlaDeadline(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): NextSlaDeadline | undefined {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  let best: NextSlaDeadline | undefined;
+  for (const task of tasks) {
+    if (task.isTerminal) continue;
+    const deadline = task.getSlaDeadline(task.state);
+    if (deadline === undefined) continue;
+    // getSlaDeadline() only ever returns canonical ISO (setSlaDeadline
+    // normalizes on the way in, snapshot parsing rejects the rest),
+    // so this parse cannot fail on library-produced tasks; the
+    // finiteness guard is belt-and-braces against a hand-built one.
+    const deadlineMs = Date.parse(deadline);
+    if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) continue;
+    if (best !== undefined && deadlineMs >= Date.parse(best.deadline)) {
+      continue;
+    }
+    best = { task, deadline };
+  }
+  return best;
+}
+
 /**
  * Batch filter: from a batch of tasks, return the ones currently in the
  * given state, in input order.

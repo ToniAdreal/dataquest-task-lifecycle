@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `nextSlaDeadline(tasks, now)` scheduler helper (backlog #835): the
+  escrow `nextEscrowDeadline` counterpart for the SLA side — it returns
+  the single task whose current-state SLA deadline comes next as
+  `{ task, deadline }` (canonical ISO), or `undefined` when no task
+  qualifies. Only non-terminal tasks with a deadline on their current
+  state, strictly after `now`, are candidates, so a deadline exactly
+  at `now` (overdue, `expiredTasks`' job), a terminal task's deadline,
+  and a deadline set for a state the task has already left are all
+  excluded; ties keep input order. It is pure (never dispatches) and
+  exported as `nextSlaDeadline`/`NextSlaDeadline` from the package
+  entry; an invalid `now` throws `invalid now: expected a valid Date`.
+  `test/nextSlaDeadline.test.ts` pins the mixed-batch pick, the
+  left-state exclusion, the at-`now` boundary, tie stability, the
+  empty/no-candidate cases, the fail-fast `now`, purity, repeat-run
+  determinism, and the state-change retirement rule.
+
 - `TaskLifecycleOptions.maxVisitsByState` per-state visit budget
   (backlog #832): a map of state → positive-integer cap on how many
   times the task may enter that state — the state-level counterpart to
