@@ -20,6 +20,7 @@ export {
   stateDiagram,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
   toMinorUnits,

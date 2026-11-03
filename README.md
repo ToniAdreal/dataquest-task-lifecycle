@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 969 tests, all local
+npm test   # 980 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -863,6 +863,20 @@ for (const task of unreconciledPayouts(allTasks)) {
 A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
 check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
 `PAID`), because that is the entry that evidences the settlement itself.
+
+The reverse lookup uses the same rule. `tasksByPayoutRef()` returns
+every task whose `PAYOUT_COMPLETE` entry carries the given reference,
+in input order — the batch answer to "which tasks did this transfer
+settle":
+
+```ts
+import { tasksByPayoutRef } from "dataquest-task-lifecycle";
+
+// Tasks settled under transfer xfer-88f2. Pure: reads the tasks,
+// never mutates them. A request-only reference never matches, and
+// an empty or non-string reference throws instead of returning [].
+const settled = tasksByPayoutRef(allTasks, "xfer-88f2");
+```
 
 ### Payout amounts
 
@@ -1742,7 +1756,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 969 tests covering the happy path, reject→resubmit
+`npm test` runs 980 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -29,6 +29,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Batch filter `tasksByPayoutRef(tasks, payoutRef)` (backlog #850):
+  the payout-reference counterpart to `tasksByActor` — returns, in
+  input order, every task whose `PAYOUT_COMPLETE` entry carries the
+  given reference, so a reconciliation run can answer "which tasks
+  did this transfer settle" without hand-writing a history scan.
+  Only the completion entry counts (the same evidence rule
+  `unreconciledPayouts` uses): a reference on `REQUEST_PAYOUT` alone
+  or on any other event never matches, and an empty or non-string
+  reference fails fast instead of silently returning an empty list.
+  `test/tasksByPayoutRef.test.ts` pins the multi-task hit, the
+  request-only and early-event non-matches, exact case-sensitive
+  matching, input order, purity, the fail-fast rejections, and the
+  agreement with `unreconciledPayouts` on the completion-entry rule.
+
 - Benchmark `nextSlaDeadline` scheduler row (backlog #847):
   `bench/bench.ts` now measures one scheduler pick over a fixed
   8-task batch (earliest future current-state deadline wins, 12-hour

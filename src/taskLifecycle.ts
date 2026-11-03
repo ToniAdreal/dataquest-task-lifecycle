@@ -392,6 +392,55 @@ export function tasksByActor(
 }
 
 /**
+ * Batch filter: from a batch of tasks, return the ones whose settlement
+ * names the given external payout reference, in input order.
+ *
+ * This is the payout-reference counterpart to {@link tasksByActor}: a
+ * caller that wants to list every task settled under one transfer id
+ * (one payout batch, one bank transfer) had to hand-write the same
+ * history scan — and a hand-written scan has no shared answer for an
+ * empty reference string (which dispatch itself rejects: `undefined`
+ * is the advisory form, an empty string is not a reference at all).
+ * This helper gives that listing one shared, pure entry point:
+ *
+ *   const settled = tasksByPayoutRef(allTasks, "xfer-88f2");
+ *
+ * Only a `PAYOUT_COMPLETE` entry counts. That is the same evidence
+ * rule {@link unreconciledPayouts} uses: a reference on
+ * `REQUEST_PAYOUT` alone does not reconcile the task, because the
+ * request is not the settlement — and a reference attached to any
+ * other event (dispatch accepts `payoutRef` as generic audit
+ * metadata, like actor/note) is not settlement evidence either. So a
+ * task whose completion entry carries no reference never matches, no
+ * matter what its request or earlier entries say, and a task whose
+ * completion entry carries the reference matches exactly once.
+ *
+ * Pure: reads the tasks' histories, never mutates, dispatches, or
+ * copies the tasks — the returned array holds the same task objects,
+ * in input order, so callers can act on them directly. Matching is
+ * exact and case-sensitive, like the stored reference itself. An
+ * empty or non-string reference fails fast instead of silently
+ * returning an empty list, so a typo or a missing variable cannot
+ * masquerade as "no task settled under this transfer".
+ */
+export function tasksByPayoutRef(
+  tasks: readonly TaskLifecycle[],
+  payoutRef: string,
+): TaskLifecycle[] {
+  if (typeof payoutRef !== "string" || payoutRef.length === 0) {
+    throw new Error(
+      `invalid tasksByPayoutRef: payoutRef must be a non-empty string, got ${JSON.stringify(payoutRef)}`,
+    );
+  }
+  return tasks.filter((task) =>
+    task.history.some(
+      (entry) =>
+        entry.event === "PAYOUT_COMPLETE" && entry.payoutRef === payoutRef,
+    ),
+  );
+}
+
+/**
  * Per-task outcome of {@link expireOverdueTasks}.
  */
 export interface ExpireOverdueResult {
