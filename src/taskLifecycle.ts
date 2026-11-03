@@ -826,6 +826,58 @@ export function formatMinorUnits(minorUnits: number): string {
 }
 
 /**
+ * Parse a strict decimal amount string into integer minor units
+ * (cents): `"12.34"` becomes `1234`, `"-0.50"` becomes `-50`. This is
+ * the string counterpart to {@link toMinorUnits} for reconciliation
+ * and CSV-import callers, who receive amounts as text and previously
+ * had to go through `Number()` first — a step that silently accepted
+ * `"12.345"` (sub-cent, then rounded by the converter), `"1,234.56"`
+ * (thousands separator), and `"1.2e3"` (scientific notation) with no
+ * single answer for any of them.
+ *
+ * The grammar is deliberately narrow: an optional minus sign, at
+ * least one digit, and an optional fraction of one or two digits.
+ * Surrounding whitespace is trimmed; anything else fails fast —
+ * thousands separators, scientific notation, a leading `+`, a bare
+ * decimal point (`".5"`), a trailing point (`"12."`), internal
+ * whitespace, or any other impurity. An empty (or whitespace-only)
+ * string and a non-string input fail fast too. The conversion itself
+ * is exact integer arithmetic (via `BigInt`), never a float
+ * multiply-and-round, so `"0.29"` is exactly `29` and a value whose
+ * minor units exceed `Number.MAX_SAFE_INTEGER` throws instead of
+ * returning a rounded-off integer. A zero result is always `0`,
+ * never `-0`, so `parseMinorUnits("-0.00") === 0`.
+ *
+ * Round-trip: `parseMinorUnits(formatMinorUnits(n)) === n` for every
+ * integer `n` in the safe range, including negatives.
+ */
+export function parseMinorUnits(text: string): number {
+  if (typeof text !== "string") {
+    throw new Error(
+      `invalid minor units amount: expected a string, got ${JSON.stringify(text)}`,
+    );
+  }
+  const trimmed = text.trim();
+  const match = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(trimmed);
+  if (match === null) {
+    throw new Error(
+      `invalid minor units amount: ${JSON.stringify(text)} is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation)`,
+    );
+  }
+  const fraction = (match[3] ?? "").padEnd(2, "0");
+  const total =
+    BigInt(match[2]) * 100n + BigInt(fraction === "" ? "0" : fraction);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(
+      `minor units conversion overflowed: ${JSON.stringify(text)} is too large to represent in minor units`,
+    );
+  }
+  const minorUnits = Number(total);
+  if (minorUnits === 0) return 0;
+  return match[1] === "-" ? -minorUnits : minorUnits;
+}
+
+/**
  * Reconciliation helper: sum the actual settled payout amounts across a
  * batch of `PAID` tasks. For each task it reads the `payoutAmount`
  * recorded on its `PAYOUT_COMPLETE` entry (see {@link DispatchOptions})

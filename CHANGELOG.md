@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Strict decimal amount parser `parseMinorUnits(text)` (backlog
+  #853): the string counterpart to `toMinorUnits` for
+  reconciliation and CSV-import callers — `"12.34"` becomes `1234`,
+  `"-0.50"` becomes `-50`, and it round-trips with
+  `formatMinorUnits`. Only an optional minus, at least one digit,
+  and at most 2 decimal places are accepted (surrounding whitespace
+  trimmed); thousands separators, scientific notation, a leading
+  `+`, a bare or trailing decimal point, internal whitespace, and
+  empty or non-string input all fail fast, and the conversion is
+  exact integer arithmetic, rejecting amounts past
+  `Number.MAX_SAFE_INTEGER` instead of returning a rounded-off
+  integer. `test/parseMinorUnits.test.ts` pins the conversions, the
+  whitespace and `-0` rules, the round-trip, the rejection table,
+  and the safe-integer boundary.
+
 - Batch filter `tasksByPayoutRef(tasks, payoutRef)` (backlog #850):
   the payout-reference counterpart to `tasksByActor` — returns, in
   input order, every task whose `PAYOUT_COMPLETE` entry carries the

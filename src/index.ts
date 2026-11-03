@@ -13,6 +13,7 @@ export {
   mismatchedPayouts,
   nextSlaDeadline,
   parseHistory,
+  parseMinorUnits,
   payoutMismatch,
   replay,
   SNAPSHOT_VERSION,

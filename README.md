@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 980 tests, all local
+npm test   # 987 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -933,6 +933,12 @@ fixed format — exactly two decimals, no thousands separator, no
 currency symbol (`10098` → `"100.98"`, `-100` → `"-1.00"`); a
 non-integer input throws the same error as `fromMinorUnits`, and the
 split is integer arithmetic, so large amounts format exactly.
+Callers holding amounts as text parse with the exported
+`parseMinorUnits` instead of going through `Number()` first: it
+accepts only a strict decimal (optional minus, at most 2 decimal
+places, surrounding whitespace trimmed), rejects thousands separators,
+scientific notation, and anything beyond the safe-integer range, and
+round-trips with `formatMinorUnits` (`"12.34"` → `1234`).
 
 The owed half of that comparison is `quotedAmount`: the amount the task
 was agreed to pay, recorded with `dispatch(event, { quotedAmount })` —
@@ -1756,7 +1762,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 980 tests covering the happy path, reject→resubmit
+`npm test` runs 987 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
