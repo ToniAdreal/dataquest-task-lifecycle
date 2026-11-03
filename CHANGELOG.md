@@ -3252,6 +3252,25 @@ change type; no entry describes a feature that is not in the history.
   reader that pinned `actor === undefined` on executor-produced EXPIRE
   entries must expect `"system"` instead.
 
+### Fixed
+
+- `totalPaidOut()` no longer returns `Infinity` for a legacy giant
+  amount (backlog #838, the read-side mirror of escrow #837's
+  `settleRelease` overflow fix): a legacy snapshot only checks that
+  `payoutAmount` is finite and ≥ 0, so a rehydrated `1e308` entry
+  converted to `Infinity` minor units and poisoned the reconciliation
+  total. The helper now throws
+  `total paid out computation overflowed: inputs too large` after any
+  addition that overflows — a single overflowing entry is caught at
+  its own addition, and a batch whose individually finite amounts sum
+  past the finite range is caught the same way — so no partial total
+  is ever returned. Legacy snapshot acceptance is unchanged: old
+  audit logs stay readable; only summing them fails, loudly.
+  `test/totalPaidOutOverflow.test.ts` pins the legacy-snapshot and
+  legacy-history paths, batch-position independence, the
+  accumulation-only case, unchanged normal/empty/cent-exact totals,
+  large-but-finite amounts, and the non-PAID exclusion.
+
 ## [0.1.0]
 
 The only version declared in `package.json`. Entries cover the commit

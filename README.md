@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 952 tests, all local
+npm test   # 961 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -893,7 +893,11 @@ this sums only what was recorded, not what was owed; the total is
 accumulated in integer minor units (`toMinorUnits`, exported for
 callers that hold cents) and returned in major units, so no float error
 can accumulate across the batch, while per-entry amounts are stored
-verbatim after the dispatch gate.
+verbatim after the dispatch gate. Overflow is fail-fast: a legacy
+amount (or batch sum) whose minor-unit total overflows throws
+`total paid out computation overflowed: inputs too large` instead of
+returning `Infinity` — legacy snapshots stay readable, only summing
+them fails, loudly.
 
 Migration note: the stored fields stay major-unit numbers — no field
 is renamed and no existing amount changes meaning. Only new
@@ -1729,7 +1733,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 952 tests covering the happy path, reject→resubmit
+`npm test` runs 961 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -781,6 +781,20 @@ export function formatMinorUnits(minorUnits: number): string {
  *    {@link TaskHistoryEntry.payoutAmount});
  *  - empty input returns 0.
  *
+ * Overflow is fail-fast, not silent: `dispatch()` cannot write a giant
+ * amount (its minor-unit round-trip gate rejects it), but a legacy
+ * snapshot only checks that `payoutAmount` is finite and ≥ 0, so a
+ * legacy `1e308` entry rehydrates fine and its minor-unit conversion
+ * overflows to `Infinity`. Summing such a value — or a batch whose
+ * individually finite minor-unit amounts sum past the finite range —
+ * throws `total paid out computation overflowed: inputs too large`
+ * instead of returning `Infinity` and poisoning a reconciliation
+ * total. The check runs after every addition, so a single overflowing
+ * entry is caught at its own addition rather than only at the return,
+ * and no partial total is ever returned. This changes only the
+ * read side: legacy snapshots stay readable (their acceptance is
+ * unchanged); only summing them fails, loudly.
+ *
  * Pure: reads the tasks, never mutates or dispatches.
  */
 export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
@@ -793,7 +807,13 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
     }
     if (complete?.payoutAmount !== undefined) {
       totalMinorUnits += toMinorUnits(complete.payoutAmount);
+      if (!Number.isFinite(totalMinorUnits)) {
+        throw new Error("total paid out computation overflowed: inputs too large");
+      }
     }
+  }
+  if (!Number.isFinite(totalMinorUnits)) {
+    throw new Error("total paid out computation overflowed: inputs too large");
   }
   return totalMinorUnits / 100;
 }
