@@ -29,6 +29,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `nextSlaDeadline` scheduler row (backlog #847):
+  `bench/bench.ts` now measures one scheduler pick over a fixed
+  8-task batch (earliest future current-state deadline wins, 12-hour
+  tie keeps input order, terminal / overdue / departed-state
+  deadlines excluded, per-iteration self-check on the hand-pinned
+  NSL-01 winner and deadline). README Benchmarks prose and the full
+  table are refreshed from one real `npm run bench` run on
+  2026-11-03 (this run: nextSlaDeadline ~38,560 ops/sec).
+
 - CLI demo `nextSlaDeadline` scheduler branch (backlog #841): the
   demo now shows the #835 helper on seven tasks under the same
   fixed screening `now` as the approaching branch — DEMO-061

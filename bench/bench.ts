@@ -1379,6 +1379,7 @@ import {
   isOverdue,
   isTerminal,
   mismatchedPayouts,
+  nextSlaDeadline,
   parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
@@ -2224,6 +2225,91 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: approaching-deadline batch shape",
+  );
+}
+
+// Next-SLA-deadline scheduler fixture (backlog #847): the single
+// "when do I wake up next" answer over a fixed 8-task batch, hand-
+// counted from the `nextSlaDeadline` rules (current-state deadline
+// only, strictly after `now`, ties keep input order):
+//   NSL-01 OPEN, deadline OPEN now + 12h -> earliest future: winner
+//   NSL-02 OPEN, deadline OPEN now + 12h -> tie with NSL-01, loses
+//     on input order
+//   NSL-03 OPEN, deadline OPEN now + 24h -> later, not earliest
+//   NSL-04 OPEN, deadline OPEN exactly now -> at now is overdue,
+//     not next
+//   NSL-05 OPEN, deadline OPEN now - 24h -> overdue, not next
+//   NSL-06 OPEN, no deadline -> never selected
+//   NSL-07 PAID, deadline PAID now + 6h -> terminal: never selected,
+//     even though its deadline is earlier than the winner's
+//   NSL-08 ACCEPTED, deadline OPEN now + 1h -> deadline is on a
+//     departed state, not the current state: never selected, even
+//     though it is the earliest deadline in the batch
+const NEXT_SLA_NOW = APPROACHING_NOW;
+const NEXT_SLA_DEADLINE_ISO = new Date(
+  NEXT_SLA_NOW.getTime() + 12 * HOUR_MS,
+).toISOString();
+const nextSlaPaidTask = buildPaidTask("BENCH-NSL-07", {
+  quotedAmount: 100,
+  payoutAmount: 100,
+  payoutRef: "bench-pay-nsl-07",
+});
+nextSlaPaidTask.setSlaDeadline(
+  new Date(NEXT_SLA_NOW.getTime() + 6 * HOUR_MS),
+  "PAID",
+);
+const nextSlaBatch: TaskLifecycle[] = [
+  buildWatchdogTask(
+    "BENCH-NSL-01",
+    [{ event: "PUBLISH", actor: "researcher", atMs: BASE_MS }],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() + 12 * HOUR_MS },
+  ),
+  buildWatchdogTask(
+    "BENCH-NSL-02",
+    [{ event: "PUBLISH", actor: "researcher", atMs: BASE_MS }],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() + 12 * HOUR_MS },
+  ),
+  buildWatchdogTask(
+    "BENCH-NSL-03",
+    [{ event: "PUBLISH", actor: "researcher", atMs: BASE_MS }],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() + 24 * HOUR_MS },
+  ),
+  buildWatchdogTask(
+    "BENCH-NSL-04",
+    [{ event: "PUBLISH", actor: "researcher", atMs: BASE_MS }],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() },
+  ),
+  buildWatchdogTask(
+    "BENCH-NSL-05",
+    [{ event: "PUBLISH", actor: "researcher", atMs: BASE_MS }],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() - 24 * HOUR_MS },
+  ),
+  buildWatchdogTask("BENCH-NSL-06", [
+    { event: "PUBLISH", actor: "researcher", atMs: BASE_MS },
+  ]),
+  nextSlaPaidTask,
+  buildWatchdogTask(
+    "BENCH-NSL-08",
+    [
+      { event: "PUBLISH", actor: "researcher", atMs: BASE_MS },
+      { event: "ACCEPT", actor: "contributor", atMs: BASE_MS + 1 * HOUR_MS },
+    ],
+    { state: "OPEN", atMs: NEXT_SLA_NOW.getTime() + 1 * HOUR_MS },
+  ),
+];
+const expectedNextSlaTask = nextSlaBatch[0];
+if (
+  nextSlaBatch.length !== 8 ||
+  nextSlaBatch.map((t) => t.state).join(",") !==
+    "OPEN,OPEN,OPEN,OPEN,OPEN,OPEN,PAID,ACCEPTED" ||
+  nextSlaDeadline(nextSlaBatch, NEXT_SLA_NOW)?.task !==
+    expectedNextSlaTask ||
+  nextSlaDeadline(nextSlaBatch, NEXT_SLA_NOW)?.deadline !==
+    NEXT_SLA_DEADLINE_ISO ||
+  nextSlaDeadline(nextSlaBatch.slice(3), NEXT_SLA_NOW) !== undefined
+) {
+  throw new Error(
+    "benchmark fixture failed: next-SLA-deadline batch shape",
   );
 }
 
@@ -9318,6 +9404,23 @@ function benchTasksApproachingDeadline(): number {
   }, ITERATIONS);
 }
 
+function benchNextSlaDeadline(): number {
+  return measure(() => {
+    // Shared fixture batch per iteration: the scheduler pick is
+    // pure, so no rebuild is needed. Per-iteration self-check:
+    // exactly the hand-written winner (NSL-01, input order wins
+    // the 12h tie) and its hand-written deadline ISO string (see
+    // the next-SLA-deadline fixture above).
+    const out = nextSlaDeadline(nextSlaBatch, NEXT_SLA_NOW);
+    if (
+      out?.task !== expectedNextSlaTask ||
+      out?.deadline !== NEXT_SLA_DEADLINE_ISO
+    ) {
+      throw new Error("benchmark self-check failed: nextSlaDeadline");
+    }
+  }, ITERATIONS);
+}
+
 function benchTasksByState(): number {
   return measure(() => {
     // Shared fixture batch per iteration: the filter is pure, so
@@ -10334,6 +10437,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "benchTransition (single step, snapshot restore)", ops: benchTransition() },
   { path: "history getter (defensive copy, 64 entries)", ops: benchHistoryGetter() },
   { path: "tasksApproachingDeadline (6 mixed tasks, 24h window)", ops: benchTasksApproachingDeadline() },
+  { path: "nextSlaDeadline (8 mixed tasks, earliest future deadline)", ops: benchNextSlaDeadline() },
   { path: "tasksByState (12 mixed-state tasks, OPEN slice)", ops: benchTasksByState() },
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
