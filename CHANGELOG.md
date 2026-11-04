@@ -29,6 +29,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo payout-aging segment (backlog #878): three demo tasks
+  (DEMO-073/074/075) driven to PAID with no payoutRef and
+  completing 1, 15, and 41 whole days before the fixed now
+  2026-04-10, plus a DEMO-076 unknown stand-in (a PAID task
+  with no PAYOUT_COMPLETE entry, unreachable via validated
+  construction), printing the `payoutAging` result — one task
+  per bucket (under7Days, days7To30, over30Days, unknown).
+  The segment asserts its pinned shape in-process (a broken
+  fixture fails the demo instead of printing wrong buckets)
+  and is pinned by two new demo tests (structured buckets +
+  byte-identical double-run lines); the golden demo output
+  grows from 696 to 732 lines.
+
 - Demo snapshot-diff segment (backlog #875): one demo task
   (DEMO-072) driven to APPROVED and snapshotted, then given a
   PAYOUT_PENDING SLA deadline (advisory, no history entry) and

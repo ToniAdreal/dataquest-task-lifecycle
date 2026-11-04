@@ -804,6 +804,42 @@ Task DEMO-071: DRAFT
   amountMismatch: DEMO-070 (ref xfer-rec-03, task 1500 vs ledger 1400)
   unreconciled: DEMO-071 (PAID but no payoutRef on the PAYOUT_COMPLETE entry — the same population unreconciledPayouts returns)
 
+Payout aging (payoutAging buckets unreconciled PAID tasks by days since PAYOUT_COMPLETE, so finance chases the oldest first):
+Task DEMO-073: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-074: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-075: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  fixed now: <timestamp> — buckets: under 7 days, 7–30 days, over 30 days, unknown (whole days from the PAYOUT_COMPLETE entry, floor; exactly 7 days lands in 7–30, exactly 30 in over 30)
+  DEMO-076: PAID with no PAYOUT_COMPLETE entry (defensive stand-in: validated construction always writes one, so this shape is unreachable via dispatch — payoutAging reports it as unknown instead of dropping it)
+  payoutAging over 4 tasks: under7Days 1, days7To30 1, over30Days 1, unknown 1
+  under7Days: DEMO-073 (1 day)
+  days7To30: DEMO-074 (15 days)
+  over30Days: DEMO-075 (41 days)
+  unknown: DEMO-076 (no usable completion timestamp)
+
 Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):
   fixed now: <timestamp> — budgets: OPEN 7 days, PAID 7 days (dwell from the last history entry, strictly past the budget; terminal tasks are never stale even with a budget)
   DEMO-057: state OPEN, entered <timestamp>, dwell 21 days, SLA deadline <timestamp> — stale: true, overdue: false
@@ -815,7 +851,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 696);
+  assert.equal(lines.length, 732);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2841,7 +2877,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 696);
+  assert.equal(out.trimEnd().split("\n").length, 732);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8448,9 +8484,9 @@ test("demo external-ledger reconciliation segment is deterministic: two runs pri
         "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
       ),
       // The slice ends before the blank line that opens the
-      // watchdog reminder loop (which closes the demo).
+      // payout-aging segment (which now follows reconciliation).
       ls.indexOf(
-        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+        "Payout aging (payoutAging buckets unreconciled PAID tasks by days since PAYOUT_COMPLETE, so finance chases the oldest first):",
       ) - 1,
     );
   const a = await runDemo();
@@ -8468,6 +8504,91 @@ test("demo external-ledger reconciliation segment is deterministic: two runs pri
   assert.deepEqual(
     a.reconcileLedgerOnly.map((r) => r.payoutRef),
     b.reconcileLedgerOnly.map((r) => r.payoutRef),
+  );
+});
+
+test("demo shows the payout-aging segment in-process: three driven PAID tasks land one per age bucket, plus the unknown stand-in", async () => {
+  const { payoutAgingTasks, payoutAging, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-computed expectations, independent of the demo's own
+  // guard: at the fixed now 2026-04-10, the three completion
+  // dates give whole-day ages 1, 15, and 41.
+  assert.deepEqual(
+    payoutAgingTasks.map((t) => t.id),
+    ["DEMO-073", "DEMO-074", "DEMO-075", "DEMO-076"],
+  );
+  assert.deepEqual(payoutAging, {
+    under7Days: [{ id: "DEMO-073", ageDays: 1 }],
+    days7To30: [{ id: "DEMO-074", ageDays: 15 }],
+    over30Days: [{ id: "DEMO-075", ageDays: 41 }],
+    unknown: [{ id: "DEMO-076" }],
+  });
+  // Purity: payoutAging dispatches nothing; the driven tasks
+  // stay PAID with 8 history entries, the stand-in keeps its
+  // empty history.
+  assert.deepEqual(
+    payoutAgingTasks.map((t) => t.state),
+    ["PAID", "PAID", "PAID", "PAID"],
+  );
+  assert.deepEqual(
+    payoutAgingTasks.map((t) => t.history.length),
+    [8, 8, 8, 0],
+  );
+  // The segment sits between the external-ledger
+  // reconciliation segment and the closing watchdog reminder
+  // loop, and prints all four buckets.
+  const header =
+    "Payout aging (payoutAging buckets unreconciled PAID tasks by days since PAYOUT_COMPLETE, so finance chases the oldest first):";
+  assert.ok(
+    text.indexOf(header) >
+      text.indexOf(
+        "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+      ),
+  );
+  assert.ok(
+    text.indexOf(
+      "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+    ) > text.indexOf(header),
+  );
+  for (const line of [
+    "  fixed now: 2026-04-10T00:00:00.000Z — buckets: under 7 days, 7–30 days, over 30 days, unknown (whole days from the PAYOUT_COMPLETE entry, floor; exactly 7 days lands in 7–30, exactly 30 in over 30)",
+    "  DEMO-076: PAID with no PAYOUT_COMPLETE entry (defensive stand-in: validated construction always writes one, so this shape is unreachable via dispatch — payoutAging reports it as unknown instead of dropping it)",
+    "  payoutAging over 4 tasks: under7Days 1, days7To30 1, over30Days 1, unknown 1",
+    "  under7Days: DEMO-073 (1 day)",
+    "  days7To30: DEMO-074 (15 days)",
+    "  over30Days: DEMO-075 (41 days)",
+    "  unknown: DEMO-076 (no usable completion timestamp)",
+  ]) {
+    assert.ok(text.includes(line), `missing payout-aging line: ${line}`);
+  }
+});
+
+test("demo payout-aging segment is deterministic: two runs print byte-identical aging lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout aging (payoutAging buckets unreconciled PAID tasks by days since PAYOUT_COMPLETE, so finance chases the oldest first):",
+      ),
+      // The slice ends before the blank line that opens the
+      // watchdog reminder loop (which closes the demo).
+      ls.indexOf(
+        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + (task header + 8 transitions) x3 + fixed-now +
+  // stand-in + summary + 4 bucket lines; every timestamp in
+  // the segment is a fixed literal, so no normalization is
+  // needed.
+  assert.equal(segA.length, 35);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.payoutAging, b.payoutAging);
+  assert.deepEqual(
+    a.payoutAgingTasks.map((t) => t.id),
+    b.payoutAgingTasks.map((t) => t.id),
   );
 });
 
