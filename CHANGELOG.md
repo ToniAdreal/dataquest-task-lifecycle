@@ -29,6 +29,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo external-ledger reconciliation segment (backlog #867):
+  four PAID demo tasks (DEMO-068–DEMO-071) paired against a
+  three-row external ledger through `reconcilePayouts`, printing
+  one example of each group — matched, taskOnly, ledgerOnly,
+  amountMismatch, and unreconciled — with the hand-pinned
+  amounts (1200 matched, 800 task-only, 950 ledger-only, 1500
+  vs 1400 mismatched, 600 unreconciled). The segment asserts
+  its pinned shape in-process (a broken fixture fails the demo
+  instead of printing a wrong reconciliation) and is pinned by
+  two new demo tests (structured groups + byte-identical
+  double-run lines); the golden demo output grows from 633 to
+  677 lines.
 - Snapshot comparison helper `diffTaskSnapshots(a, b)` (backlog
   #864): reports only what changed between two snapshots of the
   same task — `stateChanged`, `payoutChanged` (settled

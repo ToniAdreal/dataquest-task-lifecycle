@@ -739,6 +739,50 @@ Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterM
   429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=2 status=200; recorded wait: [30000] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top
   body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId evt_demo_jitter_backoff_001
 
+External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):
+Task DEMO-068: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-069: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-070: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-071: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  reconcilePayouts over 4 PAID tasks and 3 ledger rows: matched 1, taskOnly 1, ledgerOnly 1, amountMismatch 1, unreconciled 1
+  matched: DEMO-068 (ref xfer-rec-01, task 1200 = ledger 1200)
+  taskOnly: DEMO-069 (ref xfer-rec-02, paid 800, no ledger row carries this ref)
+  ledgerOnly: xfer-rec-04 (ledger 950, no PAID task carries this ref)
+  amountMismatch: DEMO-070 (ref xfer-rec-03, task 1500 vs ledger 1400)
+  unreconciled: DEMO-071 (PAID but no payoutRef on the PAYOUT_COMPLETE entry — the same population unreconciledPayouts returns)
+
 Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):
   fixed now: <timestamp> — budgets: OPEN 7 days, PAID 7 days (dwell from the last history entry, strictly past the budget; terminal tasks are never stale even with a budget)
   DEMO-057: state OPEN, entered <timestamp>, dwell 21 days, SLA deadline <timestamp> — stale: true, overdue: false
@@ -750,7 +794,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 633);
+  assert.equal(lines.length, 677);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2776,7 +2820,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 633);
+  assert.equal(out.trimEnd().split("\n").length, 677);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8083,11 +8127,12 @@ test("demo jitter backoff segment is deterministic: two runs print byte-identica
         "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
       ),
       // The slice ends before the blank line that opens the
-      // watchdog reminder loop (which now closes the demo);
+      // external-ledger reconciliation segment (which now sits
+      // between the jitter segment and the watchdog loop);
       // without the end bound the segment would swallow
-      // the reminder lines.
+      // the reconciliation lines.
       ls.indexOf(
-        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+        "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
       ) - 1,
     );
   const a = await runDemo();
@@ -8296,5 +8341,111 @@ test("demo watchdog reminder loop segment is deterministic: two runs print byte-
   assert.deepEqual(
     a.watchdogReminderTasks.map((t) => t.history.length),
     b.watchdogReminderTasks.map((t) => t.history.length),
+  );
+});
+
+test("demo shows the external-ledger reconciliation segment in-process: all five reconcilePayouts groups land on the pinned fixtures", async () => {
+  const {
+    reconcileTasks,
+    reconcileLedger,
+    reconcileMatched,
+    reconcileTaskOnly,
+    reconcileLedgerOnly,
+    reconcileAmountMismatch,
+    reconcileUnreconciled,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-computed expectations, independent of the demo's own
+  // guard: the four driven tasks and three ledger rows split
+  // exactly one way across the five groups.
+  assert.deepEqual(
+    reconcileTasks.map((t) => t.id),
+    ["DEMO-068", "DEMO-069", "DEMO-070", "DEMO-071"],
+  );
+  assert.deepEqual(
+    reconcileLedger.map((r) => [r.payoutRef, r.payoutAmount]),
+    [
+      ["xfer-rec-01", 1200],
+      ["xfer-rec-03", 1400],
+      ["xfer-rec-04", 950],
+    ],
+  );
+  assert.deepEqual(
+    reconcileMatched.map((t) => t.id),
+    ["DEMO-068"],
+  );
+  assert.deepEqual(
+    reconcileTaskOnly.map((t) => t.id),
+    ["DEMO-069"],
+  );
+  assert.deepEqual(
+    reconcileLedgerOnly.map((r) => r.payoutRef),
+    ["xfer-rec-04"],
+  );
+  assert.equal(reconcileAmountMismatch.length, 1);
+  assert.equal(reconcileAmountMismatch[0].task.id, "DEMO-070");
+  assert.equal(reconcileAmountMismatch[0].ledger.payoutRef, "xfer-rec-03");
+  assert.equal(reconcileAmountMismatch[0].taskAmount, 1500);
+  assert.equal(reconcileAmountMismatch[0].ledgerAmount, 1400);
+  assert.deepEqual(
+    reconcileUnreconciled.map((t) => t.id),
+    ["DEMO-071"],
+  );
+  // Purity: reconciliation dispatches nothing.
+  for (const t of reconcileTasks) {
+    assert.equal(t.state, "PAID");
+    assert.equal(t.history.length, 8);
+  }
+  // The segment sits between the jitter backoff segment and the
+  // closing watchdog reminder loop, and prints all five groups.
+  const header =
+    "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):";
+  assert.ok(text.indexOf(header) > text.indexOf("Payout webhook jitter backoff"));
+  assert.ok(
+    text.indexOf(
+      "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+    ) > text.indexOf(header),
+  );
+  for (const line of [
+    "  reconcilePayouts over 4 PAID tasks and 3 ledger rows: matched 1, taskOnly 1, ledgerOnly 1, amountMismatch 1, unreconciled 1",
+    "  matched: DEMO-068 (ref xfer-rec-01, task 1200 = ledger 1200)",
+    "  taskOnly: DEMO-069 (ref xfer-rec-02, paid 800, no ledger row carries this ref)",
+    "  ledgerOnly: xfer-rec-04 (ledger 950, no PAID task carries this ref)",
+    "  amountMismatch: DEMO-070 (ref xfer-rec-03, task 1500 vs ledger 1400)",
+    "  unreconciled: DEMO-071 (PAID but no payoutRef on the PAYOUT_COMPLETE entry — the same population unreconciledPayouts returns)",
+  ]) {
+    assert.ok(text.includes(line), `missing reconciliation line: ${line}`);
+  }
+});
+
+test("demo external-ledger reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+      ),
+      // The slice ends before the blank line that opens the
+      // watchdog reminder loop (which closes the demo).
+      ls.indexOf(
+        "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + (task header + 8 transitions) x4 + 6 group lines;
+  // every timestamp in the segment is a fixed literal that never
+  // reaches the printed lines, so no normalization is needed.
+  assert.equal(segA.length, 43);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(
+    a.reconcileMatched.map((t) => t.id),
+    b.reconcileMatched.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.reconcileLedgerOnly.map((r) => r.payoutRef),
+    b.reconcileLedgerOnly.map((r) => r.payoutRef),
   );
 });

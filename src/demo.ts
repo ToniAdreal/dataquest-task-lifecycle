@@ -619,6 +619,7 @@ import {
   parseHistory,
   parsePayoutRetryAfter,
   payoutMismatch,
+  reconcilePayouts,
   replay,
   SNAPSHOT_VERSION,
   staleTasks,
@@ -637,12 +638,14 @@ import {
   type DeliverPayoutWebhookToManyResult,
   type DeliverWebhookResult,
   type ExpireOverdueResult,
+  type LedgerPayout,
   type NextSlaDeadline,
   type PayoutEventDedupeSnapshot,
   type PayoutEventDedupeStats,
   type PayoutMismatch,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
+  type ReconcileAmountMismatch,
   type RolePolicy,
   type StaleActionResult,
   type TaskEvent,
@@ -1477,6 +1480,20 @@ export interface DemoResult {
   watchdogReminderResults: StaleActionResult[];
   /** Ids the reminder loop's notify-only action recorded, in action order. */
   watchdogReminderNotifiedIds: string[];
+  /** The external-ledger reconciliation segment's four PAID tasks, in batch order. */
+  reconcileTasks: TaskLifecycle[];
+  /** The reconciliation segment's external ledger rows, in ledger order. */
+  reconcileLedger: LedgerPayout[];
+  /** `reconcilePayouts` matched group over the segment batch (only DEMO-068). */
+  reconcileMatched: TaskLifecycle[];
+  /** `reconcilePayouts` taskOnly group over the segment batch (only DEMO-069). */
+  reconcileTaskOnly: TaskLifecycle[];
+  /** `reconcilePayouts` ledgerOnly group over the segment batch (only xfer-rec-04). */
+  reconcileLedgerOnly: LedgerPayout[];
+  /** `reconcilePayouts` amountMismatch group over the segment batch (only DEMO-070). */
+  reconcileAmountMismatch: ReconcileAmountMismatch[];
+  /** `reconcilePayouts` unreconciled group over the segment batch (only DEMO-071). */
+  reconcileUnreconciled: TaskLifecycle[];
   lines: string[];
 }
 
@@ -7333,6 +7350,124 @@ export async function runDemo(): Promise<DemoResult> {
     `  body check: verifyPayoutWebhook over the captured wire body: ${jitterBodyVerifies}; all three scripts re-POSTed the byte-identical signed payload under the same eventId ${jitterEventId}`,
   );
 
+  // External-ledger reconciliation segment (backlog #867): the
+  // screening branch only compares tasks against themselves (no
+  // reference, or settled vs quoted); finance still needs the
+  // other direction — did the external account actually pay what
+  // the tasks claim? Four more tasks are driven to PAID here,
+  // each with one deliberate ledger outcome, every timestamp a
+  // fixed literal (no network, no randomness, no wall clock):
+  //   DEMO-068 settles under ref "xfer-rec-01" for 1200 and the
+  //     ledger records the same ref for 1200 — matched.
+  //   DEMO-069 settles under ref "xfer-rec-02" for 800 and the
+  //     ledger carries no such ref — taskOnly.
+  //   DEMO-070 settles under ref "xfer-rec-03" for 1500 while
+  //     the ledger records 1400 for that ref — amountMismatch.
+  //   DEMO-071 settles for 600 with NO payoutRef — unreconciled,
+  //     the same population unreconciledPayouts() returns.
+  // The ledger carries one extra row, "xfer-rec-04" for 950,
+  // which no PAID task carries — ledgerOnly. Hand-computed
+  // expectations: matched [DEMO-068], taskOnly [DEMO-069],
+  // ledgerOnly [xfer-rec-04], amountMismatch [DEMO-070
+  // (task 1500 vs ledger 1400)], unreconciled [DEMO-071].
+  // `reconcilePayouts` is pure: every task stays PAID with its
+  // 8-entry history untouched, and the ledger rows are unchanged.
+  lines.push(
+    "",
+    "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+  );
+  const reconcileMatchedTask = drivePaidTask("DEMO-068", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-28T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-28T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-28T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-28T09:15:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-28T09:20:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-28T09:25:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-28T09:30:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-28T09:35:00.000Z", payoutRef: "xfer-rec-01", payoutAmount: 1200 },
+  ]);
+  const reconcileTaskOnlyTask = drivePaidTask("DEMO-069", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-29T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-29T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-29T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-29T09:15:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-29T09:20:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-29T09:25:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-29T09:30:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-29T09:35:00.000Z", payoutRef: "xfer-rec-02", payoutAmount: 800 },
+  ]);
+  const reconcileMismatchTask = drivePaidTask("DEMO-070", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-30T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-30T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-30T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-30T09:15:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-30T09:20:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-30T09:25:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-30T09:30:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-30T09:35:00.000Z", payoutRef: "xfer-rec-03", payoutAmount: 1500 },
+  ]);
+  const reconcileUnreconciledTask = drivePaidTask("DEMO-071", [
+    { event: "PUBLISH", actor: "researcher", at: "2026-03-31T09:00:00.000Z" },
+    { event: "ACCEPT", actor: "contributor", at: "2026-03-31T09:05:00.000Z" },
+    { event: "START_CAPTURE", actor: "contributor", at: "2026-03-31T09:10:00.000Z" },
+    { event: "SUBMIT", actor: "contributor", at: "2026-03-31T09:15:00.000Z" },
+    { event: "BEGIN_REVIEW", actor: "reviewer", at: "2026-03-31T09:20:00.000Z" },
+    { event: "APPROVE", actor: "reviewer", at: "2026-03-31T09:25:00.000Z" },
+    { event: "REQUEST_PAYOUT", actor: "contributor", at: "2026-03-31T09:30:00.000Z" },
+    { event: "PAYOUT_COMPLETE", actor: "system", at: "2026-03-31T09:35:00.000Z", payoutAmount: 600 },
+  ]);
+  const reconcileTasks = [
+    reconcileMatchedTask,
+    reconcileTaskOnlyTask,
+    reconcileMismatchTask,
+    reconcileUnreconciledTask,
+  ];
+  const reconcileLedger: LedgerPayout[] = [
+    { payoutRef: "xfer-rec-01", payoutAmount: 1200 },
+    { payoutRef: "xfer-rec-03", payoutAmount: 1400 },
+    { payoutRef: "xfer-rec-04", payoutAmount: 950 },
+  ];
+  const {
+    matched: reconcileMatched,
+    taskOnly: reconcileTaskOnly,
+    ledgerOnly: reconcileLedgerOnly,
+    amountMismatch: reconcileAmountMismatch,
+    unreconciled: reconcileUnreconciled,
+  } = reconcilePayouts(reconcileTasks, reconcileLedger);
+  if (
+    reconcileMatched.length !== 1 ||
+    reconcileMatched[0] !== reconcileMatchedTask ||
+    reconcileTaskOnly.length !== 1 ||
+    reconcileTaskOnly[0] !== reconcileTaskOnlyTask ||
+    reconcileLedgerOnly.length !== 1 ||
+    reconcileLedgerOnly[0] !== reconcileLedger[2] ||
+    reconcileLedgerOnly[0].payoutRef !== "xfer-rec-04" ||
+    reconcileLedgerOnly[0].payoutAmount !== 950 ||
+    reconcileAmountMismatch.length !== 1 ||
+    reconcileAmountMismatch[0].task !== reconcileMismatchTask ||
+    reconcileAmountMismatch[0].ledger !== reconcileLedger[1] ||
+    reconcileAmountMismatch[0].taskAmount !== 1500 ||
+    reconcileAmountMismatch[0].ledgerAmount !== 1400 ||
+    reconcileUnreconciled.length !== 1 ||
+    reconcileUnreconciled[0] !== reconcileUnreconciledTask ||
+    !reconcileTasks.every(
+      (t) => t.state === "PAID" && t.history.length === 8,
+    ) ||
+    reconcileLedger.length !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: external-ledger reconciliation does not have the pinned shape (matched [DEMO-068], taskOnly [DEMO-069], ledgerOnly [xfer-rec-04], amountMismatch [DEMO-070 task 1500 vs ledger 1400], unreconciled [DEMO-071]; every task stays PAID with 8 history entries and the ledger is unchanged)",
+    );
+  }
+  lines.push(
+    `  reconcilePayouts over ${reconcileTasks.length} PAID tasks and ${reconcileLedger.length} ledger rows: matched ${reconcileMatched.length}, taskOnly ${reconcileTaskOnly.length}, ledgerOnly ${reconcileLedgerOnly.length}, amountMismatch ${reconcileAmountMismatch.length}, unreconciled ${reconcileUnreconciled.length}`,
+    "  matched: DEMO-068 (ref xfer-rec-01, task 1200 = ledger 1200)",
+    "  taskOnly: DEMO-069 (ref xfer-rec-02, paid 800, no ledger row carries this ref)",
+    "  ledgerOnly: xfer-rec-04 (ledger 950, no PAID task carries this ref)",
+    "  amountMismatch: DEMO-070 (ref xfer-rec-03, task 1500 vs ledger 1400)",
+    "  unreconciled: DEMO-071 (PAID but no payoutRef on the PAYOUT_COMPLETE entry — the same population unreconciledPayouts returns)",
+  );
+
   // Stale-task watchdog reminder loop (closing, backlog #672):
   // the section the earlier stale branches never showed end to
   // end — a mixed batch (one task idle past its budget, one
@@ -7456,7 +7591,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, lines };
 }
 
 async function main(): Promise<void> {
