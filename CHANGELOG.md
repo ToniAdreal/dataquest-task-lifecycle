@@ -29,6 +29,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo snapshot-diff segment (backlog #875): one demo task
+  (DEMO-072) driven to APPROVED and snapshotted, then given a
+  PAYOUT_PENDING SLA deadline (advisory, no history entry) and
+  driven through REQUEST_PAYOUT + PAYOUT_COMPLETE (ref
+  "xfer-diff-01", 900) to PAID, printing the `diffTaskSnapshots`
+  result — stateChanged APPROVED -> PAID, payoutChanged
+  undefined -> 900, historyAppended seq 7..8, slaChanged {} ->
+  { PAYOUT_PENDING: "2026-04-20T09:00:00.000Z" } — plus two
+  equal snapshots diffing to `{}`. The segment asserts its
+  pinned shape in-process (a broken fixture fails the demo
+  instead of printing a wrong diff) and is pinned by two new
+  demo tests (structured diff + byte-identical double-run
+  lines); the golden demo output grows from 677 to 696 lines.
+
 - Benchmark `reconcilePayouts` external-ledger reconciliation row
   (backlog #872): `bench/bench.ts` now measures one five-way
   reconciliation over a fixed 5-task batch against a 4-row ledger

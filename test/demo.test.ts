@@ -81,7 +81,9 @@ import {
   buildPayoutWebhook,
   deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
+  diffTaskSnapshots,
   verifyPayoutWebhook,
+  type TaskEvent,
   type TaskHistoryEntry,
   type TaskState,
 } from "../src/index.js";
@@ -739,6 +741,25 @@ Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterM
   429 hint (jitterMs 1000, 429 with Retry-After: 30 then 200): ok attempts=2 status=200; recorded wait: [30000] ms exactly — the receiver's prescribed time is waited verbatim, no jitter added on top
   body check: verifyPayoutWebhook over the captured wire body: true; all three scripts re-POSTed the byte-identical signed payload under the same eventId evt_demo_jitter_backoff_001
 
+Snapshot diff (diffTaskSnapshots compares two snapshots of the same task and reports only what changed):
+Task DEMO-072: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  snapshot before: state APPROVED, 6 history entries, no settled payout, no SLA deadlines
+  setSlaDeadline(PAYOUT_PENDING, <timestamp>), advisory only, appends no history entry
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  diffTaskSnapshots(before, after): changed keys: stateChanged, payoutChanged, historyAppended, slaChanged
+  stateChanged: APPROVED -> PAID
+  payoutChanged: no settled payout -> 900
+  historyAppended: seq 7..8 (REQUEST_PAYOUT, PAYOUT_COMPLETE)
+  slaChanged: PAYOUT_PENDING deadline set to <timestamp>
+  identical snapshots diff to {} (no keys changed)
+
 External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):
 Task DEMO-068: DRAFT
   PUBLISH         DRAFT        -> OPEN  (researcher)
@@ -794,7 +815,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 677);
+  assert.equal(lines.length, 696);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2820,7 +2841,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 677);
+  assert.equal(out.trimEnd().split("\n").length, 696);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8127,12 +8148,12 @@ test("demo jitter backoff segment is deterministic: two runs print byte-identica
         "Payout webhook jitter backoff (deliverPayoutWebhook spreads retries with jitterMs — loopback receiver + recording sleep, no real wait):",
       ),
       // The slice ends before the blank line that opens the
-      // external-ledger reconciliation segment (which now sits
-      // between the jitter segment and the watchdog loop);
-      // without the end bound the segment would swallow
-      // the reconciliation lines.
+      // snapshot-diff segment (which now sits between the
+      // jitter segment and the external-ledger reconciliation
+      // segment); without the end bound the segment would
+      // swallow the snapshot-diff lines.
       ls.indexOf(
-        "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+        "Snapshot diff (diffTaskSnapshots compares two snapshots of the same task and reports only what changed):",
       ) - 1,
     );
   const a = await runDemo();
@@ -8448,4 +8469,140 @@ test("demo external-ledger reconciliation segment is deterministic: two runs pri
     a.reconcileLedgerOnly.map((r) => r.payoutRef),
     b.reconcileLedgerOnly.map((r) => r.payoutRef),
   );
+});
+
+test("demo shows the snapshot-diff segment in-process: one task, two snapshots, only what changed", async () => {
+  const {
+    snapshotDiffTask,
+    snapshotDiff,
+    snapshotDiffIdentical,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  assert.equal(snapshotDiffTask.id, "DEMO-072");
+  assert.equal(snapshotDiffTask.state, "PAID");
+  assert.equal(snapshotDiffTask.history.length, 8);
+  assert.deepEqual(Object.keys(snapshotDiff), [
+    "stateChanged",
+    "payoutChanged",
+    "historyAppended",
+    "slaChanged",
+  ]);
+  assert.deepEqual(snapshotDiff.stateChanged, {
+    from: "APPROVED",
+    to: "PAID",
+  });
+  assert.deepEqual(snapshotDiff.payoutChanged, {
+    from: undefined,
+    to: 900,
+  });
+  assert.equal(snapshotDiff.historyAppended?.fromSeq, 7);
+  assert.equal(snapshotDiff.historyAppended?.toSeq, 8);
+  assert.deepEqual(
+    snapshotDiff.historyAppended?.entries.map((e) => e.event),
+    ["REQUEST_PAYOUT", "PAYOUT_COMPLETE"],
+  );
+  assert.deepEqual(snapshotDiff.slaChanged, {
+    from: {},
+    to: { PAYOUT_PENDING: "2026-04-20T09:00:00.000Z" },
+  });
+  assert.deepEqual(snapshotDiffIdentical, {});
+
+  // The segment sits between the jitter backoff segment and the
+  // external-ledger reconciliation segment, and prints all four
+  // changed dimensions plus the empty identical diff.
+  const header =
+    "Snapshot diff (diffTaskSnapshots compares two snapshots of the same task and reports only what changed):";
+  assert.ok(text.indexOf(header) > text.indexOf("Payout webhook jitter backoff"));
+  assert.ok(
+    text.indexOf(
+      "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+    ) > text.indexOf(header),
+  );
+  for (const line of [
+    "Task DEMO-072: DRAFT",
+    "  snapshot before: state APPROVED, 6 history entries, no settled payout, no SLA deadlines",
+    "  setSlaDeadline(PAYOUT_PENDING, 2026-04-20T09:00:00.000Z), advisory only, appends no history entry",
+    "  diffTaskSnapshots(before, after): changed keys: stateChanged, payoutChanged, historyAppended, slaChanged",
+    "  stateChanged: APPROVED -> PAID",
+    "  payoutChanged: no settled payout -> 900",
+    "  historyAppended: seq 7..8 (REQUEST_PAYOUT, PAYOUT_COMPLETE)",
+    "  slaChanged: PAYOUT_PENDING deadline set to 2026-04-20T09:00:00.000Z",
+    "  identical snapshots diff to {} (no keys changed)",
+  ]) {
+    assert.ok(text.includes(line), `missing snapshot-diff line: ${line}`);
+  }
+
+  // Independent cross-check: the same drive rebuilt here through
+  // the library entry points directly must agree with the demo.
+  const independent = new TaskLifecycle("TEST-DIFF-001");
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-04-01T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-04-01T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-04-01T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-04-01T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-04-01T09:20:00.000Z"],
+    ["APPROVE", "reviewer", "2026-04-01T09:25:00.000Z"],
+  ] as Array<[TaskEvent, string, string]>) {
+    independent.dispatch(event, { actor, at });
+  }
+  const independentBefore = independent.toJSON();
+  independent.setSlaDeadline("2026-04-20T09:00:00.000Z", "PAYOUT_PENDING");
+  independent.dispatch("REQUEST_PAYOUT", {
+    actor: "contributor",
+    at: "2026-04-01T09:30:00.000Z",
+  });
+  independent.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-04-01T09:35:00.000Z",
+    payoutRef: "xfer-diff-01",
+    payoutAmount: 900,
+  });
+  const independentDiff = diffTaskSnapshots(
+    independentBefore,
+    independent.toJSON(),
+  );
+  assert.deepEqual(Object.keys(independentDiff), [
+    "stateChanged",
+    "payoutChanged",
+    "historyAppended",
+    "slaChanged",
+  ]);
+  assert.deepEqual(independentDiff.stateChanged, {
+    from: "APPROVED",
+    to: "PAID",
+  });
+  assert.deepEqual(independentDiff.payoutChanged, {
+    from: undefined,
+    to: 900,
+  });
+  assert.equal(independentDiff.historyAppended?.fromSeq, 7);
+  assert.equal(independentDiff.historyAppended?.toSeq, 8);
+  assert.deepEqual(diffTaskSnapshots(independent.toJSON(), independent.toJSON()), {});
+});
+
+test("demo snapshot-diff segment is deterministic: two runs print byte-identical snapshot-diff lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Snapshot diff (diffTaskSnapshots compares two snapshots of the same task and reports only what changed):",
+      ),
+      // The slice ends before the blank line that opens the
+      // external-ledger reconciliation segment.
+      ls.indexOf(
+        "External-ledger reconciliation (reconcilePayouts pairs PAID tasks against an external payout ledger):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + task header + 6 transitions + before line + SLA
+  // line + 2 transitions + keys + 4 detail lines + identical
+  // line; every timestamp is a fixed literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 18);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.snapshotDiff, b.snapshotDiff);
+  assert.deepEqual(a.snapshotDiffIdentical, b.snapshotDiffIdentical);
 });
