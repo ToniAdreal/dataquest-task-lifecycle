@@ -748,6 +748,105 @@ export function unreconciledPayouts(
   });
 }
 
+/** One unreconciled payout together with its age, as returned by {@link payoutAging}. */
+export interface PayoutAgingEntry {
+  /** Task id of the unreconciled PAID task. */
+  id: string;
+  /**
+   * Whole days from the `PAYOUT_COMPLETE` entry to `now` (floor of the
+   * exact age). A completion timestamp in the future — clock skew, not
+   * a real age — counts as 0 days, never negative.
+   */
+  ageDays: number;
+}
+
+/** An unreconciled payout with no usable completion timestamp, as returned by {@link payoutAging}. */
+export interface UnknownPayoutAgingEntry {
+  /** Task id of the unreconciled PAID task. */
+  id: string;
+}
+
+/** The four-way result of {@link payoutAging}, in input order within each bucket. */
+export interface PayoutAgingResult {
+  /** Age under 7 whole days (`ageDays < 7`). */
+  under7Days: PayoutAgingEntry[];
+  /** Age from 7 up to (not including) 30 whole days (`7 <= ageDays < 30`). */
+  days7To30: PayoutAgingEntry[];
+  /** Age of 30 whole days or more (`ageDays >= 30`). */
+  over30Days: PayoutAgingEntry[];
+  /** No `PAYOUT_COMPLETE` entry (or no parseable timestamp on it): aged by nothing, dropped by nothing. */
+  unknown: UnknownPayoutAgingEntry[];
+}
+
+/**
+ * Aging helper: from a batch of tasks, bucket the
+ * {@link unreconciledPayouts} population by how long its settlement has
+ * sat unevidenced — the "how overdue is the chase" answer the bare
+ * screen does not give, so finance ops can triage by staleness instead
+ * of hand-computing a time difference per task with an ad-hoc origin.
+ *
+ * The age origin is fixed, not caller-chosen: the `PAYOUT_COMPLETE`
+ * entry's `at` timestamp (the last such entry when a history carries
+ * more than one, mirroring the entry {@link unreconciledPayouts}
+ * reads). Buckets are on whole days, with pinned endpoints: exactly 7
+ * days lands in `days7To30`, exactly 30 days lands in `over30Days`.
+ * A task in the unreconciled population with no `PAYOUT_COMPLETE`
+ * entry at all — unreachable through the validated construction paths,
+ * but exactly what the screen's defensive branch flags — goes to
+ * `unknown` rather than being silently dropped, as does a completion
+ * entry whose timestamp does not parse. Reconciled tasks (a reference
+ * on the completion entry) and non-PAID tasks never appear in any
+ * bucket: this ages the unreconciled population only, it does not
+ * re-screen the batch.
+ *
+ * Pure: reads the tasks, never mutates or dispatches. An invalid
+ * `now` fails fast instead of returning an empty result. The `now`
+ * default is the real clock, so unit tests pin it to a fixed date.
+ *
+ *   const aging = payoutAging(allTasks, now);
+ *   // chase over30Days first, then days7To30, then under7Days
+ */
+export function payoutAging(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): PayoutAgingResult {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const result: PayoutAgingResult = {
+    under7Days: [],
+    days7To30: [],
+    over30Days: [],
+    unknown: [],
+  };
+  for (const task of unreconciledPayouts(tasks)) {
+    let complete: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+    }
+    if (complete === undefined) {
+      result.unknown.push({ id: task.id });
+      continue;
+    }
+    const completedMs = Date.parse(complete.at);
+    if (!Number.isFinite(completedMs)) {
+      result.unknown.push({ id: task.id });
+      continue;
+    }
+    const ageDays = Math.max(
+      0,
+      Math.floor((nowMs - completedMs) / DAY_MS),
+    );
+    const entry: PayoutAgingEntry = { id: task.id, ageDays };
+    if (ageDays < 7) result.under7Days.push(entry);
+    else if (ageDays < 30) result.days7To30.push(entry);
+    else result.over30Days.push(entry);
+  }
+  return result;
+}
+
 /**
  * Convert a major-unit amount to integer minor units (cents), rounding
  * to the nearest cent. This is the single conversion the money helpers

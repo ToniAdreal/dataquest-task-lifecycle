@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1021 tests, all local
+npm test   # 1027 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -875,6 +875,26 @@ for (const task of unreconciledPayouts(allTasks)) {
 A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
 check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
 `PAID`), because that is the entry that evidences the settlement itself.
+
+The same population can be aged instead of just listed.
+`payoutAging()` buckets the unreconciled tasks by whole days since
+that `PAYOUT_COMPLETE` entry, so the oldest unevidenced settlements
+get chased first: `under7Days`, `days7To30` (7 up to, not including,
+30 days — exactly 7 lands here), `over30Days` (30 days or more —
+exactly 30 lands here), and `unknown` for a task with no completion
+entry at all, which is aged by nothing and dropped by nothing:
+
+```ts
+import { payoutAging } from "dataquest-task-lifecycle";
+
+// Pure: reads the tasks, never mutates them. Reconciled tasks and
+// non-PAID tasks appear in no bucket.
+const { under7Days, days7To30, over30Days, unknown } = payoutAging(
+  allTasks,
+  new Date(),
+);
+// over30Days first: [{ id, ageDays }], unknown last (no age to sort by)
+```
 
 The reverse lookup uses the same rule. `tasksByPayoutRef()` returns
 every task whose `PAYOUT_COMPLETE` entry carries the given reference,
@@ -1811,7 +1831,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1021 tests covering the happy path, reject→resubmit
+`npm test` runs 1027 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

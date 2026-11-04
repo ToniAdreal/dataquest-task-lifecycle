@@ -29,6 +29,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Unreconciled-payout aging helper `payoutAging(tasks, now)`
+  (backlog #870): buckets exactly the `unreconciledPayouts()`
+  population by whole days since the `PAYOUT_COMPLETE` entry —
+  `under7Days`, `days7To30` (7 up to, not including, 30 days),
+  `over30Days` (30 days or more), and `unknown` for a task with no
+  completion entry at all — so finance ops chase the oldest
+  unevidenced settlements first instead of hand-computing a time
+  difference per task. Each dated bucket carries `{ id, ageDays }`
+  (floor; a future-dated completion counts as 0, never negative);
+  reconciled and non-PAID tasks appear in no bucket. Pure, like the
+  screen it ages. Pinned by `test/payoutAging.test.ts` (bucket
+  endpoints at exactly 7 and exactly 30 days, sub-day floor,
+  unknown bucket, last-completion-wins, future-clamp, purity, and
+  invalid-`now` fail-fast).
 - Demo external-ledger reconciliation segment (backlog #867):
   four PAID demo tasks (DEMO-068–DEMO-071) paired against a
   three-row external ledger through `reconcilePayouts`, printing

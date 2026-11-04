@@ -15,6 +15,7 @@ export {
   nextSlaDeadline,
   parseHistory,
   parseMinorUnits,
+  payoutAging,
   payoutMismatch,
   reconcilePayouts,
   replay,
@@ -68,6 +69,8 @@ export type {
   LedgerPayout,
   ListenerErrorContext,
   NextSlaDeadline,
+  PayoutAgingEntry,
+  PayoutAgingResult,
   PayoutMismatch,
   ReconcileAmountMismatch,
   ReconcilePayoutsResult,
@@ -83,4 +86,5 @@ export type {
   TaskSnapshotDiff,
   TaskState,
   TransitionEdge,
+  UnknownPayoutAgingEntry,
 } from "./taskLifecycle.js";
