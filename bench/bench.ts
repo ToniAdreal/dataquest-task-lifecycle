@@ -1384,6 +1384,7 @@ import {
   parsePayoutRetryAfter,
   payoutMismatch,
   PayoutEventDedupe,
+  reconcilePayouts,
   replay,
   staleTasks,
   stateDiagram,
@@ -1399,6 +1400,7 @@ import {
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
+  type LedgerPayout,
   type ListenerErrorContext,
   type PayoutMismatch,
   type PayoutWebhookEndpoint,
@@ -1901,6 +1903,87 @@ if (totalPaidOut(screeningBatch) !== expectedTotalPaidOut) {
   throw new Error(
     "benchmark fixture failed: totalPaidOut differs from the hand-computed expectation",
   );
+}
+
+// Settled amount of one PAID task, read from its last PAYOUT_COMPLETE
+// entry — the same entry reconcilePayouts and totalPaidOut read. Used
+// only to pin the matched amount in the reconciliation fixture below.
+function settledPayoutAmount(task: TaskLifecycle): number | undefined {
+  let amount: number | undefined;
+  for (const entry of task.history) {
+    if (entry.event === "PAYOUT_COMPLETE") amount = entry.payoutAmount;
+  }
+  return amount;
+}
+
+// External-ledger reconciliation batch: 5 PAID tasks paired against a
+// 4-row ledger, one representative per reconcilePayouts group:
+//   - REC-01 / REC-02 settle exactly as the ledger records
+//       -> matched, settled amounts 100 + 250 = 350;
+//   - REC-03 carries a reference no ledger row carries -> taskOnly;
+//   - REC-04 agrees on the reference but not the amount (task 200,
+//     ledger 180) -> amountMismatch;
+//   - REC-05 settles with no payoutRef at all -> unreconciled;
+//   - ledger row bench-pay-rec-99 has no PAID task -> ledgerOnly.
+// Hand-computed expectations, checked against one reconcilePayouts
+// call below — never derived from a second call to itself.
+const reconcileBatch: TaskLifecycle[] = [
+  buildPaidTask("BENCH-REC-01", { quotedAmount: 100, payoutAmount: 100, payoutRef: "bench-pay-rec-01" }),
+  buildPaidTask("BENCH-REC-02", { quotedAmount: 250, payoutAmount: 250, payoutRef: "bench-pay-rec-02" }),
+  buildPaidTask("BENCH-REC-03", { quotedAmount: 80, payoutAmount: 80, payoutRef: "bench-pay-rec-03" }),
+  buildPaidTask("BENCH-REC-04", { quotedAmount: 200, payoutAmount: 200, payoutRef: "bench-pay-rec-04" }),
+  buildPaidTask("BENCH-REC-05", { quotedAmount: 60, payoutAmount: 60 }),
+];
+const reconcileLedger: LedgerPayout[] = [
+  { payoutRef: "bench-pay-rec-01", payoutAmount: 100 },
+  { payoutRef: "bench-pay-rec-02", payoutAmount: 250 },
+  { payoutRef: "bench-pay-rec-04", payoutAmount: 180 },
+  { payoutRef: "bench-pay-rec-99", payoutAmount: 500 },
+];
+if (
+  reconcileBatch.length !== 5 ||
+  reconcileBatch.some((t) => t.state !== "PAID" || t.history.length !== 8)
+) {
+  throw new Error("benchmark fixture failed: reconciliation batch shape");
+}
+{
+  const probe = reconcilePayouts(reconcileBatch, reconcileLedger);
+  const matchedAmount = probe.matched.reduce(
+    (sum, task) => sum + (settledPayoutAmount(task) ?? 0),
+    0,
+  );
+  if (
+    probe.matched.map((t) => t.id).join(",") !== "BENCH-REC-01,BENCH-REC-02" ||
+    matchedAmount !== 350 ||
+    probe.taskOnly.map((t) => t.id).join(",") !== "BENCH-REC-03" ||
+    probe.ledgerOnly.map((row) => row.payoutRef).join(",") !== "bench-pay-rec-99" ||
+    probe.amountMismatch.length !== 1 ||
+    probe.amountMismatch[0]?.task.id !== "BENCH-REC-04" ||
+    probe.amountMismatch[0]?.taskAmount !== 200 ||
+    probe.amountMismatch[0]?.ledgerAmount !== 180 ||
+    probe.unreconciled.map((t) => t.id).join(",") !== "BENCH-REC-05"
+  ) {
+    throw new Error(
+      "benchmark fixture failed: reconciliation counts differ from the hand-computed expectations",
+    );
+  }
+  let duplicateRefThrew = false;
+  try {
+    reconcilePayouts(reconcileBatch, [
+      ...reconcileLedger,
+      { payoutRef: "bench-pay-rec-01", payoutAmount: 100 },
+    ]);
+  } catch (err) {
+    duplicateRefThrew =
+      err instanceof Error &&
+      err.message ===
+        'invalid reconcilePayouts: duplicate ledger payoutRef: "bench-pay-rec-01"';
+  }
+  if (!duplicateRefThrew) {
+    throw new Error(
+      "benchmark fixture failed: duplicate ledger payoutRef did not throw the pinned error",
+    );
+  }
 }
 
 // Watchdog-screening batch: 12 tasks in mixed states, built with
@@ -9454,6 +9537,42 @@ function benchTasksByActor(): number {
   }, ITERATIONS);
 }
 
+function benchReconcilePayouts(): number {
+  return measure(() => {
+    // Shared fixture batch + ledger per iteration: reconcilePayouts
+    // is pure, so no rebuild is needed. Per-iteration self-check:
+    // the hand-written five-group split (see the reconciliation
+    // fixture above) — matched REC-01/REC-02 with settled amounts
+    // summing to 350, taskOnly REC-03, ledgerOnly bench-pay-rec-99,
+    // amountMismatch REC-04 (task 200 vs ledger 180), and
+    // unreconciled REC-05, each holding the same task / ledger
+    // objects as the fixture.
+    const out = reconcilePayouts(reconcileBatch, reconcileLedger);
+    const matchedAmount = out.matched.reduce(
+      (sum, task) => sum + (settledPayoutAmount(task) ?? 0),
+      0,
+    );
+    if (
+      out.matched.length !== 2 ||
+      out.matched[0] !== reconcileBatch[0] ||
+      out.matched[1] !== reconcileBatch[1] ||
+      matchedAmount !== 350 ||
+      out.taskOnly.length !== 1 ||
+      out.taskOnly[0] !== reconcileBatch[2] ||
+      out.ledgerOnly.length !== 1 ||
+      out.ledgerOnly[0] !== reconcileLedger[3] ||
+      out.amountMismatch.length !== 1 ||
+      out.amountMismatch[0]?.task !== reconcileBatch[3] ||
+      out.amountMismatch[0]?.taskAmount !== 200 ||
+      out.amountMismatch[0]?.ledgerAmount !== 180 ||
+      out.unreconciled.length !== 1 ||
+      out.unreconciled[0] !== reconcileBatch[4]
+    ) {
+      throw new Error("benchmark self-check failed: reconcilePayouts");
+    }
+  }, ITERATIONS);
+}
+
 // The demo's pinned `formatMinorUnits` vectors (see src/demo.ts),
 // plus the finance-pass total: 1634900 minor units renders
 // "16349.00". The -0 vector renders "0.00" without a minus sign —
@@ -10440,6 +10559,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "nextSlaDeadline (8 mixed tasks, earliest future deadline)", ops: benchNextSlaDeadline() },
   { path: "tasksByState (12 mixed-state tasks, OPEN slice)", ops: benchTasksByState() },
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
+  { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
 ];

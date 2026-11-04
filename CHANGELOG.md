@@ -29,6 +29,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `reconcilePayouts` external-ledger reconciliation row
+  (backlog #872): `bench/bench.ts` now measures one five-way
+  reconciliation over a fixed 5-task batch against a 4-row ledger
+  (matched, taskOnly, ledgerOnly, amountMismatch, unreconciled —
+  per-iteration self-check on the five group counts and the matched
+  amount 350, duplicate ledger reference pinned to its exact
+  fail-fast error outside the timed loop). README Benchmarks prose
+  and the full table are refreshed from one real `npm run bench`
+  run on 2026-11-04 (this run: reconcilePayouts ~40,619 ops/sec).
+
 - Unreconciled-payout aging helper `payoutAging(tasks, now)`
   (backlog #870): buckets exactly the `unreconciledPayouts()`
   population by whole days since the `PAYOUT_COMPLETE` entry —
