@@ -29,6 +29,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `payoutAging` row (backlog #885): a fixed 10-task batch
+  under one fixed `now` (seven unreconciled PAID tasks across all
+  four buckets including the 7-day and 30-day endpoints, one
+  unknown stand-in, one reconciled task, and one PAYOUT_PENDING
+  task), self-checked per iteration for the four bucket counts
+  and the pinned age days, with an invalid `now` pinned to its
+  exact fail-fast error outside the timed loop. This run measured
+  ~14,305 ops/sec (69.91 µs/op) on Node v24.22.1 / AMD EPYC 9D25;
+  the README Benchmarks table is refreshed from the same run.
 - Benchmark `diffTaskSnapshots` row (backlog #882): a 25-entry
   before snapshot (five REJECT/RESUBMIT review cycles, one OPEN SLA
   deadline) against its 28-entry after snapshot (PAYOUT_PENDING SLA

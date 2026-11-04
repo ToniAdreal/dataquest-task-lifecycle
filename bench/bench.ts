@@ -1383,6 +1383,7 @@ import {
   nextSlaDeadline,
   parseHistory,
   parsePayoutRetryAfter,
+  payoutAging,
   payoutMismatch,
   PayoutEventDedupe,
   reconcilePayouts,
@@ -9702,6 +9703,126 @@ function benchDiffTaskSnapshots(): number {
   }, ITERATIONS);
 }
 
+// ---------------------------------------------------------------------
+// payoutAging fixture: a fixed 10-task batch under one fixed `now`
+// (2026-04-10), mirroring the unit test's bucket rules but as a
+// batch pass — the shape a finance watchdog runs over a whole settled
+// set, not one task at a time. Seven unreconciled PAID tasks, driven
+// DRAFT -> PAID with their PAYOUT_COMPLETE entry dated so the whole
+// days since completion land in every bucket including both pinned
+// endpoints (exactly 7 days -> days7To30, exactly 30 days ->
+// over30Days); one PAID stand-in with no PAYOUT_COMPLETE entry at
+// all (the defensive unknown shape, unreachable through dispatch);
+// one reconciled PAID task (a payoutRef on its completion entry) and
+// one PAYOUT_PENDING task, both excluded from every bucket. The
+// batch is built once and reused across timed iterations:
+// payoutAging is pure, and its cost is the per-task last-completion
+// scan (the full history walk for the last PAYOUT_COMPLETE entry)
+// plus the whole-day floor per unreconciled task.
+const AGING_NOW = new Date("2026-04-10T00:00:00.000Z");
+
+function driveAgingPaidTask(
+  id: string,
+  completeAt: string,
+  completionRef?: string,
+): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  const completeMs = Date.parse(completeAt);
+  // dispatch() rejects an `at` earlier than the previous entry's, so
+  // every step carries its own timestamp, one minute apart, ending
+  // exactly at the completion time under test.
+  const at = (minutesBefore: number): string =>
+    new Date(completeMs - minutesBefore * 60_000).toISOString();
+  task.dispatch("PUBLISH", { actor: "researcher", at: at(7) });
+  task.dispatch("ACCEPT", { actor: "contributor", at: at(6) });
+  task.dispatch("START_CAPTURE", { actor: "contributor", at: at(5) });
+  task.dispatch("SUBMIT", { actor: "contributor", at: at(4) });
+  task.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: at(3) });
+  task.dispatch("APPROVE", { actor: "reviewer", at: at(2) });
+  task.dispatch("REQUEST_PAYOUT", { actor: "contributor", at: at(1) });
+  if (completionRef === undefined) {
+    task.dispatch("PAYOUT_COMPLETE", { actor: "system", at: completeAt });
+  } else {
+    task.dispatch("PAYOUT_COMPLETE", {
+      actor: "system",
+      at: completeAt,
+      payoutRef: completionRef,
+    });
+  }
+  return task;
+}
+
+const AGING_PENDING_TASK = (() => {
+  const task = new TaskLifecycle("bench-age-pending");
+  task.dispatch("PUBLISH", { actor: "researcher" });
+  task.dispatch("ACCEPT", { actor: "contributor" });
+  task.dispatch("START_CAPTURE", { actor: "contributor" });
+  task.dispatch("SUBMIT", { actor: "contributor" });
+  task.dispatch("BEGIN_REVIEW", { actor: "reviewer" });
+  task.dispatch("APPROVE", { actor: "reviewer" });
+  task.dispatch("REQUEST_PAYOUT", { actor: "contributor" });
+  return task;
+})();
+
+const AGING_BATCH: readonly TaskLifecycle[] = [
+  driveAgingPaidTask("bench-age-2", "2026-04-08T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-6", "2026-04-04T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-7", "2026-04-03T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-22", "2026-03-19T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-29", "2026-03-12T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-30", "2026-03-11T00:00:00.000Z"),
+  driveAgingPaidTask("bench-age-59", "2026-02-10T00:00:00.000Z"),
+  driveAgingPaidTask(
+    "bench-age-reconciled",
+    "2026-01-01T00:00:00.000Z",
+    "bench-age-rec-01",
+  ),
+  AGING_PENDING_TASK,
+  // Defensive stand-in: PAID with no PAYOUT_COMPLETE entry at all.
+  {
+    id: "bench-age-unknown",
+    state: "PAID",
+    history: [],
+  } as unknown as TaskLifecycle,
+];
+
+function checkPayoutAging(out: ReturnType<typeof payoutAging>): void {
+  const bucket = (entries: Array<{ id: string; ageDays: number }>): string =>
+    entries.map((entry) => `${entry.id}:${entry.ageDays}`).join(",");
+  if (
+    bucket(out.under7Days) !== "bench-age-2:2,bench-age-6:6" ||
+    bucket(out.days7To30) !==
+      "bench-age-7:7,bench-age-22:22,bench-age-29:29" ||
+    bucket(out.over30Days) !== "bench-age-30:30,bench-age-59:59" ||
+    out.unknown.length !== 1 ||
+    out.unknown[0]?.id !== "bench-age-unknown"
+  ) {
+    throw new Error("benchmark self-check failed: payoutAging");
+  }
+}
+
+// Pre-checks outside timing: the timed shape itself is correct, and
+// an invalid `now` fails fast with the exact error instead of
+// returning an empty result (never timed).
+checkPayoutAging(payoutAging(AGING_BATCH, AGING_NOW));
+try {
+  payoutAging(AGING_BATCH, new Date("not-a-date"));
+  throw new Error("benchmark self-check failed: payoutAging invalid now");
+} catch (e) {
+  if (
+    !(e instanceof Error) ||
+    e.message !== "invalid now: expected a valid Date"
+  ) {
+    throw e;
+  }
+}
+
+function benchPayoutAging(): number {
+  return measure(() => {
+    checkPayoutAging(payoutAging(AGING_BATCH, AGING_NOW));
+  }, ITERATIONS);
+}
+
 // The demo's pinned `formatMinorUnits` vectors (see src/demo.ts),
 // plus the finance-pass total: 1634900 minor units renders
 // "16349.00". The -0 vector renders "0.00" without a minus sign —
@@ -10690,6 +10811,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
   { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
   { path: "diffTaskSnapshots (25-entry history, 3 appended, payout + SLA change)", ops: benchDiffTaskSnapshots() },
+  { path: "payoutAging (10-task batch, four buckets + 7d/30d boundaries)", ops: benchPayoutAging() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
 ];
