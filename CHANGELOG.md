@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Snapshot comparison helper `diffTaskSnapshots(a, b)` (backlog
+  #864): reports only what changed between two snapshots of the
+  same task — `stateChanged`, `payoutChanged` (settled
+  `PAYOUT_COMPLETE` amount, `undefined` when none recorded),
+  `historyAppended` (appended entries with their seq range), and
+  `slaChanged` (full before/after deadline maps, key order ignored).
+  Equal snapshots diff to `{}`; a rewritten, truncated, or
+  seq-breaking later history throws a divergence error instead of
+  being reported as progress, as do snapshots of different tasks.
+  Pure, with detached copies in the result; it compares snapshots
+  and does not re-validate transitions or the hash chain.
+  `test/diffTaskSnapshots.test.ts` pins the empty diff, the
+  state/history/payout/SLA branches, the key-order rule, the three
+  divergence throws, the cross-task throw, and purity.
+
 - External-ledger reconciliation helper `reconcilePayouts(tasks,
   ledger)` (backlog #859): pairs `PAID` tasks against ledger rows
   (`{ payoutRef, payoutAmount? }`) by the `PAYOUT_COMPLETE` entry's

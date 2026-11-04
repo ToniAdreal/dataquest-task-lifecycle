@@ -1866,6 +1866,193 @@ function isCanonicalIso(s: unknown): s is string {
   return !Number.isNaN(ms) && new Date(ms).toISOString() === s;
 }
 
+/**
+ * Canonical JSON for snapshot-diff comparison: object keys sorted,
+ * `undefined` values omitted, array order preserved. Used only by
+ * {@link diffTaskSnapshots}; it is not a serializer — values that JSON
+ * cannot represent keep JSON's answer. Key order in a snapshot object
+ * (notably `slaDeadlines`, a plain record built from a Map) is not a
+ * change, so the comparison must not depend on it.
+ */
+function canonicalDiffJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalDiffJson(item)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    const entries = Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalDiffJson(value[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Settled payout amount recorded in a snapshot: the `payoutAmount` on
+ * the last `PAYOUT_COMPLETE` history entry, or `undefined` when the
+ * snapshot has no such entry (or that entry carries no amount). This
+ * is the same evidence {@link totalPaidOut} and
+ * {@link unreconciledPayouts} read — a `REQUEST_PAYOUT` entry alone is
+ * not a payout — except that a missing amount stays `undefined` here
+ * rather than counting as 0, so "no settled amount recorded" and
+ * "settled for 0" remain distinguishable in a diff.
+ */
+function snapshotPayoutAmount(snapshot: TaskSnapshot): number | undefined {
+  let paid: number | undefined;
+  for (const entry of snapshot.history) {
+    if (entry.event === "PAYOUT_COMPLETE") paid = entry.payoutAmount;
+  }
+  return paid;
+}
+
+/**
+ * Structured difference between two snapshots of the same task, as
+ * reported by {@link diffTaskSnapshots}. Only keys that actually
+ * changed are present; two equal snapshots diff to `{}`.
+ */
+export interface TaskSnapshotDiff {
+  /** Live state moved (e.g. `OPEN` to `ACCEPTED`). */
+  stateChanged?: { from: TaskState; to: TaskState };
+  /**
+   * Settled payout amount moved, per {@link snapshotPayoutAmount}:
+   * `undefined` means no settled amount recorded in that snapshot.
+   */
+  payoutChanged?: { from: number | undefined; to: number | undefined };
+  /**
+   * History entries appended in `b` beyond `a`'s history, with the
+   * seq range they cover. `fromSeq` is the first appended entry's
+   * seq, `toSeq` the last.
+   */
+  historyAppended?: {
+    fromSeq: number;
+    toSeq: number;
+    entries: TaskHistoryEntry[];
+  };
+  /**
+   * Advisory SLA deadline map moved, compared as a whole (key order
+   * is not a change). Setting, changing, or clearing any deadline
+   * reports the full before/after maps, not a per-state delta.
+   */
+  slaChanged?: {
+    from: Partial<Record<TaskState, string>>;
+    to: Partial<Record<TaskState, string>>;
+  };
+}
+
+/**
+ * Compare two snapshots of the same task and report what changed
+ * between them — the audit/change-review question ("what moved since
+ * the last snapshot I stored?") without hand-written field compares
+ * that disagree about what counts as a history change. This is the
+ * task-snapshot counterpart to the escrow repo's
+ * `diffEscrowSnapshots`; the dimensions differ because a task
+ * snapshot carries a settled payout and a per-state SLA map instead
+ * of a single deadline and a role policy.
+ *
+ * Dimensions compared, and only these: live `state`, settled payout
+ * amount (see {@link snapshotPayoutAmount}), the `slaDeadlines` map
+ * as a whole (setting or clearing a deadline is a change even though
+ * it appends no history entry — `setSlaDeadline` /
+ * `clearSlaDeadline` touch no audit log), and history appends. `v`
+ * and the configuration fields (`maxResubmits`, `maxDisputes`,
+ * `maxVisitsByState`, `rolePolicy`, `idempotencyKeys`) are
+ * deliberately not reported: the version is schema metadata, and the
+ * rest is task configuration, not task state.
+ *
+ * History is append-only, so `b`'s history must be an extension of
+ * `a`'s: same entries in the same order, then zero or more new ones
+ * whose seq continues from `a`'s last entry without gaps. A shorter
+ * `b`, a rewritten entry, or an appended entry that breaks seq
+ * continuity throws `snapshot diff failed: history … diverged …`
+ * instead of being silently reported as an append — a rewritten audit
+ * entry is tampering (or a restore from a different lineage), not
+ * progress. Snapshots of different tasks throw the same way: diffing
+ * across ids would report nonsense as if it were one task's
+ * evolution.
+ *
+ * Pure: reads both snapshots, never mutates them, and the returned
+ * `historyAppended.entries` and `slaChanged` maps are detached
+ * copies. This is a comparison, not a validation — it does not
+ * re-check transition legality, seq continuity inside `a` itself, or
+ * the hash chain; run a snapshot through `fromJSON` (or its history
+ * through {@link verifyHistoryChain}) when the input itself is
+ * untrusted.
+ *
+ *   const before = task.toJSON();
+ *   task.dispatch("PUBLISH", { actor: "researcher" });
+ *   diffTaskSnapshots(before, task.toJSON());
+ *   // { stateChanged: { from: "DRAFT", to: "OPEN" },
+ *   //   historyAppended: { fromSeq: 1, toSeq: 1, entries: [...] } }
+ */
+export function diffTaskSnapshots(
+  a: TaskSnapshot,
+  b: TaskSnapshot,
+): TaskSnapshotDiff {
+  if (!isRecord(a) || !isRecord(b)) {
+    throw new Error(
+      "invalid snapshot diff: both snapshots must be objects",
+    );
+  }
+  if (a.id !== b.id) {
+    throw new Error(
+      `snapshot diff failed: cannot diff snapshots of different tasks (${JSON.stringify(a.id)} vs ${JSON.stringify(b.id)})`,
+    );
+  }
+  if (!Array.isArray(a.history) || !Array.isArray(b.history)) {
+    throw new Error(
+      `snapshot diff failed: history of task ${JSON.stringify(a.id)} must be an array in both snapshots`,
+    );
+  }
+  for (let i = 0; i < a.history.length; i++) {
+    if (
+      i >= b.history.length ||
+      canonicalDiffJson(a.history[i]) !== canonicalDiffJson(b.history[i])
+    ) {
+      throw new Error(
+        `snapshot diff failed: history of task ${JSON.stringify(a.id)} diverged at entry ${i + 1} (b is not an append-only extension of a)`,
+      );
+    }
+  }
+  const appended = b.history.slice(a.history.length);
+  let expectedSeq =
+    a.history.length > 0 ? a.history[a.history.length - 1].seq : 0;
+  for (const entry of appended) {
+    expectedSeq += 1;
+    if (entry.seq !== expectedSeq) {
+      throw new Error(
+        `snapshot diff failed: history of task ${JSON.stringify(a.id)} diverged at appended entry seq ${String(entry.seq)} (expected ${expectedSeq}; b is not an append-only extension of a)`,
+      );
+    }
+  }
+  const diff: TaskSnapshotDiff = {};
+  if (a.state !== b.state) {
+    diff.stateChanged = { from: a.state, to: b.state };
+  }
+  const payoutFrom = snapshotPayoutAmount(a);
+  const payoutTo = snapshotPayoutAmount(b);
+  if (payoutFrom !== payoutTo) {
+    diff.payoutChanged = { from: payoutFrom, to: payoutTo };
+  }
+  if (appended.length > 0) {
+    diff.historyAppended = {
+      fromSeq: appended[0].seq,
+      toSeq: appended[appended.length - 1].seq,
+      entries: appended.map((entry) => ({ ...entry })),
+    };
+  }
+  const slaFrom: Partial<Record<TaskState, string>> = {
+    ...(a.slaDeadlines ?? {}),
+  };
+  const slaTo: Partial<Record<TaskState, string>> = {
+    ...(b.slaDeadlines ?? {}),
+  };
+  if (canonicalDiffJson(slaFrom) !== canonicalDiffJson(slaTo)) {
+    diff.slaChanged = { from: slaFrom, to: slaTo };
+  }
+  return diff;
+}
+
 // ------------------------------------------------------------------
 // Audit-history hash chain (tamper evidence for persisted logs).
 //

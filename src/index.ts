@@ -2,6 +2,7 @@ export {
   TaskLifecycle,
   actOnStaleTasks,
   allowedEvents,
+  diffTaskSnapshots,
   expiredTasks,
   expireOverdueTasks,
   formatMinorUnits,
@@ -79,6 +80,7 @@ export type {
   TaskHistoryEntry,
   TaskLifecycleOptions,
   TaskSnapshot,
+  TaskSnapshotDiff,
   TaskState,
   TransitionEdge,
 } from "./taskLifecycle.js";

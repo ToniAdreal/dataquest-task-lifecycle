@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1006 tests, all local
+npm test   # 1019 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -697,6 +697,18 @@ typo like `deadlline` or `payoutAmout` fails loudly instead of quietly
 dropping the SLA deadlines or payout amount it was meant to carry.
 Snapshots produced by `toJSON()` always pass, and legacy snapshots
 without `v` are unaffected.
+
+To answer "what moved since the last snapshot I stored" without
+hand-written field compares, `diffTaskSnapshots(before, after)`
+returns only the keys that actually changed: `stateChanged`,
+`payoutChanged` (the settled `PAYOUT_COMPLETE` amount, `undefined`
+when none is recorded), `historyAppended` (the appended entries with
+their seq range), and `slaChanged` (the full before/after deadline
+maps). Two equal snapshots diff to `{}`. History is append-only: a
+rewritten, truncated, or seq-breaking later history throws instead of
+being reported as progress, and snapshots of different tasks throw.
+The comparison is pure and does not re-validate transitions or the
+hash chain. See `test/diffTaskSnapshots.test.ts`.
 
 ### Hash-chained audit history
 
@@ -1799,7 +1811,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1006 tests covering the happy path, reject→resubmit
+`npm test` runs 1019 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
