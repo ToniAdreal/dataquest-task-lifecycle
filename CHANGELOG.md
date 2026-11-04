@@ -29,6 +29,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- External-ledger reconciliation helper `reconcilePayouts(tasks,
+  ledger)` (backlog #859): pairs `PAID` tasks against ledger rows
+  (`{ payoutRef, payoutAmount? }`) by the `PAYOUT_COMPLETE` entry's
+  reference, returning `{ matched, taskOnly, ledgerOnly,
+  amountMismatch, unreconciled }` — the two-sided gap the task-side
+  screens cannot see (a task the ledger never paid, a ledger
+  payment no task accounts for). Several tasks may share one
+  reference; an amount disagreement is reported only when both
+  sides recorded an amount and they differ exactly; a duplicated or
+  malformed ledger row fails fast. Pure, no dispatch.
+
 - Opt-in `requirePayoutRef` gate for payout webhooks (backlog
   #856): `buildPayoutWebhook(task, secret, { requirePayoutRef: true
   })` now refuses to build a notification for a `PAID` task whose

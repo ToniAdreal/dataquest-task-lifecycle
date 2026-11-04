@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 995 tests, all local
+npm test   # 1006 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -877,6 +877,38 @@ import { tasksByPayoutRef } from "dataquest-task-lifecycle";
 // an empty or non-string reference throws instead of returning [].
 const settled = tasksByPayoutRef(allTasks, "xfer-88f2");
 ```
+
+The other half of the loop pairs those tasks against an external
+payment ledger, in both directions — a task the ledger never paid,
+and a ledger payment no task accounts for. `reconcilePayouts()`
+takes the tasks and ledger rows (`{ payoutRef, payoutAmount? }`,
+the amount in the same major-unit convention as the
+`PAYOUT_COMPLETE` entry) and returns five groups:
+`matched`, `taskOnly`, `ledgerOnly`, `amountMismatch`, and
+`unreconciled`:
+
+```ts
+import { reconcilePayouts } from "dataquest-task-lifecycle";
+
+const { matched, taskOnly, ledgerOnly, amountMismatch, unreconciled } =
+  reconcilePayouts(allTasks, ledgerRows);
+// matched: reference agrees, and the amount agrees where both sides recorded one
+// taskOnly: PAID with a reference no ledger row carries
+// ledgerOnly: ledger row no PAID task carries
+// amountMismatch: [{ task, ledger, taskAmount, ledgerAmount }] — same reference, different amounts
+// unreconciled: PAID with no reference at all (the unreconciledPayouts() population)
+```
+
+Pairing reads only the `PAYOUT_COMPLETE` entry of `PAID` tasks, so
+a request-only reference never pairs and a non-PAID task never
+enters a group. Several tasks may share one reference (one
+transfer settling a batch); each pairs against the same ledger row
+independently. An amount disagreement is reported only when both
+sides recorded an amount and they differ exactly — when either side
+recorded none, the library cannot compare what it cannot observe,
+so the task pairs on the reference alone. A reference appearing
+twice in the ledger throws (`duplicate ledger payoutRef`), as does
+any malformed ledger row; pure, like the other screens.
 
 ### Payout amounts
 
@@ -1767,7 +1799,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 995 tests covering the happy path, reject→resubmit
+`npm test` runs 1006 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

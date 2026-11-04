@@ -1026,6 +1026,192 @@ export function mismatchedPayouts(
   return tasks.filter((task) => payoutMismatch(task) !== undefined);
 }
 
+/**
+ * One row of an external payout ledger, as handed to
+ * {@link reconcilePayouts}. The shape is deliberately minimal: the
+ * reference that pairs a ledger row with a task, and the amount the
+ * ledger says was paid, in the same major-unit, at-most-2-decimal
+ * convention as the `PAYOUT_COMPLETE` entry's `payoutAmount`. Extra
+ * fields on a caller-supplied row are ignored, never compared.
+ */
+export interface LedgerPayout {
+  /** External payment reference, pairing with a task's `payoutRef`. */
+  payoutRef: string;
+  /** Amount the ledger records for this reference, if recorded. */
+  payoutAmount?: number;
+}
+
+/**
+ * One amount disagreement found by {@link reconcilePayouts}: the task
+ * and the ledger row agree on the reference but not on the amount.
+ * Either side's amount is `undefined` only when it was never recorded,
+ * which is not a disagreement (see {@link reconcilePayouts}).
+ */
+export interface ReconcileAmountMismatch {
+  /** The task whose settled amount disagrees with the ledger. */
+  task: TaskLifecycle;
+  /** The ledger row carrying the same reference. */
+  ledger: LedgerPayout;
+  /** Settled amount from the task's `PAYOUT_COMPLETE` entry. */
+  taskAmount: number;
+  /** Amount recorded on the ledger row. */
+  ledgerAmount: number;
+}
+
+/**
+ * The five-way result of {@link reconcilePayouts}. Every group keeps
+ * input order; task groups hold the same task objects, and
+ * `ledgerOnly` holds the same ledger objects, so callers can act on
+ * them directly.
+ */
+export interface ReconcilePayoutsResult {
+  /** PAID tasks whose reference and (where both recorded) amount agree with a ledger row. */
+  matched: TaskLifecycle[];
+  /** PAID tasks with a reference no ledger row carries. */
+  taskOnly: TaskLifecycle[];
+  /** Ledger rows whose reference no PAID task carries. */
+  ledgerOnly: LedgerPayout[];
+  /** PAID tasks paired by reference but disagreeing on amount. */
+  amountMismatch: ReconcileAmountMismatch[];
+  /**
+   * PAID tasks with no reference on their `PAYOUT_COMPLETE` entry —
+   * the same population {@link unreconciledPayouts} returns. They
+   * enter no pairing at all: without a reference there is nothing to
+   * pair them against, and silently matching them to a ledger row
+   * would invent evidence the audit log does not contain.
+   */
+  unreconciled: TaskLifecycle[];
+}
+
+/**
+ * Reconciliation helper: pair a batch of tasks against an external
+ * payout ledger, by `payoutRef`.
+ *
+ * This is the half of reconciliation the task-side screens cannot do:
+ * {@link unreconciledPayouts} finds PAID tasks with no reference at
+ * all, and {@link mismatchedPayouts} compares a task against its own
+ * quote, but neither can see whether the money actually left the
+ * external account. Pairing against the ledger closes that gap in
+ * both directions — a task the ledger never paid, and a ledger
+ * payment no task accounts for:
+ *
+ *   const { matched, taskOnly, ledgerOnly, amountMismatch, unreconciled } =
+ *     reconcilePayouts(allTasks, ledgerRows);
+ *
+ * Pairing rules, all following the same evidence rule
+ * {@link tasksByPayoutRef} uses:
+ *  - only `PAID` tasks enter pairing, and only their `PAYOUT_COMPLETE`
+ *    entry counts: a reference on `REQUEST_PAYOUT` or any other event
+ *    is not settlement evidence, and a non-PAID task has not settled;
+ *  - the task side's reference and amount are read from the last
+ *    `PAYOUT_COMPLETE` entry, the same entry {@link totalPaidOut}
+ *    reads (a PAID task with no such entry at all is defensive-only
+ *    through the validated paths, and lands in `unreconciled`, as in
+ *    {@link unreconciledPayouts});
+ *  - several tasks may share one reference (one transfer settling a
+ *    batch): each pairs against the same ledger row independently,
+ *    and the row is consumed, never `ledgerOnly`;
+ *  - an amount disagreement is reported only when both sides recorded
+ *    an amount and they differ exactly. When either side recorded no
+ *    amount, the library cannot compare what it cannot observe
+ *    (the same rule {@link payoutMismatch} uses), so the task lands
+ *    in `matched` on the reference alone — the missing amount is
+ *    still visible to the caller, because `matched` holds the task
+ *    itself, not a claim that amounts were verified.
+ *
+ * Fail-fast, before any pairing: a ledger row that is not an object,
+ * carries an empty or non-string `payoutRef`, or carries a
+ * non-finite or negative `payoutAmount` throws, and a reference
+ * appearing twice in the ledger throws `duplicate ledger payoutRef`
+ * — a duplicated ledger row would otherwise make "matched" ambiguous
+ * (which row did the task pair with?). The task side needs no such
+ * check: duplicate references across tasks are legitimate batch
+ * settlements, as above.
+ *
+ * Pure: reads the tasks and the ledger rows, never mutates,
+ * dispatches, or copies them. An empty task batch and an empty ledger
+ * return five empty groups.
+ */
+export function reconcilePayouts(
+  tasks: readonly TaskLifecycle[],
+  ledger: readonly LedgerPayout[],
+): ReconcilePayoutsResult {
+  const ledgerByRef = new Map<string, LedgerPayout>();
+  for (const row of ledger) {
+    if (row === null || typeof row !== "object") {
+      throw new Error(
+        `invalid reconcilePayouts: ledger entry must be an object, got ${JSON.stringify(row)}`,
+      );
+    }
+    if (typeof row.payoutRef !== "string" || row.payoutRef.length === 0) {
+      throw new Error(
+        `invalid reconcilePayouts: ledger payoutRef must be a non-empty string, got ${JSON.stringify(row.payoutRef)}`,
+      );
+    }
+    if (
+      row.payoutAmount !== undefined &&
+      (typeof row.payoutAmount !== "number" ||
+        !Number.isFinite(row.payoutAmount) ||
+        row.payoutAmount < 0)
+    ) {
+      throw new Error(
+        `invalid reconcilePayouts: ledger payoutAmount must be a non-negative finite number, got ${String(row.payoutAmount)}`,
+      );
+    }
+    if (ledgerByRef.has(row.payoutRef)) {
+      throw new Error(
+        `invalid reconcilePayouts: duplicate ledger payoutRef: ${JSON.stringify(row.payoutRef)}`,
+      );
+    }
+    ledgerByRef.set(row.payoutRef, row);
+  }
+
+  const result: ReconcilePayoutsResult = {
+    matched: [],
+    taskOnly: [],
+    ledgerOnly: [],
+    amountMismatch: [],
+    unreconciled: [],
+  };
+  const seenRefs = new Set<string>();
+  for (const task of tasks) {
+    if (task.state !== "PAID") continue;
+    let complete: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+    }
+    if (complete === undefined || complete.payoutRef === undefined) {
+      result.unreconciled.push(task);
+      continue;
+    }
+    const ref = complete.payoutRef;
+    seenRefs.add(ref);
+    const row = ledgerByRef.get(ref);
+    if (row === undefined) {
+      result.taskOnly.push(task);
+      continue;
+    }
+    if (
+      complete.payoutAmount !== undefined &&
+      row.payoutAmount !== undefined &&
+      complete.payoutAmount !== row.payoutAmount
+    ) {
+      result.amountMismatch.push({
+        task,
+        ledger: row,
+        taskAmount: complete.payoutAmount,
+        ledgerAmount: row.payoutAmount,
+      });
+      continue;
+    }
+    result.matched.push(task);
+  }
+  for (const row of ledger) {
+    if (!seenRefs.has(row.payoutRef)) result.ledgerOnly.push(row);
+  }
+  return result;
+}
+
 export interface TaskHistoryEntry {
   seq: number;
   event: TaskEvent;
