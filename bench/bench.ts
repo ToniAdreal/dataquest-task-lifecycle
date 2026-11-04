@@ -1368,6 +1368,7 @@ import {
   buildPayoutWebhooks,
   deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
+  diffTaskSnapshots,
   expiredTasks,
   expireOverdueTasks,
   formatMinorUnits,
@@ -9573,6 +9574,134 @@ function benchReconcilePayouts(): number {
   }, ITERATIONS);
 }
 
+// ---------------------------------------------------------------------
+// diffTaskSnapshots fixture: one task with a long history — PUBLISH,
+// ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW (5 entries) plus 5
+// REJECT / RESUBMIT / SUBMIT / BEGIN_REVIEW review cycles (20 more
+// entries, seq 1..25, state IN_REVIEW) — snapshotted with an OPEN SLA
+// deadline, then given a PAYOUT_PENDING SLA deadline and driven
+// APPROVE / REQUEST_PAYOUT / PAYOUT_COMPLETE (seq 26..28, state PAID,
+// settled payout 900) and snapshotted again. The before snapshot is
+// fixed at capture time (`toJSON()` detaches history entries and the
+// SLA map), so the pair is safe to reuse across timed iterations;
+// the diff itself is pure, and its cost is the per-entry canonical
+// compare over the 25-entry prefix plus the SLA-map compare.
+const DIFF_TASK = new TaskLifecycle("BENCH-DIFF");
+const DIFF_STEPS: Array<{ event: TaskEvent; actor: string }> = [
+  { event: "PUBLISH", actor: "researcher" },
+  { event: "ACCEPT", actor: "contributor" },
+  { event: "START_CAPTURE", actor: "contributor" },
+  { event: "SUBMIT", actor: "contributor" },
+  { event: "BEGIN_REVIEW", actor: "reviewer" },
+];
+for (let cycle = 0; cycle < 5; cycle++) {
+  DIFF_STEPS.push(
+    { event: "REJECT", actor: "reviewer" },
+    { event: "RESUBMIT", actor: "contributor" },
+    { event: "SUBMIT", actor: "contributor" },
+    { event: "BEGIN_REVIEW", actor: "reviewer" },
+  );
+}
+DIFF_STEPS.forEach(({ event, actor }, i) => {
+  DIFF_TASK.dispatch(event, {
+    actor,
+    at: new Date(BASE_MS + i * 1000).toISOString(),
+  });
+});
+DIFF_TASK.setSlaDeadline("2026-04-10T09:00:00.000Z", "OPEN");
+const DIFF_BEFORE = DIFF_TASK.toJSON();
+DIFF_TASK.setSlaDeadline("2026-04-20T09:00:00.000Z", "PAYOUT_PENDING");
+DIFF_TASK.dispatch("APPROVE", {
+  actor: "reviewer",
+  at: new Date(BASE_MS + 25 * 1000).toISOString(),
+});
+DIFF_TASK.dispatch("REQUEST_PAYOUT", {
+  actor: "contributor",
+  at: new Date(BASE_MS + 26 * 1000).toISOString(),
+});
+DIFF_TASK.dispatch("PAYOUT_COMPLETE", {
+  actor: "system",
+  at: new Date(BASE_MS + 27 * 1000).toISOString(),
+  payoutRef: "bench-diff-01",
+  payoutAmount: 900,
+});
+const DIFF_AFTER = DIFF_TASK.toJSON();
+
+function checkDiffTaskSnapshots(
+  diff: ReturnType<typeof diffTaskSnapshots>,
+): void {
+  const keys = Object.keys(diff).sort().join(",");
+  if (
+    keys !== "historyAppended,payoutChanged,slaChanged,stateChanged" ||
+    diff.stateChanged?.from !== "IN_REVIEW" ||
+    diff.stateChanged?.to !== "PAID" ||
+    diff.payoutChanged?.from !== undefined ||
+    diff.payoutChanged?.to !== 900 ||
+    diff.historyAppended?.fromSeq !== 26 ||
+    diff.historyAppended?.toSeq !== 28 ||
+    diff.historyAppended?.entries.length !== 3 ||
+    diff.historyAppended?.entries
+      .map((entry) => entry.event)
+      .join(",") !== "APPROVE,REQUEST_PAYOUT,PAYOUT_COMPLETE" ||
+    Object.keys(diff.slaChanged?.from ?? {}).join(",") !== "OPEN" ||
+    diff.slaChanged?.from.OPEN !== "2026-04-10T09:00:00.000Z" ||
+    diff.slaChanged?.to.OPEN !== "2026-04-10T09:00:00.000Z" ||
+    diff.slaChanged?.to.PAYOUT_PENDING !== "2026-04-20T09:00:00.000Z"
+  ) {
+    throw new Error("benchmark self-check failed: diffTaskSnapshots");
+  }
+}
+
+// Pre-checks outside timing: the timed shape itself is correct, an
+// identical pair reports no change, and a snapshot that is not an
+// append-only extension of the before snapshot fails fast with the
+// exact divergence error — once for a rewritten entry, once for a
+// truncated history (never timed).
+checkDiffTaskSnapshots(diffTaskSnapshots(DIFF_BEFORE, DIFF_AFTER));
+if (Object.keys(diffTaskSnapshots(DIFF_BEFORE, DIFF_BEFORE)).length !== 0) {
+  throw new Error(
+    "benchmark self-check failed: diffTaskSnapshots identical pair",
+  );
+}
+const DIFF_TAMPERED = JSON.parse(JSON.stringify(DIFF_AFTER)) as typeof DIFF_AFTER;
+DIFF_TAMPERED.history[0].actor = "mallory";
+try {
+  diffTaskSnapshots(DIFF_BEFORE, DIFF_TAMPERED);
+  throw new Error(
+    "benchmark self-check failed: diffTaskSnapshots rewritten history",
+  );
+} catch (e) {
+  if (
+    !(e instanceof Error) ||
+    e.message !==
+      'snapshot diff failed: history of task "BENCH-DIFF" diverged at entry 1 (b is not an append-only extension of a)'
+  ) {
+    throw e;
+  }
+}
+const DIFF_TRUNCATED = JSON.parse(JSON.stringify(DIFF_AFTER)) as typeof DIFF_AFTER;
+DIFF_TRUNCATED.history = DIFF_TRUNCATED.history.slice(0, 10);
+try {
+  diffTaskSnapshots(DIFF_BEFORE, DIFF_TRUNCATED);
+  throw new Error(
+    "benchmark self-check failed: diffTaskSnapshots truncated history",
+  );
+} catch (e) {
+  if (
+    !(e instanceof Error) ||
+    e.message !==
+      'snapshot diff failed: history of task "BENCH-DIFF" diverged at entry 11 (b is not an append-only extension of a)'
+  ) {
+    throw e;
+  }
+}
+
+function benchDiffTaskSnapshots(): number {
+  return measure(() => {
+    checkDiffTaskSnapshots(diffTaskSnapshots(DIFF_BEFORE, DIFF_AFTER));
+  }, ITERATIONS);
+}
+
 // The demo's pinned `formatMinorUnits` vectors (see src/demo.ts),
 // plus the finance-pass total: 1634900 minor units renders
 // "16349.00". The -0 vector renders "0.00" without a minus sign —
@@ -10560,6 +10689,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "tasksByState (12 mixed-state tasks, OPEN slice)", ops: benchTasksByState() },
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
   { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
+  { path: "diffTaskSnapshots (25-entry history, 3 appended, payout + SLA change)", ops: benchDiffTaskSnapshots() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
 ];

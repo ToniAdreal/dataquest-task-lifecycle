@@ -29,6 +29,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `diffTaskSnapshots` row (backlog #882): a 25-entry
+  before snapshot (five REJECT/RESUBMIT review cycles, one OPEN SLA
+  deadline) against its 28-entry after snapshot (PAYOUT_PENDING SLA
+  deadline added, APPROVE/REQUEST_PAYOUT/PAYOUT_COMPLETE settling
+  900), self-checked per iteration for the four changed keys and the
+  appended seq range 26..28, with identical-pair and rewritten/
+  truncated-history checks outside the timed loop. This run measured
+  ~5,474 ops/sec (182.67 µs/op) on Node v24.22.1 / AMD EPYC 9D25;
+  the README Benchmarks table is refreshed from the same run.
 - Demo payout-aging segment (backlog #878): three demo tasks
   (DEMO-073/074/075) driven to PAID with no payoutRef and
   completing 1, 15, and 41 whole days before the fixed now
