@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1045 tests, all local
+npm test   # 1047 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -132,7 +132,16 @@ settlement (DEMO-080), the task that only requested under
 "xfer-88f2" (DEMO-081), and the fresh task with no history
 (DEMO-082) match neither lookup — only a `PAYOUT_COMPLETE` entry
 counts as settlement evidence, and both lookups are pure; no task
-is dispatched or mutated), a
+is dispatched or mutated), a state visit budget branch that drives
+two more tasks under fixed-literal timestamps — DEMO-083 carries
+`maxVisitsByState: { CAPTURING: 2 }` and is driven to REJECTED
+(CAPTURING visited 1 of 2), takes one RESUBMIT round back through
+CAPTURING (2 of 2), then has its second RESUBMIT rejected with the
+pinned `state visit budget exhausted: CAPTURING already visited 2 of
+2 times` error, state and history untouched, while the unbudgeted
+DEMO-084 runs the same two RESUBMIT rounds and both pass (the
+library default is unlimited; the cap is a demo policy choice, not
+a built-in limit), a
 stale-task batch execution branch that runs
 `actOnStaleTasks()` over four more tasks at the same fixed `now`
 under 7-day dwell budgets for ACCEPTED / CAPTURING / SUBMITTED —
@@ -1639,7 +1648,11 @@ transition legality, RBAC, and event-budget checks and before anything is
 appended, so a rejected dispatch leaves no trace in the history. Note the
 consequence: a budget of 1 for a state the task already passed through is
 already spent — the budget counts total visits, not re-entries on top of
-the first visit.
+the first visit. The CLI demo shows this end to end (`npm run demo`,
+state visit budget branch): DEMO-083 with `{ CAPTURING: 2 }` takes one
+RESUBMIT round inside the budget and has its second RESUBMIT rejected
+with the pinned error, while the unbudgeted DEMO-084 runs the same two
+rounds and both pass.
 
 ## Event-level RBAC
 
@@ -1840,7 +1853,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1045 tests covering the happy path, reject→resubmit
+`npm test` runs 1047 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

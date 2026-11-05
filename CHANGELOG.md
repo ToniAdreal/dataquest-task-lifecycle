@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo state visit budget branch (backlog #910): the demo never
+  showed `maxVisitsByState` even though the budget has unit tests and
+  a benchmark row. A new demo segment drives two fixed-timestamp
+  tasks — DEMO-083 with `{ CAPTURING: 2 }` takes one RESUBMIT round
+  inside the budget (2 of 2 visits used) and has its second RESUBMIT
+  rejected with the pinned `state visit budget exhausted: CAPTURING
+  already visited 2 of 2 times` error, state and history untouched,
+  while the unbudgeted DEMO-084 runs the same two RESUBMIT rounds
+  and both pass (the library default is unlimited). `DemoResult`
+  gains `visitBudgetTask` / `visitBudgetCap` / `visitBudgetError` /
+  `visitBudgetStateAfterReject` / `visitBudgetHistoryLengthAfterReject`
+  / `visitBudgetDefaultTask` / `visitBudgetDefaultResubmitRounds`;
+  `test/demo.test.ts` gains a structure test (independent re-drive
+  of the same budget, ordering, printed lines) and a byte-identical
+  determinism test, and the golden output grows by 31 lines.
 - CLI demo payout-reference reverse-lookup branch (backlog #909):
   the demo never showed `tasksByPayoutRef` even though the helper
   has unit tests and a benchmark row. A new demo segment drives six
