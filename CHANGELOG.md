@@ -29,6 +29,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo payout-reference reverse-lookup branch (backlog #909):
+  the demo never showed `tasksByPayoutRef` even though the helper
+  has unit tests and a benchmark row. A new demo segment drives six
+  fixed-timestamp tasks — two PAID tasks settled under "xfer-88f2",
+  one under "xfer-99g3", one settled with no reference, one stopped
+  at PAYOUT_PENDING whose REQUEST_PAYOUT names "xfer-88f2", and one
+  fresh DRAFT task — and prints both lookups with the exclusion
+  reasons (only a `PAYOUT_COMPLETE` entry counts as settlement
+  evidence). `DemoResult` gains `payoutRefTasks` / `payoutRefFound`
+  / `payoutRefOtherFound`; `test/demo.test.ts` gains a structure
+  test (independent re-screening, purity, ordering) and a
+  byte-identical determinism test, and the golden output grows by
+  56 lines.
 - `payoutAging` × `reconcilePayouts` unreconciled-population pins
   (backlog #893): the three helpers are three hand-written spellings
   of one rule — a PAID task is unreconciled when its

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1043 tests, all local
+npm test   # 1045 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -123,7 +123,16 @@ DEMO-053, and never the anonymous DEMO-052) while
 `tasksByState()` selects only the OPEN pair (DEMO-050,
 DEMO-052) — so the actor slice and the state slice are
 orthogonal, and both filters are pure; no task is dispatched or
-mutated), a
+mutated), a payout-reference reverse-lookup branch that drives six
+more tasks under fixed-literal timestamps and lists every task
+settled under one transfer — `tasksByPayoutRef()` selects the two
+PAID tasks settled under "xfer-88f2" (DEMO-077, DEMO-078) and the
+one settled under "xfer-99g3" (DEMO-079), while the ref-less
+settlement (DEMO-080), the task that only requested under
+"xfer-88f2" (DEMO-081), and the fresh task with no history
+(DEMO-082) match neither lookup — only a `PAYOUT_COMPLETE` entry
+counts as settlement evidence, and both lookups are pure; no task
+is dispatched or mutated), a
 stale-task batch execution branch that runs
 `actOnStaleTasks()` over four more tasks at the same fixed `now`
 under 7-day dwell budgets for ACCEPTED / CAPTURING / SUBMITTED —
@@ -1831,7 +1840,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1043 tests covering the happy path, reject→resubmit
+`npm test` runs 1045 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

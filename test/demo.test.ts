@@ -73,6 +73,7 @@ import {
   stateDiagram,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByPayoutRef,
   tasksByState,
   toMinorUnits,
   transitionTable,
@@ -407,6 +408,62 @@ Task DEMO-053: DRAFT
   tasksByActor([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "contributor"): DEMO-051 (1 task)
   contrast: tasksByState([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "OPEN"): DEMO-050, DEMO-052 (2 tasks) — the two slices are orthogonal: DEMO-052 is OPEN but anonymous so no actor filter claims it, DEMO-051 and DEMO-053 are ACCEPTED yet moderator-touched, and DEMO-053 matches once despite two moderator entries
   filtering is pure: no task was dispatched or mutated by either filter
+
+Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):
+Task DEMO-077: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-078: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-079: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-080: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-081: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  DEMO-077: state PAID, PAYOUT_COMPLETE payoutRef xfer-88f2
+  DEMO-078: state PAID, PAYOUT_COMPLETE payoutRef xfer-88f2
+  DEMO-079: state PAID, PAYOUT_COMPLETE payoutRef xfer-99g3
+  DEMO-080: state PAID, PAYOUT_COMPLETE payoutRef none
+  DEMO-081: state PAYOUT_PENDING, PAYOUT_COMPLETE payoutRef none (REQUEST_PAYOUT names xfer-88f2, but the request is not the settlement)
+  DEMO-082: state DRAFT, PAYOUT_COMPLETE payoutRef none (no history at all)
+  tasksByPayoutRef([DEMO-077, DEMO-078, DEMO-079, DEMO-080, DEMO-081, DEMO-082], "xfer-88f2"): DEMO-077, DEMO-078 (2 tasks)
+  tasksByPayoutRef([DEMO-077, DEMO-078, DEMO-079, DEMO-080, DEMO-081, DEMO-082], "xfer-99g3"): DEMO-079 (1 task)
+  contrast: only a PAYOUT_COMPLETE entry counts — DEMO-080 settled ref-less, DEMO-081 only names xfer-88f2 on its REQUEST_PAYOUT, and DEMO-082 has no history, so none of the three matches either lookup
+  reverse lookup is pure: no task was dispatched or mutated by either call
 
 Stale-task batch execution branch (actOnStaleTasks over four more tasks):
   executed at: <timestamp> (fixed now; no wall clock)
@@ -851,7 +908,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 732);
+  assert.equal(lines.length, 788);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2068,7 +2125,7 @@ test("demo actor-filter segment is deterministic: two runs print byte-identical 
   const actorLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):"),
-      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+      ls.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2090,6 +2147,119 @@ test("demo actor-filter segment is deterministic: two runs print byte-identical 
   assert.deepEqual(
     a.actorFilterOpenState.map((t) => t.id),
     b.actorFilterOpenState.map((t) => t.id),
+  );
+});
+
+test("demo shows the payout-reference reverse-lookup branch in-process: two settlements under one transfer, one under another, the rest excluded", async () => {
+  const { payoutRefTasks, payoutRefFound, payoutRefOtherFound, lines } =
+    await runDemo();
+  const text = lines.join("\n");
+
+  // The six branch tasks end in the hand-written states with
+  // fixed-literal histories — no wall clock anywhere.
+  assert.deepEqual(
+    payoutRefTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-077", "PAID", 8],
+      ["DEMO-078", "PAID", 8],
+      ["DEMO-079", "PAID", 8],
+      ["DEMO-080", "PAID", 8],
+      ["DEMO-081", "PAYOUT_PENDING", 7],
+      ["DEMO-082", "DRAFT", 0],
+    ],
+  );
+  // The reverse lookup: both settlements under "xfer-88f2" match,
+  // the one under "xfer-99g3" matches only its own lookup, and
+  // the ref-less settlement, the request-only task, and the fresh
+  // task match neither.
+  assert.deepEqual(
+    payoutRefFound.map((t) => t.id),
+    ["DEMO-077", "DEMO-078"],
+  );
+  assert.deepEqual(
+    payoutRefOtherFound.map((t) => t.id),
+    ["DEMO-079"],
+  );
+  // An independent re-screening of the returned tasks reproduces
+  // both slices, holding the same task objects — the demo segment
+  // is not self-certifying.
+  const rescreened = tasksByPayoutRef(payoutRefTasks, "xfer-88f2");
+  assert.deepEqual(
+    rescreened.map((t) => t.id),
+    ["DEMO-077", "DEMO-078"],
+  );
+  assert.equal(rescreened[0], payoutRefTasks[0]);
+  assert.equal(rescreened[1], payoutRefTasks[1]);
+  assert.deepEqual(
+    tasksByPayoutRef(payoutRefTasks, "xfer-99g3").map((t) => t.id),
+    ["DEMO-079"],
+  );
+  assert.deepEqual(tasksByPayoutRef(payoutRefTasks, "xfer-nope"), []);
+  // Reverse lookup is pure: the tasks keep their states and
+  // history lengths after both lookups ran inside the demo.
+  assert.deepEqual(
+    payoutRefTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["PAID", 8],
+      ["PAID", 8],
+      ["PAID", 8],
+      ["PAID", 8],
+      ["PAYOUT_PENDING", 7],
+      ["DRAFT", 0],
+    ],
+  );
+  // The branch is printed after the actor-filter branch and
+  // before the stale-task batch execution branch, with its lines
+  // verbatim.
+  const refAt = text.indexOf(
+    "Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):",
+  );
+  assert.ok(
+    refAt >
+      text.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):"),
+    "payout-reference branch must follow the actor-filter branch",
+  );
+  assert.ok(
+    text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") >
+      refAt,
+    "batch execution branch must follow the payout-reference branch",
+  );
+  assert.match(
+    text,
+    /DEMO-081: state PAYOUT_PENDING, PAYOUT_COMPLETE payoutRef none \(REQUEST_PAYOUT names xfer-88f2, but the request is not the settlement\)/,
+  );
+  assert.match(
+    text,
+    /tasksByPayoutRef\(\[DEMO-077, DEMO-078, DEMO-079, DEMO-080, DEMO-081, DEMO-082\], "xfer-88f2"\): DEMO-077, DEMO-078 \(2 tasks\)/,
+  );
+  assert.match(
+    text,
+    /tasksByPayoutRef\(\[DEMO-077, DEMO-078, DEMO-079, DEMO-080, DEMO-081, DEMO-082\], "xfer-99g3"\): DEMO-079 \(1 task\)/,
+  );
+});
+
+test("demo payout-reference segment is deterministic: two runs print byte-identical lookup lines", async () => {
+  const refLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):"),
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = refLines(a.lines);
+  // Header + (task header + steps) x 5 + 6 per-task lines +
+  // two lookup lines + contrast line + purity line; every
+  // timestamp in the segment is a fixed literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 55);
+  assert.deepEqual(segA, refLines(b.lines));
+  assert.deepEqual(
+    a.payoutRefFound.map((t) => t.id),
+    b.payoutRefFound.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.payoutRefOtherFound.map((t) => t.id),
+    b.payoutRefOtherFound.map((t) => t.id),
   );
 });
 
@@ -2877,7 +3047,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 732);
+  assert.equal(out.trimEnd().split("\n").length, 788);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
