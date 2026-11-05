@@ -29,6 +29,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `payoutAging` × `reconcilePayouts` unreconciled-population pins
+  (backlog #893): the three helpers are three hand-written spellings
+  of one rule — a PAID task is unreconciled when its
+  `PAYOUT_COMPLETE` entry carries no `payoutRef` (or it has no
+  completion entry at all) — but nothing pinned that they cannot
+  drift apart. New `test/payoutAgingReconcileConsistency.test.ts`
+  pins the existing semantics with no implementation change: over
+  one shared mixed batch, `reconcilePayouts(...).unreconciled` ids
+  equal `unreconciledPayouts(...)` ids, the four `payoutAging`
+  buckets' union (unknown bucket included) holds the same id set,
+  a ref on `REQUEST_PAYOUT` alone does not reconcile, a ledger row
+  carrying that request-only ref stays `ledgerOnly` without pulling
+  the task out of the unreconciled group, and ledger presence
+  (populated vs empty) does not change unreconciled membership.
 - `diffTaskSnapshots` configuration-exclusion pins (backlog #890):
   the helper's documented "configuration is deliberately not reported"
   rule had no test backing it, so a future change that reported a
