@@ -1382,6 +1382,7 @@ import {
   mismatchedPayouts,
   nextSlaDeadline,
   parseHistory,
+  parseMinorUnits,
   parsePayoutRetryAfter,
   payoutAging,
   payoutMismatch,
@@ -9982,6 +9983,79 @@ function benchFormatMinorUnits(): number {
   }, ITERATIONS);
 }
 
+// The parse counterpart of the display path above: the
+// `test/parseMinorUnits.test.ts` fixture vectors — positive, zero,
+// negative, whitespace-trimmed, `-0.00` (which parses to `0`, never
+// `-0`), large, and the MAX_SAFE_INTEGER boundary
+// (`"90071992547409.91"` is exactly `Number.MAX_SAFE_INTEGER` minor
+// units; one cent more overflows and is pinned outside the timed
+// loop).
+const PARSE_MINOR_UNITS_CASES: Array<{
+  text: string;
+  minor: number;
+}> = [
+  { text: "12.34", minor: 1234 },
+  { text: "-0.50", minor: -50 },
+  { text: "0", minor: 0 },
+  { text: "0.00", minor: 0 },
+  { text: "12.3", minor: 1230 },
+  { text: "2500", minor: 250000 },
+  { text: "-10098.50", minor: -1009850 },
+  { text: "  12.34  ", minor: 1234 },
+  { text: "-0.00", minor: 0 },
+  { text: "90071992547409.91", minor: Number.MAX_SAFE_INTEGER },
+];
+
+function benchParseMinorUnits(): number {
+  // Outside the timed loop: the four illegal shapes the strict
+  // grammar must reject — a thousands separator, scientific
+  // notation, sub-cent precision, and one cent past the safe
+  // integer boundary — each pinned to its exact fail-fast error.
+  for (const [bad, message] of [
+    [
+      "1,234.56",
+      'invalid minor units amount: "1,234.56" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation)',
+    ],
+    [
+      "1.2e3",
+      'invalid minor units amount: "1.2e3" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation)',
+    ],
+    [
+      "12.345",
+      'invalid minor units amount: "12.345" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation)',
+    ],
+    [
+      "90071992547409.92",
+      'minor units conversion overflowed: "90071992547409.92" is too large to represent in minor units',
+    ],
+  ] as const) {
+    let error = "";
+    try {
+      parseMinorUnits(bad);
+    } catch (e) {
+      error = (e as Error).message;
+    }
+    if (error !== message) {
+      throw new Error(
+        "benchmark fixture failed: parseMinorUnits illegal-shape error mismatch",
+      );
+    }
+  }
+  return measure(() => {
+    // Pure parsing, so no rebuild is needed. Per-iteration
+    // self-check: every vector parses to exactly its pinned
+    // minor-unit value, and a zero result is `0`, never `-0`.
+    for (const { text, minor } of PARSE_MINOR_UNITS_CASES) {
+      const parsed = parseMinorUnits(text);
+      if (parsed !== minor || Object.is(parsed, -0)) {
+        throw new Error(
+          `benchmark self-check failed: parseMinorUnits(${JSON.stringify(text)})`,
+        );
+      }
+    }
+  }, ITERATIONS);
+}
+
 // The conversion counterpart of the display path above: the #623
 // demo segment's finance-pass total (16349 major units ↔ 1634900
 // minor units), plus zero, a negative amount, and the 0.33
@@ -10923,6 +10997,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "payoutAging (10-task batch, four buckets + 7d/30d boundaries)", ops: benchPayoutAging() },
   { path: "tasksByPayoutRef (6-task batch, 2 hits under one ref)", ops: benchTasksByPayoutRef() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
+  { path: "parseMinorUnits (10 fixed vectors, pinned minor units)", ops: benchParseMinorUnits() },
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
 ];
 

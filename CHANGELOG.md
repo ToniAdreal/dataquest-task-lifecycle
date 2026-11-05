@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `parseMinorUnits` row (backlog #913): a fixed 10-vector
+  corpus (positive, zero, negative, whitespace-trimmed, `-0.00`
+  parsing to `0` never `-0`, and the MAX_SAFE_INTEGER boundary
+  `"90071992547409.91"`), self-checked per iteration against the
+  hand-pinned minor units, with the thousands-separator, scientific
+  notation, sub-cent, and one-cent-past-safe-integer shapes pinned
+  to their exact fail-fast errors outside the timed loop. This run
+  measured ~289,603 ops/sec (3.45 µs/op) on Node v24.22.1 / AMD
+  EPYC 9D25; only the new row was added to the README Benchmarks
+  table — the other rows are retained from the 2026-11-04 run,
+  because this run's shared host was heavily loaded (the unchanged
+  `tasksByActor` row measured 58,274 ops/sec here versus 334,426 on
+  2026-11-04), so a whole-table refresh from this run would have
+  misrepresented the other paths.
+
 - CLI demo state visit budget branch (backlog #910): the demo never
   showed `maxVisitsByState` even though the budget has unit tests and
   a benchmark row. A new demo segment drives two fixed-timestamp
