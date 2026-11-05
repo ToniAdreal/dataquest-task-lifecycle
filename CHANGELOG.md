@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark `tasksByPayoutRef` row (backlog #888): a fixed 6-task
+  batch (two PAID tasks settled under "xfer-bench-01" with a
+  different-ref task between them, one PAID task settled under
+  "xfer-bench-02", one request-only PAID task, one no-ref PAID
+  task, and one fresh DRAFT task), self-checked per iteration
+  for the two-hit slice in input order holding the same task
+  objects, with the contrast ref and empty / non-string ref
+  fail-fast pinned outside the timed loop. This run measured
+  ~17,237 ops/sec (58.01 µs/op) on Node v24.22.1 / AMD EPYC 9D25;
+  only the new row was added to the README Benchmarks table —
+  the other rows are retained from the 2026-11-04 run, because
+  this run's shared host was heavily loaded (the unchanged
+  `payoutAging` row measured 5,992 ops/sec here versus 14,305
+  on 2026-11-04), so a whole-table refresh from this run would
+  have misrepresented the other paths.
 - Benchmark `payoutAging` row (backlog #885): a fixed 10-task batch
   under one fixed `now` (seven unreconciled PAID tasks across all
   four buckets including the 7-day and 30-day endpoints, one

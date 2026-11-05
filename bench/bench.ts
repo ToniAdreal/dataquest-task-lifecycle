@@ -1393,6 +1393,7 @@ import {
   TaskLifecycle,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
   toMinorUnits,
@@ -9823,6 +9824,114 @@ function benchPayoutAging(): number {
   }, ITERATIONS);
 }
 
+// ---------------------------------------------------------------------
+// tasksByPayoutRef fixture (backlog #888): a fixed 6-task batch —
+// two PAID tasks settled under the timed ref "xfer-bench-01" (with a
+// different-ref task between them, so the timed pass scans past a
+// non-hit), one PAID task settled under "xfer-bench-02", one PAID
+// task whose REQUEST_PAYOUT alone names "xfer-bench-01" (its
+// PAYOUT_COMPLETE entry carries no ref, so it must not match —
+// the completion-entry rule from #850), one PAID task with no ref
+// at all, and one fresh DRAFT task with no history. The filter is
+// pure, so this single batch serves every timed iteration with no
+// rebuild. The timed pass is one reverse lookup over the 6-task
+// batch: every task's history is scanned for a PAYOUT_COMPLETE
+// entry naming the ref, in input order.
+function buildRequestOnlyPaidTask(id: string): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  LIFECYCLE.forEach(({ event, actor }, i) => {
+    const extra: {
+      quotedAmount?: number;
+      payoutRef?: string;
+      payoutAmount?: number;
+    } = {};
+    if (event === "ACCEPT") extra.quotedAmount = 400;
+    if (event === "REQUEST_PAYOUT") extra.payoutRef = "xfer-bench-01";
+    if (event === "PAYOUT_COMPLETE") extra.payoutAmount = 400;
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  return task;
+}
+
+const payoutRefBatch: TaskLifecycle[] = [
+  buildPaidTask("BENCH-REF-01", {
+    quotedAmount: 100,
+    payoutAmount: 100,
+    payoutRef: "xfer-bench-01",
+  }),
+  buildPaidTask("BENCH-REF-02", {
+    quotedAmount: 200,
+    payoutAmount: 200,
+    payoutRef: "xfer-bench-02",
+  }),
+  buildPaidTask("BENCH-REF-03", {
+    quotedAmount: 300,
+    payoutAmount: 300,
+    payoutRef: "xfer-bench-01",
+  }),
+  buildRequestOnlyPaidTask("BENCH-REF-04"),
+  buildPaidTask("BENCH-REF-05", { quotedAmount: 500, payoutAmount: 500 }),
+  new TaskLifecycle("BENCH-REF-06"),
+];
+const expectedByPayoutRef = [payoutRefBatch[0], payoutRefBatch[2]];
+const expectedByPayoutRefIds = ["BENCH-REF-01", "BENCH-REF-03"];
+
+function checkTasksByPayoutRef(out: TaskLifecycle[]): void {
+  if (
+    out.length !== expectedByPayoutRef.length ||
+    out.some((t, i) => t !== expectedByPayoutRef[i])
+  ) {
+    throw new Error("benchmark self-check failed: tasksByPayoutRef");
+  }
+}
+
+// Pre-checks outside timing: the timed shape itself is correct, the
+// contrast ref finds only its own task, the request-only task is
+// excluded by both lookups, and an empty / non-string ref fails fast
+// with the exact error instead of returning an empty list (never
+// timed).
+checkTasksByPayoutRef(tasksByPayoutRef(payoutRefBatch, "xfer-bench-01"));
+if (
+  tasksByPayoutRef(payoutRefBatch, "xfer-bench-02")
+    .map((t) => t.id)
+    .join(",") !== "BENCH-REF-02" ||
+  tasksByPayoutRef(payoutRefBatch, "xfer-bench-01")
+    .map((t) => t.id)
+    .join(",") !== expectedByPayoutRefIds.join(",")
+) {
+  throw new Error("benchmark fixture failed: tasksByPayoutRef batch shape");
+}
+for (const bad of ["", 42] as unknown[]) {
+  let threw = false;
+  try {
+    tasksByPayoutRef(payoutRefBatch, bad as string);
+  } catch (error) {
+    threw =
+      error instanceof Error &&
+      error.message ===
+        `invalid tasksByPayoutRef: payoutRef must be a non-empty string, got ${JSON.stringify(bad)}`;
+  }
+  if (!threw) {
+    throw new Error(
+      "benchmark self-check failed: tasksByPayoutRef illegal ref",
+    );
+  }
+}
+
+function benchTasksByPayoutRef(): number {
+  return measure(() => {
+    // Shared fixture batch per iteration: the filter is pure, so
+    // no rebuild is needed. Per-iteration self-check: exactly the
+    // hand-written two-hit slice, in batch order, holding the same
+    // task objects (see the payout-ref fixture above).
+    checkTasksByPayoutRef(tasksByPayoutRef(payoutRefBatch, "xfer-bench-01"));
+  }, ITERATIONS);
+}
+
 // The demo's pinned `formatMinorUnits` vectors (see src/demo.ts),
 // plus the finance-pass total: 1634900 minor units renders
 // "16349.00". The -0 vector renders "0.00" without a minus sign —
@@ -10812,6 +10921,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
   { path: "diffTaskSnapshots (25-entry history, 3 appended, payout + SLA change)", ops: benchDiffTaskSnapshots() },
   { path: "payoutAging (10-task batch, four buckets + 7d/30d boundaries)", ops: benchPayoutAging() },
+  { path: "tasksByPayoutRef (6-task batch, 2 hits under one ref)", ops: benchTasksByPayoutRef() },
   { path: "formatMinorUnits (12 fixed vectors, pinned strings)", ops: benchFormatMinorUnits() },
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
 ];
