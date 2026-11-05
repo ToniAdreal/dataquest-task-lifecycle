@@ -29,6 +29,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `diffTaskSnapshots` configuration-exclusion pins (backlog #890):
+  the helper's documented "configuration is deliberately not reported"
+  rule had no test backing it, so a future change that reported a
+  budget, policy, or consumed-key change would drift silently. New
+  `test/diffTaskSnapshotsConfig.test.ts` pins the existing semantics
+  with no implementation change: each of `maxResubmits`,
+  `maxDisputes`, `maxVisitsByState`, `rolePolicy`, and consumed
+  `idempotencyKeys` differing alone diffs to `{}`, all five differing
+  at once still diffs to `{}`, and a config change co-occurring with
+  a dispatch (plus an SLA deadline) reports only the state, history,
+  and SLA keys. Each single-field case first asserts the two snapshots
+  really carry different values for that field, so the empty diff
+  cannot pass vacuously.
 - Benchmark `tasksByPayoutRef` row (backlog #888): a fixed 6-task
   batch (two PAID tasks settled under "xfer-bench-01" with a
   different-ref task between them, one PAID task settled under
