@@ -461,6 +461,36 @@ export interface ExpireOverdueResult {
 }
 
 /**
+ * Fail-fast validation + normalization for the watchdog executors'
+ * optional `at` timestamp ({@link expireOverdueTasks},
+ * {@link actOnStaleTasks}).
+ *
+ * A `Date` is normalized with `toISOString()` (already canonical
+ * form); a string must already be canonical ISO-8601 — dispatch's
+ * own `at` bar (see {@link DispatchOptions}). Anything else — a
+ * non-string/non-Date value, an invalid Date, a non-canonical
+ * string — throws `invalid at: …` before any task is touched, so a
+ * bad pin can never half-stamp a batch. `undefined` means "no pin":
+ * the executor dispatches with no `at` and the audit entry carries
+ * the wall clock, exactly as before.
+ */
+function resolveWatchdogAt(at: Date | string | undefined): string | undefined {
+  if (at === undefined) return undefined;
+  if (at instanceof Date) {
+    if (!Number.isFinite(at.getTime())) {
+      throw new Error("invalid at: expected a valid Date");
+    }
+    return at.toISOString();
+  }
+  if (typeof at === "string" && isCanonicalIso(at)) return at;
+  throw new Error(
+    `invalid at: expected a canonical ISO-8601 string or a valid Date, got ${
+      typeof at === "string" ? JSON.stringify(at) : String(at)
+    }`,
+  );
+}
+
+/**
  * Watchdog executor: attempt an explicit `dispatch("EXPIRE")` for every
  * task that {@link isOverdue} reports as overdue, and report the
  * per-task outcome.
@@ -486,6 +516,19 @@ export interface ExpireOverdueResult {
  * action, so a later auditor can tell a watchdog-driven expiry apart
  * from a human-driven EXPIRE dispatch in the append-only history.
  *
+ * The optional `at` pins the EXPIRE audit entry's timestamp — pass a
+ * `Date` (normalized with `toISOString()`) or a canonical ISO-8601
+ * string, and deterministic replays get deterministic watchdog
+ * entries instead of wall-clock stamps. Omitted, the dispatch stamps
+ * the wall clock, as before: a caller that passed a past `now` for
+ * screening sees no silent change. An `at` earlier than a task's last
+ * history entry trips dispatch's non-decreasing-timestamp check and
+ * lands as a per-task `{ expired: false, error }` — the batch
+ * continues, same isolation as an illegal transition. An invalid
+ * `at` (a non-Date/non-string value, an invalid Date, a
+ * non-canonical string) throws `invalid at: …` before any task is
+ * screened or dispatched, so a bad pin can never half-stamp a batch.
+ *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
  * append-only history. Only overdue (non-terminal, past deadline) tasks
@@ -495,13 +538,19 @@ export interface ExpireOverdueResult {
 export function expireOverdueTasks(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
+  at?: Date | string,
 ): ExpireOverdueResult[] {
+  // Fail fast on a bad `at` before screening or dispatching anything:
+  // a malformed pin must never half-stamp a batch.
+  const atIso = resolveWatchdogAt(at);
   return expiredTasks(tasks, now).map((task) => {
     try {
       // Attributed to the `system` actor, like actOnStaleTasks' default
       // action: watchdog-driven expiry must stay distinguishable from a
       // human-driven EXPIRE dispatch in the append-only audit trail.
-      task.dispatch("EXPIRE", { actor: "system" });
+      // `at` pins the audit timestamp (deterministic replay); omitted,
+      // the dispatch stamps the wall clock as before.
+      task.dispatch("EXPIRE", { actor: "system", at: atIso });
       // The history getter returns frozen detached copies, so the last
       // entry is already the immutable audit record of this dispatch.
       const history = task.history;
@@ -668,18 +717,38 @@ export interface StaleActionResult {
  * an invalid `maxAgeByState` or `now` (via `staleTasks()`) or a
  * non-function `action` throws and no task is touched. The `now`
  * default is the real clock, so unit tests pin it.
+ *
+ * The optional `at` pins the default ABANDON dispatch's audit
+ * timestamp — a `Date` (normalized with `toISOString()`) or a
+ * canonical ISO-8601 string — so deterministic replays get
+ * deterministic watchdog entries instead of wall-clock stamps.
+ * Omitted, the default dispatch stamps the wall clock, as before.
+ * A custom `action` manages its own timestamps: the executor cannot
+ * stamp a dispatch it does not make, so `at` is ignored when one is
+ * passed (it is still validated fail-fast, so a bad pin is never
+ * silently accepted). An `at` earlier than a task's last history
+ * entry trips dispatch's non-decreasing-timestamp check and lands
+ * as a per-task `{ acted: false, error }` — the batch continues.
+ * An invalid `at` throws `invalid at: …` before any action runs.
  */
 export function actOnStaleTasks(
   tasks: readonly TaskLifecycle[],
   action: StaleTaskAction | undefined,
   maxAgeByState: Partial<Record<TaskState, number>>,
   now: Date = new Date(),
+  at?: Date | string,
 ): StaleActionResult[] {
   if (action !== undefined && typeof action !== "function") {
     throw new Error("invalid action: expected a function (task) => void");
   }
+  // Fail fast on a bad `at` before screening or acting on anything:
+  // a malformed pin must never half-stamp a batch. A custom action
+  // manages its own timestamps, so `at` only stamps the default
+  // ABANDON dispatch below.
+  const atIso = resolveWatchdogAt(at);
   const run: StaleTaskAction =
-    action ?? ((task) => task.dispatch("ABANDON", { actor: "system" }));
+    action ??
+    ((task) => task.dispatch("ABANDON", { actor: "system", at: atIso }));
   // staleTasks() validates maxAgeByState and now fail-fast, before any
   // action runs.
   return staleTasks(tasks, maxAgeByState, now).map((task) => {

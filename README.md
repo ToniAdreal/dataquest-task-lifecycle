@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1074 tests, all local
+npm test   # 1086 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -584,6 +584,19 @@ can cite the outcome per task without re-reading `task.history`
 dispatches omit the field entirely, so the `{ task, expired: false, error }`
 failure shape is unchanged and backward compatible.
 
+The executor takes an optional third argument, `at` — a `Date` or a
+canonical ISO-8601 string — that pins the EXPIRE audit entry's
+timestamp: `expireOverdueTasks(tasks, now, at)`. A caller replaying a
+fixed screening instant gets deterministic watchdog entries instead of
+wall-clock stamps. Omitted, the dispatch stamps the wall clock, as
+before, so a caller that passed a past `now` for screening sees no
+silent change. An `at` earlier than a task's last history entry trips
+dispatch's non-decreasing-timestamp check and lands as a per-task
+`{ expired: false, error }` — the batch continues. An invalid `at`
+(a non-Date/non-string value, an invalid Date, a non-canonical
+string) throws `invalid at: …` before any task is screened or
+dispatched, so a bad pin can never half-stamp a batch.
+
 Every successful EXPIRE dispatch is signed with the `system` actor —
 the same attribution `actOnStaleTasks` uses for its default ABANDON
 action — so a watchdog-driven expiry stays distinguishable from a
@@ -645,6 +658,11 @@ const budgets = {
 };
 // action omitted (undefined): the default dispatch("ABANDON", { actor: "system" })
 const outcomes = actOnStaleTasks(tasks, undefined, budgets);
+// pin the default action's audit timestamp as well — a Date or a
+// canonical ISO-8601 string; omitted, the dispatch stamps the wall
+// clock. A custom action manages its own timestamps, so `at` is
+// ignored when one is passed (it is still validated fail-fast).
+// const outcomes = actOnStaleTasks(tasks, undefined, budgets, now, at);
 // or a custom action, e.g. notify-only paging that never transitions:
 // const outcomes = actOnStaleTasks(tasks, (t) => pageOnCall(t.id), budgets);
 ```
@@ -1883,7 +1901,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1074 tests covering the happy path, reject→resubmit
+`npm test` runs 1086 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

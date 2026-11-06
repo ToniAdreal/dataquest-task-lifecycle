@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Watchdog executors take an optional `at` timestamp pin (backlog
+  #925): `expireOverdueTasks(tasks, now, at)` and
+  `actOnStaleTasks(tasks, action, maxAgeByState, now, at)` accept a
+  `Date` or a canonical ISO-8601 string that stamps the default
+  dispatch's audit entry, so a caller replaying a fixed screening
+  instant gets deterministic watchdog entries instead of
+  wall-clock stamps. Omitted, the wall clock applies as before. An
+  `at` earlier than a task's last entry trips dispatch's
+  non-decreasing check and lands as a per-task `{ expired: false,
+  error }` / `{ acted: false, error }` — the batch continues; an
+  invalid `at` throws `invalid at: …` before any task is touched.
+  A custom `actOnStaleTasks` action manages its own timestamps, so
+  `at` is ignored when one is passed (still validated fail-fast).
+  The demo's stale execution branch now uses the default action +
+  `at` instead of a custom action workaround. New
+  `test/watchdogExecutorAt.test.ts` (12 cases).
+
 - `tasksByPayoutRef` × `reconcilePayouts` pairing-consistency pins
   (backlog #922): both helpers pair tasks against an external payout
   reference by reading the `payoutRef` on the `PAYOUT_COMPLETE`

@@ -3174,13 +3174,12 @@ export async function runDemo(): Promise<DemoResult> {
   // watchdog story, acted out on four more tasks at the SAME fixed
   // now as the screening branch above (2026-03-22T09:00:00.000Z;
   // no network, no randomness, no wall clock). The executor is
-  // `actOnStaleTasks()` with a custom action that dispatches
-  // ABANDON with the fixed execution instant as the audit
-  // timestamp (the library default action dispatches the same
-  // event with actor "system" at the wall clock; pinning `at`
-  // here keeps the demo byte-deterministic). Hand-written
-  // expectations under budgets of 7 days for ACCEPTED, CAPTURING
-  // and SUBMITTED:
+  // `actOnStaleTasks()` with its default action (dispatch ABANDON
+  // with actor "system") and the fixed execution instant pinned
+  // as `at`, so the audit entries carry the fixed instant instead
+  // of a wall-clock stamp and the segment stays byte-deterministic.
+  // Hand-written expectations under budgets of 7 days for ACCEPTED,
+  // CAPTURING and SUBMITTED:
   //   DEMO-010 sits in SUBMITTED since 2026-03-10T09:00:00.000Z —
   //     dwell 12 days, so stale — but SUBMITTED has no ABANDON
   //     edge, so its action fails with
@@ -3240,12 +3239,9 @@ export async function runDemo(): Promise<DemoResult> {
   ];
   const staleActionResults = actOnStaleTasks(
     staleActionTasks,
-    (t) =>
-      t.dispatch("ABANDON", {
-        actor: "watchdog",
-        at: STALE_ACTION_NOW.toISOString(),
-      }),
+    undefined,
     STALE_ACTION_BUDGETS,
+    STALE_ACTION_NOW,
     STALE_ACTION_NOW,
   );
   for (const r of staleActionResults) {

@@ -3332,8 +3332,8 @@ test("demo shows the stale-task batch execution branch in-process: the unactiona
   // Final states and history lengths are the hand-written
   // expectations: the failed task is untouched, the two actionable
   // stale tasks gained exactly one ABANDON entry each (dispatched
-  // by the watchdog at the fixed execution instant), and the fresh
-  // task was never attempted.
+  // by the default action, actor "system", at the fixed execution
+  // instant), and the fresh task was never attempted.
   assert.deepEqual(
     staleActionTasks.map((t) => [t.id, t.state, t.history.length]),
     [
@@ -3348,7 +3348,7 @@ test("demo shows the stale-task batch execution branch in-process: the unactiona
     assert.deepEqual([last.event, last.to, last.actor, last.at], [
       "ABANDON",
       "ABANDONED",
-      "watchdog",
+      "system",
       "2026-03-22T09:00:00.000Z",
     ]);
   }
@@ -3365,8 +3365,8 @@ test("demo shows the stale-task batch execution branch in-process: the unactiona
   );
   // An independent batch rebuilt from hand-written histories and
   // run through actOnStaleTasks under the same fixed now, budgets
-  // and action reproduces the same outcomes — the demo segment is
-  // not self-certifying.
+  // and default action + at reproduces the same outcomes — the demo
+  // segment is not self-certifying.
   const rebuild = (
     id: string,
     steps: Array<[string, string, string, string]>,
@@ -3405,8 +3405,9 @@ test("demo shows the stale-task batch execution branch in-process: the unactiona
   ];
   const independentResults = actOnStaleTasks(
     independent,
-    (t) => t.dispatch("ABANDON", { actor: "watchdog", at: NOW.toISOString() }),
+    undefined,
     BUDGETS,
+    NOW,
     NOW,
   );
   assert.deepEqual(
