@@ -2071,7 +2071,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the eighty-five hot
+`npm run bench` measures locally-observed throughput for the eighty-six hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2115,8 +2115,8 @@ still records as first-seen afterwards), NDJSON
 history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
 with a full hash-chain re-verification), payout reconciliation
-screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut`
-over a batch of tasks), NDJSON x unreconciled screening
+screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut` /
+`totalQuoted` over a batch of tasks), NDJSON x unreconciled screening
 (`historyToNdjson` -> `historyFromNdjson` ->
 `TaskLifecycle.fromHistory` -> `unreconciledPayouts` over the same
 12-task screening batch), payout webhook fan-out delivery
@@ -2364,7 +2364,13 @@ same 12-task screening batch; its per-iteration self-check pins the
 returned total to the hand-computed sum of the batch's recorded
 `payoutAmount`s (100 + 80 + 150 + 200 + 132 + 75 + 300 + 200 + 175 +
 80 + 440 + 54 = 1986), written out in the bench comments rather than
-derived from the implementation itself. The NDJSON x
+derived from the implementation itself. The `totalQuoted` path runs
+over its own fixed mixed batch of 10 tasks (6 PAID with quotes, 2
+PAID without a quote, 2 non-PAID carrying quotes that must contribute
+0); its per-iteration self-check pins the returned total to the
+hand-computed sum of the contributing quotes (100 + 200 + 150 + 300 +
+250 + 175 = 1175), and the empty batch is pinned to 0 once, outside
+the timed loop. The NDJSON x
 unreconciled row runs the whole forwarder-to-reconciliation chain
 over that same batch on every iteration: each task is exported to
 NDJSON, parsed back, and rebuilt with `TaskLifecycle.fromHistory`,
@@ -3031,7 +3037,7 @@ The `diffTaskSnapshots` path runs one snapshot comparison over a fixed 25-entry 
 The `payoutAging` path runs one batch aging pass over a fixed 10-task batch on every iteration (no network, no randomness, no wall clock): seven unreconciled PAID tasks whose completion dates land in every bucket including both pinned endpoints (exactly 7 days lands in days7To30, exactly 30 days lands in over30Days), one PAID stand-in with no completion entry (the defensive unknown shape), one reconciled PAID task, and one PAYOUT_PENDING task, the last two excluded from every bucket. Its per-iteration self-check pins the four bucket counts and the pinned age days (2 and 6 under 7 days, 7, 22, and 29 in days7To30, 30 and 59 over 30 days, one unknown) to the hand-written expectations written out in the bench comments; outside the timed loop, an invalid `now` is pinned to its exact fail-fast error; one timed pass is one aging pass over 10 tasks.
 The `tasksByPayoutRef` path runs one reverse lookup over a fixed 6-task batch on every iteration (no network, no randomness, no wall clock): two PAID tasks settled under "xfer-bench-01" with a different-ref task between them, one PAID task settled under "xfer-bench-02", one PAID task whose REQUEST_PAYOUT alone names "xfer-bench-01" (its completion entry carries no ref, so it must not match), one PAID task with no ref, and one fresh DRAFT task. Its per-iteration self-check pins the two-hit slice [BENCH-REF-01, BENCH-REF-03] in input order holding the same task objects; outside the timed loop, the "xfer-bench-02" contrast finds only BENCH-REF-02, and an empty or non-string ref is pinned to its exact fail-fast error; one timed pass is one lookup over 6 tasks.
 See the throughput row below. One real run on
-2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05:
+2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05 and the totalQuoted row measured 2026-11-06:
 | path | throughput |
 |------|------------|
 | dispatch (full lifecycle, 8 dispatches) | ~12,719 ops/sec (78.62 µs/op) |
@@ -3060,6 +3066,7 @@ See the throughput row below. One real run on
 | unreconciledPayouts (12 PAID tasks) | ~41,157 ops/sec (24.30 µs/op) |
 | NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks) | ~262.3 ops/sec (3812.04 µs/op) |
 | totalPaidOut (12 PAID tasks) | ~42,085 ops/sec (23.76 µs/op) |
+| totalQuoted (10 mixed tasks) | ~13,733 ops/sec (72.82 µs/op) |
 | deliverPayoutWebhookToMany (4 endpoints) | ~6,464 ops/sec (154.71 µs/op) |
 | deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~2,779 ops/sec (359.83 µs/op) |
 | deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~1,312 ops/sec (762.25 µs/op) |

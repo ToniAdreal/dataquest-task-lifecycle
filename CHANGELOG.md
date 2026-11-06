@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `totalQuoted` batch-sum benchmark row (backlog #935): `bench/bench.ts`
+  measures `totalQuoted(tasks)` over its own fixed mixed batch of 10
+  tasks (6 PAID with quotes, 2 PAID without a quote, 2 non-PAID
+  carrying quotes that contribute 0), self-checked on every iteration
+  against the hand-computed total 1175, with the empty batch pinned
+  to 0 once outside the timed loop. The `buildPaidTask` bench helper
+  now takes an optional `quotedAmount`, so a PAID task can be built
+  without a quote; the README Benchmarks section gains the row and
+  the prose description.
+
 - `TaskLifecycleOptions.requireActor` opt-in actor-required enforcement
   (backlog #928): constructing a task with `{ requireActor: true }`
   makes every dispatch without an `actor` throw `actor required: …`
