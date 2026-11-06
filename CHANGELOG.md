@@ -29,6 +29,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo minor-unit string-parsing branch (backlog #916): the demo
+  never showed `parseMinorUnits` even though the parser has unit
+  tests and a benchmark row. A new demo segment parses nine fixed
+  reconciliation strings — the #853 fixtures (positive, zero,
+  negative, whitespace-trimmed, `-0.00` parsing to `0` never `-0`)
+  — plus the finance-pass total itself as a string (`"16349.00"` →
+  1634900, cross-checked against the conversion branch's integer),
+  and pins three illegal shapes to their exact fail-fast wording
+  (sub-cent `"12.345"`, thousands separator `"1,234.56"`,
+  scientific notation `"1.2e3"`). `DemoResult` gains
+  `parseMinorUnitsCases` / `parseMinorUnitsTotal` /
+  `parseMinorUnitsRejected`; `test/demo.test.ts` gains a structure
+  test (independent re-parsing, ordering, printed lines) and a
+  byte-identical determinism test, and the golden output grows by
+  16 lines.
 - Benchmark `parseMinorUnits` row (backlog #913): a fixed 10-vector
   corpus (positive, zero, negative, whitespace-trimmed, `-0.00`
   parsing to `0` never `-0`, and the MAX_SAFE_INTEGER boundary

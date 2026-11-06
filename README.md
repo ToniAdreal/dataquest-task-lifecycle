@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1047 tests, all local
+npm test   # 1049 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -79,7 +79,12 @@ plus the finance-pass total itself, 1634900 minor units rendered
 conversion branch that turns the finance-pass total 16349 major units
 into 1634900 integer cents with `toMinorUnits` and back with
 `fromMinorUnits`, and shows a fractional minor unit (1634900.5)
-rejected fail-fast — a dispatch subscription branch
+rejected fail-fast — a minor-unit parsing branch that turns
+reconciliation strings into integer cents with `parseMinorUnits` —
+nine fixed vectors (positive, zero, negative, whitespace-trimmed,
+`-0.00` without a minus sign) plus the finance-pass total itself as
+a string, and three illegal shapes pinned to their exact fail-fast
+wording — a dispatch subscription branch
 that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
 dispatches in order, each `(event, from, to)` matching the audit
@@ -1853,7 +1858,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1047 tests covering the happy path, reject→resubmit
+`npm test` runs 1049 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

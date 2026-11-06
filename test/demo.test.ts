@@ -67,6 +67,7 @@ import {
   isTerminal,
   nextSlaDeadline,
   parseHistory,
+  parseMinorUnits,
   parsePayoutRetryAfter,
   payoutMismatch,
   staleTasks,
@@ -278,6 +279,22 @@ Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass 
   toMinorUnits(16349) = 1634900 (finance-pass totalPaidOut in integer cents)
   fromMinorUnits(1634900) = 16349 (round-trip back to totalPaidOut, no float drift)
   fromMinorUnits(1634900.5) rejected: "minor units must be an integer, got 1634900.5" (a fractional minor unit is a caller error, not a representable amount)
+
+Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):
+  parseMinorUnits("12.34") = 1234
+  parseMinorUnits("-0.50") = -50
+  parseMinorUnits("0") = 0
+  parseMinorUnits("0.00") = 0
+  parseMinorUnits("12.3") = 1230
+  parseMinorUnits("2500") = 250000
+  parseMinorUnits("-10098.50") = -1009850
+  parseMinorUnits("  12.34  ") = 1234
+  parseMinorUnits("-0.00") = 0
+  finance-pass total: parseMinorUnits("16349.00") = 1634900 (the same 1634900 integer cents the conversion branch computed from totalPaidOut 16349)
+  parseMinorUnits("12.345") rejected: invalid minor units amount: "12.345" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (sub-cent precision is a caller error, not a rounded amount)
+  parseMinorUnits("1,234.56") rejected: invalid minor units amount: "1,234.56" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (a thousands separator is not a strict decimal amount)
+  parseMinorUnits("1.2e3") rejected: invalid minor units amount: "1.2e3" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (scientific notation is not a strict decimal amount)
+  parse: strict decimal only — optional minus, at most 2 decimal places, no thousands separator, no scientific notation; -0.00 parses to 0, never -0
 
 Dispatch subscription branch (sixth task, in-process fan-out):
 Task DEMO-006: DRAFT
@@ -939,7 +956,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 819);
+  assert.equal(lines.length, 835);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1525,7 +1542,7 @@ test("demo minor-unit conversion segment is deterministic: two runs print byte-i
   const conversionLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):"),
-      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+      ls.indexOf("Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):") - 1,
     );
   const a = conversionLines((await runDemo()).lines);
   const b = conversionLines((await runDemo()).lines);
@@ -1533,6 +1550,109 @@ test("demo minor-unit conversion segment is deterministic: two runs print byte-i
   // rejection line; every value is a pinned literal, so no
   // normalization is needed.
   assert.equal(a.length, 4);
+  assert.deepEqual(a, b);
+});
+
+test("demo shows the minor-unit parsing branch in-process: reconciliation strings parse exactly, illegal shapes rejected verbatim", async () => {
+  const {
+    parseMinorUnitsCases,
+    parseMinorUnitsTotal,
+    parseMinorUnitsRejected,
+    minorUnitsConversion,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  // Hand-written expectations, independent of the demo's own table:
+  // the same vectors the #853 unit tests pin (positive, zero,
+  // negative, trimmed, -0.00), so a drift in either place shows up
+  // here.
+  const expectedCases: Array<{ input: string; minor: number }> = [
+    { input: "12.34", minor: 1234 },
+    { input: "-0.50", minor: -50 },
+    { input: "0", minor: 0 },
+    { input: "0.00", minor: 0 },
+    { input: "12.3", minor: 1230 },
+    { input: "2500", minor: 250000 },
+    { input: "-10098.50", minor: -1009850 },
+    { input: "  12.34  ", minor: 1234 },
+    { input: "-0.00", minor: 0 },
+  ];
+  assert.deepEqual(parseMinorUnitsCases, expectedCases);
+  assert.equal(parseMinorUnitsTotal, 1634900);
+  // The parsed finance-pass total is the same integer the conversion
+  // branch computed from the numeric total — the two directions of
+  // the money pipeline agree.
+  assert.equal(parseMinorUnitsTotal, minorUnitsConversion.minor);
+  assert.deepEqual(
+    parseMinorUnitsRejected.map((r) => r.input),
+    ["12.345", "1,234.56", "1.2e3"],
+  );
+  for (const { input, error } of parseMinorUnitsRejected) {
+    assert.equal(
+      error,
+      `invalid minor units amount: ${JSON.stringify(input)} is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation)`,
+    );
+  }
+  // The structured cases agree with the library directly, and the
+  // -0.00 vector parses to 0, never -0.
+  for (const { input, minor } of parseMinorUnitsCases) {
+    assert.equal(parseMinorUnits(input), minor);
+  }
+  assert.ok(!Object.is(parseMinorUnits("-0.00"), -0));
+  assert.equal(parseMinorUnits("16349.00"), parseMinorUnitsTotal);
+  for (const { input, error } of parseMinorUnitsRejected) {
+    assert.throws(() => parseMinorUnits(input), (err: unknown) => {
+      assert.equal((err as Error).message, error);
+      return true;
+    });
+  }
+  const parsingAt = text.indexOf(
+    "Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):",
+  );
+  assert.ok(
+    parsingAt >
+      text.indexOf(
+        "Minor-unit conversion branch (toMinorUnits/fromMinorUnits over the finance-pass total):",
+      ),
+    "parsing branch must follow the conversion branch",
+  );
+  assert.ok(
+    text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") >
+      parsingAt,
+    "subscription branch must follow the parsing branch",
+  );
+  assert.match(text, /parseMinorUnits\("12\.34"\) = 1234/);
+  assert.match(text, /parseMinorUnits\("-0\.00"\) = 0/);
+  assert.match(
+    text,
+    /finance-pass total: parseMinorUnits\("16349\.00"\) = 1634900 \(the same 1634900 integer cents the conversion branch computed from totalPaidOut 16349\)/,
+  );
+  assert.match(
+    text,
+    /parseMinorUnits\("12\.345"\) rejected: invalid minor units amount: "12\.345" is not a strict decimal amount \(optional minus, at most 2 decimal places, no thousands separator, no scientific notation\) \(sub-cent precision is a caller error, not a rounded amount\)/,
+  );
+  assert.match(
+    text,
+    /parseMinorUnits\("1,234\.56"\) rejected: invalid minor units amount: "1,234\.56" is not a strict decimal amount \(optional minus, at most 2 decimal places, no thousands separator, no scientific notation\) \(a thousands separator is not a strict decimal amount\)/,
+  );
+  assert.match(
+    text,
+    /parseMinorUnits\("1\.2e3"\) rejected: invalid minor units amount: "1\.2e3" is not a strict decimal amount \(optional minus, at most 2 decimal places, no thousands separator, no scientific notation\) \(scientific notation is not a strict decimal amount\)/,
+  );
+});
+
+test("demo minor-unit parsing segment is deterministic: two runs print byte-identical parsing lines", async () => {
+  const parsingLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):"),
+      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+    );
+  const a = parsingLines((await runDemo()).lines);
+  const b = parsingLines((await runDemo()).lines);
+  // Header + 9 vector lines + finance-pass total line + 3 rejection
+  // lines + parse note; every value is a pinned literal, so no
+  // normalization is needed.
+  assert.equal(a.length, 15);
   assert.deepEqual(a, b);
 });
 
@@ -3193,7 +3313,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 819);
+  assert.equal(out.trimEnd().split("\n").length, 835);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
