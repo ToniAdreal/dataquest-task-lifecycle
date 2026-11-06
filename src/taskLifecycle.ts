@@ -1639,6 +1639,21 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * it via `fromHistory(id, history, { requirePayoutRef: true })`. Invalid
  * values throw `invalid option: …` at construction.
  *
+ * `requireActor` is an optional boolean (default `false`): when `true`,
+ * every `dispatch()` without an `actor` throws
+ * `actor required: …` and appends nothing. This is the opt-in up-front
+ * counterpart to the advisory default, under which an anonymous dispatch
+ * is legal and the entry simply omits the actor — for audit regimes
+ * where every state change must be attributable to a named actor. It
+ * complements, rather than replaces, `rolePolicy`: a policy only
+ * constrains the events it lists, while `requireActor` constrains all
+ * of them (a listed event still needs a matching actor, not just any
+ * actor). Like `requirePayoutRef`, the switch is task configuration,
+ * not audit data: it is never written into the `toJSON()` snapshot
+ * envelope, so a rehydrated task must re-enable it via
+ * `fromHistory(id, history, { requireActor: true })`. Invalid values
+ * throw `invalid option: …` at construction.
+ *
  * `auditSecret` is an optional secret (string or Buffer) that upgrades
  * the audit-history hash chain from plain SHA-256 to HMAC-SHA256
  * (keyed mode): every entry's `hash` becomes
@@ -1666,6 +1681,7 @@ export interface TaskLifecycleOptions {
   maxVisitsByState?: Partial<Record<TaskState, number>>;
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
+  requireActor?: boolean;
   idempotencyKeys?: string[];
   auditSecret?: AuditSecret;
   /**
@@ -1690,6 +1706,16 @@ function assertRequirePayoutRef(value: unknown, tag: string): boolean {
   if (typeof value !== "boolean") {
     throw new Error(
       `${tag}: requirePayoutRef must be a boolean, got ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+function assertRequireActor(value: unknown, tag: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${tag}: requireActor must be a boolean, got ${String(value)}`,
     );
   }
   return value;
@@ -2925,6 +2951,12 @@ export class TaskLifecycle {
    */
   private _requirePayoutRef: boolean;
   /**
+   * Up-front enforcement for audit attribution. Task configuration:
+   * never written into the JSON snapshot (see toJSON), so a rehydrated
+   * task re-enables it via fromHistory(id, history, { requireActor }).
+   */
+  private _requireActor: boolean;
+  /**
    * Idempotency keys consumed by successful dispatches. Persisted in
    * the JSON snapshot when non-empty (see DispatchOptions for the
    * documented semantics), and re-attachable on fromHistory() via
@@ -2949,6 +2981,10 @@ export class TaskLifecycle {
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
     this._requirePayoutRef = assertRequirePayoutRef(
       opts?.requirePayoutRef,
+      "invalid option",
+    );
+    this._requireActor = assertRequireActor(
+      opts?.requireActor,
       "invalid option",
     );
     this._idempotencyKeys = assertIdempotencyKeys(
@@ -3206,6 +3242,15 @@ export class TaskLifecycle {
    * Events the policy does not cover are unrestricted, and a task built
    * without a policy skips the check entirely.
    *
+   * Actor-required enforcement: when the task was constructed with
+   * `requireActor: true`, every dispatch without an `actor` throws
+   * `actor required: …` (checked after the transition/RBAC/budget
+   * checks, before the idempotency key is consumed — a rejected dispatch
+   * leaves no trace and consumes nothing). Unlike the policy, it covers
+   * all events, not just the listed ones; a listed event still needs a
+   * matching actor, not just any actor. The default is anonymous
+   * dispatches stay legal.
+   *
    * After the audit entry is appended, registered `subscribe()` listeners
    * are notified (event, from, to, entry) in subscription order; a listener
    * that throws is isolated — the dispatch still returns normally and the
@@ -3383,6 +3428,17 @@ export class TaskLifecycle {
           `state visit budget exhausted: ${to} already visited ${visits} of ${visitBudget} times`,
         );
       }
+    }
+    if (this._requireActor && opts?.actor === undefined) {
+      // Up-front enforcement is opt-in configuration: the advisory
+      // default stays legal, and requiring an actor cannot verify who
+      // the actor really is — it only guarantees the audit trail names
+      // one. Checked alongside requirePayoutRef, after the transition /
+      // RBAC / budget checks and before the idempotency key is consumed,
+      // so a rejected dispatch consumes nothing.
+      throw new Error(
+        "actor required: dispatch must carry a non-empty actor when requireActor is enabled",
+      );
     }
     if (
       event === "PAYOUT_COMPLETE" &&
@@ -3586,6 +3642,11 @@ export class TaskLifecycle {
    * `fromHistory(id, history, { requirePayoutRef: true })`; until then
    * `PAYOUT_COMPLETE` without a `payoutRef` is legal again.
    *
+   * `requireActor` is likewise NOT included, for the same reason: a
+   * rehydrated task re-enables up-front actor-required enforcement via
+   * `fromHistory(id, history, { requireActor: true })`; until then
+   * anonymous dispatches are legal again.
+   *
    * The `auditSecret` is NOT included either — a snapshot must never
    * carry the secret that MACs its own history. A keyed task's
    * snapshot therefore only rehydrates when the caller re-supplies
@@ -3693,6 +3754,10 @@ export class TaskLifecycle {
    * enforcement the same way; omit it and the rehydrated task falls back
    * to the advisory default (the switch is not part of the audit log, so
    * it cannot be restored on its own).
+   * `opts.requireActor` re-attaches up-front actor-required enforcement
+   * the same way; omit it and the rehydrated task falls back to the
+   * advisory default (the switch is not part of the audit log, so it
+   * cannot be restored on its own).
    * `opts.idempotencyKeys` re-attaches the consumed dispatch idempotency
    * keys the same way; omit it and the rehydrated task starts with an
    * empty key set, so a retried key would re-execute (the keys are not

@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `TaskLifecycleOptions.requireActor` opt-in actor-required enforcement
+  (backlog #928): constructing a task with `{ requireActor: true }`
+  makes every dispatch without an `actor` throw `actor required: …`
+  (checked after the transition/RBAC/budget checks, before the
+  idempotency key is consumed, so a rejected dispatch leaves no trace
+  and consumes nothing). It complements `rolePolicy`, which only
+  constrains the events it lists: `requireActor` covers all of them,
+  and a listed event still needs a matching actor, not just any actor.
+  Like `requirePayoutRef`, the switch is task configuration, not audit
+  data — it is never written into the `toJSON()` snapshot, so a restored
+  task re-enables it via `fromHistory(id, history, { requireActor: true })`.
+  It guarantees an actor string is present, not who the actor really is
+  (see the README FAQ on RBAC authentication). New
+  `test/requireActor.test.ts` (11 cases).
+
 - Watchdog executors take an optional `at` timestamp pin (backlog
   #925): `expireOverdueTasks(tasks, now, at)` and
   `actOnStaleTasks(tasks, action, maxAgeByState, now, at)` accept a

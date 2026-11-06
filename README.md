@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1086 tests, all local
+npm test   # 1097 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1731,6 +1731,18 @@ construction. The policy survives `toJSON()`/`fromJSON()` (tampered
 policies in stored snapshots are rejected) and re-attaches via
 `TaskLifecycle.fromHistory(id, log, { rolePolicy })`.
 
+A policy only constrains the events it lists; deployments that need
+every state change attributable can opt in to the blanket gate instead
+(or as well): constructing the task with
+`new TaskLifecycle(id, { requireActor: true })` makes any dispatch
+without an `actor` throw `actor required: …` (checked after the
+transition/RBAC/budget checks, before the idempotency key is consumed —
+a rejected dispatch leaves no trace and consumes nothing). A listed
+event still needs a matching actor, not just any actor. Like the payout
+switch, the gate is task configuration, not audit data: it is never
+written into the `toJSON()` snapshot, so a restored task re-enables it
+via `fromHistory(id, history, { requireActor: true })`.
+
 Honest caveat: this is a caller-supplied allowlist, not identity — the
 library records the actor string it is given but cannot verify who
 "senior-moderator" really is. It guarantees policy violations never
@@ -1843,9 +1855,11 @@ webhooks, retries). That remains the caller's infrastructure.
   No. `rolePolicy` is a caller-supplied actor allowlist, not identity:
   the library records the actor string it is given and guarantees a
   policy violation never dispatches, but it cannot verify who
-  `"senior-moderator"` really is. Authentication belongs to the
-  deployment in front of the library; see "Event-level RBAC" and
-  SECURITY.md.
+  `"senior-moderator"` really is. The same holds for the `requireActor`
+  opt-in: it guarantees every dispatch carries a non-empty actor
+  string, not that the string names the real caller. Authentication
+  belongs to the deployment in front of the library; see "Event-level
+  RBAC" and SECURITY.md.
 
 ## Limitations (honest)
 
@@ -1901,7 +1915,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1086 tests covering the happy path, reject→resubmit
+`npm test` runs 1097 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
