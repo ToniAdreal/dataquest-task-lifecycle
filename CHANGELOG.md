@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `tasksByPayoutRef` × `reconcilePayouts` pairing-consistency pins
+  (backlog #922): both helpers pair tasks against an external payout
+  reference by reading the `payoutRef` on the `PAYOUT_COMPLETE`
+  entry, but nothing pinned that they cannot drift apart — the
+  per-reference listing and the matched / task-only / amount-mismatch
+  split are two spellings of one evidence rule. New
+  `test/tasksByPayoutRefReconcileConsistency.test.ts` pins the
+  existing semantics with no implementation change: over one shared
+  mixed batch, for every ref the listing's ids equal the ids of the
+  paired-group tasks whose completion entry carries that ref, a
+  shared ref selects both batch tasks in input order and both land in
+  `matched`, a no-ref PAID task enters `unreconciled` and no listing,
+  a ledger-only ref and a request-only ref (on a PAID or a non-PAID
+  task) select nothing, and the union over all refs equals the three
+  paired groups exactly once each.
+
 - `totalQuoted(tasks)` batch owed total (backlog #919): the pair of
   `totalPaidOut` and the batch form of the owed half that
   `payoutMismatch` compares per task. It sums the `quotedAmount` on
