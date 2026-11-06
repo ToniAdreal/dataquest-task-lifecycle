@@ -1051,6 +1051,102 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
 }
 
 /**
+ * Reconciliation helper: sum the quoted (owed) amounts across a batch
+ * of `PAID` tasks — the batch form of the owed half that
+ * {@link payoutMismatch} compares per task, and the pair of
+ * {@link totalPaidOut}. For each task it reads the `quotedAmount`
+ * recorded on its LAST `ACCEPT` entry (the same derivation
+ * {@link payoutMismatch} uses) and accumulates the sum in integer
+ * minor units ({@link toMinorUnits}), returning the total in major
+ * units — so no binary-float error can accumulate across the batch,
+ * however many tasks it holds.
+ *
+ * Honest accounting rules, all deliberate, aligned with
+ * {@link totalPaidOut}:
+ *  - only `PAID` tasks contribute; in-flight or otherwise-terminated
+ *    tasks are ignored — even one that already carries an `ACCEPT`
+ *    quote. A quote is a promise, not a settlement: the batch total
+ *    answers "what was owed on the tasks that actually settled", so
+ *    an in-flight quote never enters it. Callers that need the
+ *    in-flight owed total read each task's `ACCEPT` entry directly.
+ *  - a `PAID` task whose last `ACCEPT` entry carries no `quotedAmount`
+ *    contributes 0 — the library cannot observe the agreed price, so
+ *    this sums only what was recorded, not what was owed in the
+ *    abstract;
+ *  - the quote is read from the LAST `ACCEPT` entry: a re-quoted task
+ *    contributes its latest agreed price, never an earlier one. (The
+ *    live state machine permits only one `ACCEPT` per task —
+ *    `parseHistory` enforces the transition table — so in practice
+ *    the last entry is the only entry; the scan is written
+ *    last-wins so the rule stays true for any history the reader
+ *    accepts.)
+ *  - per-entry amounts are stored verbatim after `dispatch()`
+ *    validates them as minor-unit amounts (at most 2 decimal places);
+ *    a legacy entry read from an old snapshot with sub-cent precision
+ *    is rounded to the nearest cent per entry by {@link toMinorUnits}
+ *    (see {@link TaskHistoryEntry.quotedAmount});
+ *  - empty input returns 0.
+ *
+ * Overflow is fail-fast, not silent, with the same shape as
+ * {@link totalPaidOut}: `dispatch()` cannot write a giant amount (its
+ * minor-unit round-trip gate rejects it), but a legacy snapshot only
+ * checks that `quotedAmount` is finite and ≥ 0, so a legacy `1e308`
+ * entry rehydrates fine and its minor-unit conversion overflows to
+ * `Infinity`. Summing such a value — or a batch whose individually
+ * finite minor-unit amounts sum past the finite range — throws
+ * `total quoted computation overflowed: inputs too large` instead of
+ * returning `Infinity` and poisoning a reconciliation total. The
+ * check runs after every addition, so a single overflowing entry is
+ * caught at its own addition rather than only at the return, and no
+ * partial total is ever returned. Since backlog #844,
+ * `toMinorUnits` itself fails fast on the conversion overflow, so the
+ * single-entry case is translated back into this same message here —
+ * the read-side error contract mirrors `totalPaidOut`; only the
+ * accumulation case still relies on the per-addition check. This
+ * changes only the read side: legacy snapshots stay readable (their
+ * acceptance is unchanged); only summing them fails, loudly.
+ *
+ * Together with {@link totalPaidOut} this closes the batch
+ * quoted-vs-settled comparison: `totalQuoted(tasks) -
+ * totalPaidOut(tasks)` is the batch's net owed-minus-settled gap,
+ * equal to the sum of `quoted - paid` over the tasks
+ * {@link mismatchedPayouts} flags (each {@link payoutMismatch}
+ * `delta` is `paid - quoted`, so the batch gap is the negated sum of
+ * the per-task deltas).
+ *
+ * Pure: reads the tasks, never mutates or dispatches.
+ */
+export function totalQuoted(tasks: readonly TaskLifecycle[]): number {
+  let totalMinorUnits = 0;
+  for (const task of tasks) {
+    if (task.state !== "PAID") continue;
+    let accept: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "ACCEPT") accept = entry;
+    }
+    if (accept?.quotedAmount !== undefined) {
+      // The converter fails fast on a legacy giant (backlog #844); a
+      // quoted entry's conversion failure is this function's own
+      // overflow error, mirroring totalPaidOut's #838 contract.
+      let entryMinorUnits: number;
+      try {
+        entryMinorUnits = toMinorUnits(accept.quotedAmount);
+      } catch {
+        throw new Error("total quoted computation overflowed: inputs too large");
+      }
+      totalMinorUnits += entryMinorUnits;
+      if (!Number.isFinite(totalMinorUnits)) {
+        throw new Error("total quoted computation overflowed: inputs too large");
+      }
+    }
+  }
+  if (!Number.isFinite(totalMinorUnits)) {
+    throw new Error("total quoted computation overflowed: inputs too large");
+  }
+  return totalMinorUnits / 100;
+}
+
+/**
  * One task's quoted-vs-settled discrepancy, as returned by
  * {@link payoutMismatch}.
  */

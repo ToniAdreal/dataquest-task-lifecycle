@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1049 tests, all local
+npm test   # 1064 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1057,6 +1057,31 @@ library cannot compare what it cannot observe), or when
 `quoted === paid` exactly. `delta` is `paid - quoted` rounded to cents:
 negative means underpaid, positive overpaid.
 
+The batch form of the owed half is `totalQuoted()`: it sums the last
+`ACCEPT` quote across `PAID` tasks in integer minor units, the exact
+pair of `totalPaidOut()`:
+
+```ts
+import { totalPaidOut, totalQuoted } from "dataquest-task-lifecycle";
+
+totalQuoted(allTasks); // => 220.0 — sum of recorded ACCEPT quotes on PAID tasks
+totalQuoted(allTasks) - totalPaidOut(allTasks); // => net owed-minus-settled gap
+```
+
+It follows the same honest rules as `totalPaidOut()`: only `PAID`
+tasks contribute — a quote on an in-flight task is a promise, not a
+settlement, so it never enters the total; a `PAID` task whose last
+`ACCEPT` carries no quote contributes 0; a `quotedAmount` recorded on
+any other event is ignored (the field is generic dispatch metadata);
+and overflow is fail-fast with
+`total quoted computation overflowed: inputs too large`. On a batch
+where every task carries both amounts, the net gap equals the sum of
+`quoted - paid` over the tasks `mismatchedPayouts()` flags — each
+`payoutMismatch()` delta is `paid - quoted`, so the batch gap is the
+negated sum of the per-task deltas. A quoteless or unpaid task still
+counts in the batch totals but is invisible to `payoutMismatch()`,
+so it sits outside that identity by construction.
+
 ### Payout webhooks
 
 The in-process `subscribe()` hook cannot notify anything outside the
@@ -1858,7 +1883,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1049 tests covering the happy path, reject→resubmit
+`npm test` runs 1064 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -1934,7 +1959,13 @@ entry, toJSON/fromJSON and NDJSON round-trips, malformed-quote snapshot
 rejection, hash-chain commitment with legacy canonical bytes unchanged,
 `payoutMismatch`: underpaid negative delta / overpaid positive delta,
 exact-settlement and missing-amount and non-PAID undefined, and
-`mismatchedPayouts` mixed-batch screening with purity, plus the payout
+`mismatchedPayouts` mixed-batch screening with purity, plus
+`totalQuoted`: per-PAID-task last-ACCEPT sums, quoteless-ACCEPT as 0,
+non-PAID exclusion, non-ACCEPT quote ignored, second-ACCEPT
+impossibility pinning last-wins by construction, legacy-giant and
+accumulation-only overflow fail-fast, batch-gap identity against
+`totalPaidOut` and the per-task deltas, cent-exact multi-task sums,
+and purity with rehydrated tasks, and the payout
 webhook carrying the same derived quote (`quotedAmount`: canonical
 key order after `payoutAmount`, signature-covered with tamper
 rejection, whole-key omission when the last ACCEPT entry is quoteless,

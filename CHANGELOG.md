@@ -9,6 +9,24 @@ change type; no entry describes a feature that is not in the history.
 
 ## [Unreleased]
 
+### Added
+
+- `totalQuoted(tasks)` batch owed total (backlog #919): the pair of
+  `totalPaidOut` and the batch form of the owed half that
+  `payoutMismatch` compares per task. It sums the `quotedAmount` on
+  each `PAID` task's last `ACCEPT` entry in integer minor units and
+  returns major units, with the same honest rules as `totalPaidOut`
+  — only `PAID` tasks contribute, a quoteless `ACCEPT` contributes 0,
+  a `quotedAmount` on a non-`ACCEPT` entry is ignored, and overflow
+  is fail-fast with `total quoted computation overflowed: inputs too
+  large` (legacy `1e308` quotes and accumulation-only overflow both
+  throw, never a silent `Infinity`). On a batch where every task
+  carries both amounts, `totalQuoted - totalPaidOut` equals the sum
+  of `quoted - paid` over the tasks `mismatchedPayouts` flags.
+  `test/totalQuoted.test.ts` pins the 15 cases, including the
+  premise that a second `ACCEPT` is impossible through the live
+  machine, so last-wins is by construction.
+
 ### Fixed
 
 - `toMinorUnits` rejects non-finite input (backlog #844): the

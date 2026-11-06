@@ -27,6 +27,7 @@ export {
   tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
+  totalQuoted,
   toMinorUnits,
   transition,
   transitionTable,
