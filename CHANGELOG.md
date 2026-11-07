@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `diffTaskSnapshots` gains an `idempotencyKeysChanged` dimension
+  (backlog #963): the consumed idempotency-key set is now compared
+  order-insensitively (duplicates collapse, a snapshot without the
+  field counts as the empty set), so a key consumed — or dropped on
+  restore — between two stored snapshots is visible in the diff as
+  a plain boolean. The key set is task state, not fixed
+  configuration: it grows with every keyed dispatch, which is why
+  it is reported while the budgets and the role policy stay
+  deliberately excluded (the #890 config pins are updated to the
+  new semantics). New `test/diffTaskSnapshotsIdempotencyKeys.test.ts`
+  covers key added/dropped, same-set reorder, identical snapshots,
+  legacy no-field snapshots, the empty-array/no-field equivalence,
+  duplicate keys, orthogonality to the other five dimensions, and
+  co-occurrence with a state change and with history appends. This
+  mirrors the sibling `escrow-state-machine-ts` repo's
+  `diffEscrowSnapshots` dimension of the same name (backlog #959).
+
 - CLI demo gains a `totalQuoted` quoted-total branch (backlog #946):
   the finance pass now also sums the owed half of the settlement
   batch — `totalQuoted()` over the five screened tasks plus one more

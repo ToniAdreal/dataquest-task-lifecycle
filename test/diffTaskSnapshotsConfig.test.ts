@@ -7,12 +7,21 @@ import type { TaskLifecycleOptions } from "../src/index.js";
  * Backlog #890 — `diffTaskSnapshots` deliberately ignores configuration.
  *
  * The `diffTaskSnapshots` JSDoc states that the configuration fields
- * (`maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`,
- * `idempotencyKeys`) are deliberately not reported: a diff answers
- * "what moved since the last snapshot", and configuration is not task
- * state. Until now no test backed that exclusion, so a future change
- * that "helpfully" reported a budget or policy change would drift the
- * behaviour with nothing turning red.
+ * (`maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`)
+ * are deliberately not reported: a diff answers "what moved since
+ * the last snapshot", and configuration is not task state. Until now
+ * no test backed that exclusion, so a future change that "helpfully"
+ * reported a budget or policy change would drift the behaviour with
+ * nothing turning red.
+ *
+ * The consumed idempotency-key set was originally pinned here as a
+ * fifth excluded field, but backlog #963 moved it to the reported
+ * side: unlike the budgets and the role policy it is not fixed
+ * configuration — it grows with every keyed dispatch, so it is task
+ * state. The key cases below now assert `idempotencyKeysChanged`
+ * (see `test/diffTaskSnapshotsIdempotencyKeys.test.ts` for the full
+ * dimension coverage); the four genuine configuration fields stay
+ * pinned as excluded, including in the combined cases.
  *
  * These tests pin the existing semantics only and change no
  * implementation. Each single-field test first asserts the two
@@ -79,41 +88,49 @@ test("diffTaskSnapshots: only rolePolicy differs -> empty diff", () => {
   assert.deepEqual(diffTaskSnapshots(a.toJSON(), b.toJSON()), {});
 });
 
-test("diffTaskSnapshots: only consumed idempotencyKeys differ -> empty diff", () => {
+test("diffTaskSnapshots: only consumed idempotencyKeys differ -> only idempotencyKeysChanged (backlog #963)", () => {
   const a = new TaskLifecycle("t-cfg-keys", { idempotencyKeys: ["k-a"] });
   const b = new TaskLifecycle("t-cfg-keys", { idempotencyKeys: ["k-b"] });
   assert.deepEqual(a.toJSON().idempotencyKeys, ["k-a"]);
   assert.deepEqual(b.toJSON().idempotencyKeys, ["k-b"]);
-  assert.deepEqual(diffTaskSnapshots(a.toJSON(), b.toJSON()), {});
+  assert.deepEqual(diffTaskSnapshots(a.toJSON(), b.toJSON()), {
+    idempotencyKeysChanged: true,
+  });
 });
 
-test("diffTaskSnapshots: all five configuration fields differ at once -> empty diff", () => {
+test("diffTaskSnapshots: all five configuration fields differ at once -> only idempotencyKeysChanged", () => {
   const a = new TaskLifecycle("t-cfg-all", CONFIG_A);
   const b = new TaskLifecycle("t-cfg-all", CONFIG_B);
   assert.equal(a.toJSON().maxResubmits, 3);
   assert.equal(b.toJSON().maxResubmits, 5);
   assert.deepEqual(a.toJSON().rolePolicy, { PUBLISH: ["admin"] });
   assert.deepEqual(b.toJSON().rolePolicy, { PUBLISH: ["researcher"] });
-  assert.deepEqual(diffTaskSnapshots(a.toJSON(), b.toJSON()), {});
+  assert.deepEqual(a.toJSON().idempotencyKeys, ["cfg-a"]);
+  assert.deepEqual(b.toJSON().idempotencyKeys, ["cfg-b"]);
+  assert.deepEqual(diffTaskSnapshots(a.toJSON(), b.toJSON()), {
+    idempotencyKeysChanged: true,
+  });
 });
 
-test("diffTaskSnapshots: config change plus a dispatch reports only state and history", () => {
+test("diffTaskSnapshots: config change plus a dispatch reports state, history, and the key change", () => {
   const before = new TaskLifecycle("t-cfg-plus-state", CONFIG_A).toJSON();
   const afterTask = new TaskLifecycle("t-cfg-plus-state", CONFIG_B);
   afterTask.dispatch("PUBLISH", { actor: "researcher" });
   const diff = diffTaskSnapshots(before, afterTask.toJSON());
   assert.deepEqual(Object.keys(diff).sort(), [
     "historyAppended",
+    "idempotencyKeysChanged",
     "stateChanged",
   ]);
   assert.deepEqual(diff.stateChanged, { from: "DRAFT", to: "OPEN" });
   assert.equal(diff.historyAppended?.entries.length, 1);
   assert.equal(diff.historyAppended?.entries[0].event, "PUBLISH");
+  assert.equal(diff.idempotencyKeysChanged, true);
   assert.equal(diff.payoutChanged, undefined);
   assert.equal(diff.slaChanged, undefined);
 });
 
-test("diffTaskSnapshots: config change plus dispatch plus SLA deadline reports only state, history, and SLA", () => {
+test("diffTaskSnapshots: config change plus dispatch plus SLA deadline reports state, history, SLA, and the key change", () => {
   const before = new TaskLifecycle("t-cfg-plus-sla", CONFIG_A).toJSON();
   const afterTask = new TaskLifecycle("t-cfg-plus-sla", CONFIG_B);
   afterTask.dispatch("PUBLISH", { actor: "researcher" });
@@ -121,6 +138,7 @@ test("diffTaskSnapshots: config change plus dispatch plus SLA deadline reports o
   const diff = diffTaskSnapshots(before, afterTask.toJSON());
   assert.deepEqual(Object.keys(diff).sort(), [
     "historyAppended",
+    "idempotencyKeysChanged",
     "slaChanged",
     "stateChanged",
   ]);
@@ -129,5 +147,6 @@ test("diffTaskSnapshots: config change plus dispatch plus SLA deadline reports o
     from: {},
     to: { OPEN: "2026-12-01T00:00:00.000Z" },
   });
+  assert.equal(diff.idempotencyKeysChanged, true);
   assert.equal(diff.payoutChanged, undefined);
 });

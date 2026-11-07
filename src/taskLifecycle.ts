@@ -2188,6 +2188,20 @@ function canonicalDiffJson(value: unknown): string {
 }
 
 /**
+ * Order-insensitive key for a consumed idempotency-key set, used only
+ * by {@link diffTaskSnapshots}: duplicates collapse and the remaining
+ * keys sort, so two snapshots carrying the same set in a different
+ * order compare equal. A snapshot without the field (legacy, or no
+ * key consumed yet) is the empty set, so "no field" and an empty
+ * array are the same state. This mirrors the sibling
+ * `escrow-state-machine-ts` repo's `idempotencyKeysKey` helper.
+ */
+function idempotencyKeysKey(keys: readonly string[] | undefined): string {
+  if (keys === undefined) return "[]";
+  return JSON.stringify([...new Set(keys)].sort());
+}
+
+/**
  * Settled payout amount recorded in a snapshot: the `payoutAmount` on
  * the last `PAYOUT_COMPLETE` history entry, or `undefined` when the
  * snapshot has no such entry (or that entry carries no amount). This
@@ -2265,6 +2279,14 @@ export interface TaskSnapshotDiff {
     from: Partial<Record<TaskState, string>>;
     to: Partial<Record<TaskState, string>>;
   };
+  /**
+   * Consumed idempotency-key set moved (a key consumed, or a key
+   * dropped on restore). Reported as a plain boolean: the set is
+   * compared order-insensitively, and a snapshot without the field
+   * (legacy, or no key consumed yet) compares as the empty set, so
+   * "no field" and an empty array are the same state.
+   */
+  idempotencyKeysChanged?: boolean;
 }
 
 /**
@@ -2284,11 +2306,20 @@ export interface TaskSnapshotDiff {
  * amount (see {@link snapshotPayoutAmount}), the `slaDeadlines` map
  * as a whole (setting or clearing a deadline is a change even though
  * it appends no history entry — `setSlaDeadline` /
- * `clearSlaDeadline` touch no audit log), and history appends. `v`
- * and the configuration fields (`maxResubmits`, `maxDisputes`,
- * `maxVisitsByState`, `rolePolicy`, `idempotencyKeys`) are
- * deliberately not reported: the version is schema metadata, and the
- * rest is task configuration, not task state.
+ * `clearSlaDeadline` touch no audit log), the consumed
+ * idempotency-key set as a whole (compared order-insensitively; a
+ * snapshot without the field is the empty set), and history appends.
+ * `v` and the configuration fields (`maxResubmits`, `maxDisputes`,
+ * `maxVisitsByState`, `rolePolicy`) are deliberately not reported:
+ * the version is schema metadata, and the rest is task
+ * configuration, not task state. The idempotency-key set is the
+ * exception to that exclusion: unlike the budgets and the role
+ * policy, it is not fixed configuration — it grows with every
+ * keyed dispatch, so it is task state, and a key consumed (or
+ * dropped on restore) between two stored snapshots is a change
+ * worth reporting. This mirrors the sibling
+ * `escrow-state-machine-ts` repo's `diffEscrowSnapshots`, which
+ * reports the same dimension for the same reason.
  *
  * History is append-only, so `b`'s history must be an extension of
  * `a`'s: same entries in the same order, then zero or more new ones
@@ -2384,6 +2415,9 @@ export function diffTaskSnapshots(
   };
   if (canonicalDiffJson(slaFrom) !== canonicalDiffJson(slaTo)) {
     diff.slaChanged = { from: slaFrom, to: slaTo };
+  }
+  if (idempotencyKeysKey(a.idempotencyKeys) !== idempotencyKeysKey(b.idempotencyKeys)) {
+    diff.idempotencyKeysChanged = true;
   }
   return diff;
 }

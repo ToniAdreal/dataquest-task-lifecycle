@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1122 tests, all local
+npm test   # 1133 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -753,8 +753,12 @@ to present, since the machine permits a single `ACCEPT` and there
 is no re-price path),
 `payoutChanged` (the settled `PAYOUT_COMPLETE` amount, `undefined`
 when none is recorded), `historyAppended` (the appended entries with
-their seq range), and `slaChanged` (the full before/after deadline
-maps). Two equal snapshots diff to `{}`. History is append-only: a
+their seq range), `slaChanged` (the full before/after deadline
+maps), and `idempotencyKeysChanged` (a plain boolean, true when the
+consumed idempotency-key set moved — compared order-insensitively,
+and a snapshot without the field counts as the empty set, so a key
+consumed or dropped between two stored snapshots is visible in the
+diff). Two equal snapshots diff to `{}`. History is append-only: a
 rewritten, truncated, or seq-breaking later history throws instead of
 being reported as progress, and snapshots of different tasks throw.
 The comparison is pure and does not re-validate transitions or the
@@ -1930,7 +1934,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1122 tests covering the happy path, reject→resubmit
+`npm test` runs 1133 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
