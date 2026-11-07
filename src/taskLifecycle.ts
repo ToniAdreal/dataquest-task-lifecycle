@@ -2197,6 +2197,27 @@ function snapshotPayoutAmount(snapshot: TaskSnapshot): number | undefined {
 }
 
 /**
+ * Quoted (owed) amount recorded in a snapshot: the `quotedAmount` on
+ * the last `ACCEPT` entry, or `undefined` when the snapshot has no
+ * such entry (or that entry carries no amount). This is the same
+ * evidence {@link payoutMismatch} and {@link totalQuoted} read — a
+ * task that was never accepted, or accepted without a quote, has no
+ * quoted amount — except that a missing amount stays `undefined`
+ * here rather than counting as 0, so "no quote recorded" and
+ * "quoted 0" remain distinguishable in a diff. The live machine
+ * permits only one `ACCEPT` per task, so a quote can only appear
+ * (absent to present), never move: `last` is by construction, not a
+ * re-quote rule.
+ */
+function snapshotQuotedAmount(snapshot: TaskSnapshot): number | undefined {
+  let quoted: number | undefined;
+  for (const entry of snapshot.history) {
+    if (entry.event === "ACCEPT") quoted = entry.quotedAmount;
+  }
+  return quoted;
+}
+
+/**
  * Structured difference between two snapshots of the same task, as
  * reported by {@link diffTaskSnapshots}. Only keys that actually
  * changed are present; two equal snapshots diff to `{}`.
@@ -2209,6 +2230,13 @@ export interface TaskSnapshotDiff {
    * `undefined` means no settled amount recorded in that snapshot.
    */
   payoutChanged?: { from: number | undefined; to: number | undefined };
+  /**
+   * Quoted (owed) amount moved, per {@link snapshotQuotedAmount}:
+   * `undefined` means no quote recorded in that snapshot. In live
+   * use this only ever reports absent to present — the quote lands
+   * on the single `ACCEPT` entry — never a re-price.
+   */
+  quoteChanged?: { from: number | undefined; to: number | undefined };
   /**
    * History entries appended in `b` beyond `a`'s history, with the
    * seq range they cover. `fromSeq` is the first appended entry's
@@ -2240,7 +2268,10 @@ export interface TaskSnapshotDiff {
  * snapshot carries a settled payout and a per-state SLA map instead
  * of a single deadline and a role policy.
  *
- * Dimensions compared, and only these: live `state`, settled payout
+ * Dimensions compared, and only these: live `state`, quoted amount
+ * (see {@link snapshotQuotedAmount} — only ever absent to present,
+ * since the live machine permits a single `ACCEPT` per task and
+ * there is no re-price path), settled payout
  * amount (see {@link snapshotPayoutAmount}), the `slaDeadlines` map
  * as a whole (setting or clearing a deadline is a change even though
  * it appends no history entry — `setSlaDeadline` /
@@ -2323,6 +2354,11 @@ export function diffTaskSnapshots(
   const payoutTo = snapshotPayoutAmount(b);
   if (payoutFrom !== payoutTo) {
     diff.payoutChanged = { from: payoutFrom, to: payoutTo };
+  }
+  const quoteFrom = snapshotQuotedAmount(a);
+  const quoteTo = snapshotQuotedAmount(b);
+  if (quoteFrom !== quoteTo) {
+    diff.quoteChanged = { from: quoteFrom, to: quoteTo };
   }
   if (appended.length > 0) {
     diff.historyAppended = {

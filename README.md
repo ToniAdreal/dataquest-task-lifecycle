@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1098 tests, all local
+npm test   # 1108 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -745,6 +745,10 @@ without `v` are unaffected.
 To answer "what moved since the last snapshot I stored" without
 hand-written field compares, `diffTaskSnapshots(before, after)`
 returns only the keys that actually changed: `stateChanged`,
+`quoteChanged` (the quoted amount from the last `ACCEPT` entry,
+`undefined` when none is recorded — in live use only ever absent
+to present, since the machine permits a single `ACCEPT` and there
+is no re-price path),
 `payoutChanged` (the settled `PAYOUT_COMPLETE` amount, `undefined`
 when none is recorded), `historyAppended` (the appended entries with
 their seq range), and `slaChanged` (the full before/after deadline
@@ -1918,7 +1922,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1098 tests covering the happy path, reject→resubmit
+`npm test` runs 1108 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
