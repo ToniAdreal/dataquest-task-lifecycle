@@ -296,6 +296,7 @@ Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):
   parseMinorUnits("  12.34  ") = 1234
   parseMinorUnits("-0.00") = 0
   finance-pass total: parseMinorUnits("16349.00") = 1634900 (the same 1634900 integer cents the conversion branch computed from totalPaidOut 16349)
+  quoted total: parseMinorUnits("6500.00") = 650000 (the same 650000 integer cents toMinorUnits(totalQuotedValue) computed from totalQuoted 6500)
   parseMinorUnits("12.345") rejected: invalid minor units amount: "12.345" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (sub-cent precision is a caller error, not a rounded amount)
   parseMinorUnits("1,234.56") rejected: invalid minor units amount: "1,234.56" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (a thousands separator is not a strict decimal amount)
   parseMinorUnits("1.2e3") rejected: invalid minor units amount: "1.2e3" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (scientific notation is not a strict decimal amount)
@@ -961,7 +962,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 840);
+  assert.equal(lines.length, 841);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1623,8 +1624,10 @@ test("demo shows the minor-unit parsing branch in-process: reconciliation string
   const {
     parseMinorUnitsCases,
     parseMinorUnitsTotal,
+    parseMinorUnitsQuotedTotal,
     parseMinorUnitsRejected,
     minorUnitsConversion,
+    totalQuoted,
     lines,
   } = await runDemo();
   const text = lines.join("\n");
@@ -1649,6 +1652,13 @@ test("demo shows the minor-unit parsing branch in-process: reconciliation string
   // branch computed from the numeric total — the two directions of
   // the money pipeline agree.
   assert.equal(parseMinorUnitsTotal, minorUnitsConversion.minor);
+  // The quoted total gets the same string cross-check, pinned right
+  // after the finance-pass total row: "6500.00" must parse to the
+  // integer `toMinorUnits(totalQuoted)` computes, so a drift in
+  // either the quoted-total branch or the parser shows up here.
+  assert.equal(parseMinorUnitsQuotedTotal, 650000);
+  assert.equal(parseMinorUnitsQuotedTotal, toMinorUnits(totalQuoted));
+  assert.equal(parseMinorUnits("6500.00"), parseMinorUnitsQuotedTotal);
   assert.deepEqual(
     parseMinorUnitsRejected.map((r) => r.input),
     ["12.345", "1,234.56", "1.2e3"],
@@ -1695,6 +1705,15 @@ test("demo shows the minor-unit parsing branch in-process: reconciliation string
   );
   assert.match(
     text,
+    /quoted total: parseMinorUnits\("6500\.00"\) = 650000 \(the same 650000 integer cents toMinorUnits\(totalQuotedValue\) computed from totalQuoted 6500\)/,
+  );
+  assert.ok(
+    text.indexOf('quoted total: parseMinorUnits("6500.00")') >
+      text.indexOf('finance-pass total: parseMinorUnits("16349.00")'),
+    "quoted-total cross-check line must follow the finance-pass total line",
+  );
+  assert.match(
+    text,
     /parseMinorUnits\("12\.345"\) rejected: invalid minor units amount: "12\.345" is not a strict decimal amount \(optional minus, at most 2 decimal places, no thousands separator, no scientific notation\) \(sub-cent precision is a caller error, not a rounded amount\)/,
   );
   assert.match(
@@ -1715,10 +1734,10 @@ test("demo minor-unit parsing segment is deterministic: two runs print byte-iden
     );
   const a = parsingLines((await runDemo()).lines);
   const b = parsingLines((await runDemo()).lines);
-  // Header + 9 vector lines + finance-pass total line + 3 rejection
-  // lines + parse note; every value is a pinned literal, so no
-  // normalization is needed.
-  assert.equal(a.length, 15);
+  // Header + 9 vector lines + finance-pass total line + quoted-total
+  // line + 3 rejection lines + parse note; every value is a pinned
+  // literal, so no normalization is needed.
+  assert.equal(a.length, 16);
   assert.deepEqual(a, b);
 });
 
@@ -3379,7 +3398,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 840);
+  assert.equal(out.trimEnd().split("\n").length, 841);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

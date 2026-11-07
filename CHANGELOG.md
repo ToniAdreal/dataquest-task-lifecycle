@@ -101,6 +101,18 @@ change type; no entry describes a feature that is not in the history.
   premise that a second `ACCEPT` is impossible through the live
   machine, so last-wins is by construction.
 
+- CLI demo parsing branch gains a quoted-total string cross-check
+  (backlog #960): the demo's minor-unit parsing segment already
+  parsed the finance-pass total as a string ("16349.00" -> 1634900,
+  cross-checked against the conversion branch), but the #946-pinned
+  quoted total 6500 had no string form in the segment. It now
+  parses "6500.00" -> 650000 and asserts equality with
+  `toMinorUnits(totalQuotedValue)`, printed as a `quoted total:`
+  line immediately after the finance-pass total line.
+  `DemoResult` gains `parseMinorUnitsQuotedTotal`; the demo test
+  pins the value, the library cross-check, the printed line, and
+  its order after the finance-pass total row.
+
 ### Fixed
 
 - `totalQuoted` JSDoc narrows the batch-gap identity's premise

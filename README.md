@@ -86,7 +86,9 @@ rejected fail-fast — a minor-unit parsing branch that turns
 reconciliation strings into integer cents with `parseMinorUnits` —
 nine fixed vectors (positive, zero, negative, whitespace-trimmed,
 `-0.00` without a minus sign) plus the finance-pass total itself as
-a string, and three illegal shapes pinned to their exact fail-fast
+a string and the quoted total itself as a string ("6500.00" →
+650000, cross-checked against `toMinorUnits(totalQuotedValue)`),
+and three illegal shapes pinned to their exact fail-fast
 wording — a dispatch subscription branch
 that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
