@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `summarizeTaskSettlements(tasks)` batch settlement summary
+  (backlog #966): the one-call form of the `totalQuoted` /
+  `totalPaidOut` pair — task and `PAID` counts, `quotedTotal` and
+  `paidTotal` in integer minor units, the `gap`
+  (`quotedTotal - paidTotal`), the `mismatched` count (the
+  `payoutMismatch` population), and the `unquotedPaid` /
+  `unquotedPaidTotal` split that makes the gap identity visible in
+  the numbers (`gap + unquotedPaidTotal` is the negated sum of the
+  per-task deltas for every batch). Single-currency by
+  construction — tasks carry no currency field, so multi-currency
+  batches must be grouped by the caller first — and overflow is
+  fail-fast, mirroring the two helpers it builds on. New
+  `test/summarizeTaskSettlements.test.ts` pins the demo-batch
+  numbers (6 tasks, 3 PAID, quoted 650000, paid 1634900, gap
+  -984900, 1 mismatched, 1 unquoted PAID at 1009850), the empty
+  batch, the two-unquoted deviation split, the all-quoted
+  identity, non-PAID exclusion, minor-unit integer-ness
+  (0.1 + 0.2), the quote-without-payout case, exact settlement,
+  legacy-giant overflow, and purity. A
+  `summarizeTaskSettlements` benchmark row measures the same shape
+  over a fixed 10-task mixed batch.
+
 - `diffTaskSnapshots` gains an `idempotencyKeysChanged` dimension
   (backlog #963): the consumed idempotency-key set is now compared
   order-insensitively (duplicates collapse, a snapshot without the

@@ -43,7 +43,15 @@
  *      quote, 2 non-PAID carrying quotes that must contribute 0), so
  *      the row also pins the zero-contribution rules, not just the
  *      summation. The empty batch is pinned to 0 once, outside the
- *      timed loop. This is the batch pass finance reconciliation runs
+ *      timed loop. `summarizeTaskSettlements` is the one-call form of
+ *      that pair, measured on its own fixed mixed batch of 10 tasks
+ *      (6 PAID quoted-and-settled, 2 of them mismatched, 2 PAID
+ *      without a quote, 2 non-PAID carrying quotes that must
+ *      contribute 0), self-checked per iteration against the
+ *      hand-computed summary — counts and all five money figures in
+ *      minor units, plus the gap identity — with the empty batch
+ *      pinned to the all-zero summary once, outside the timed loop.
+ *      This is the batch pass finance reconciliation runs
  *      over a whole task set, as opposed to the per-task webhook paths
  *      above. A combined
  *      row runs the whole forwarder-to-reconciliation chain over the
@@ -1398,6 +1406,7 @@ import {
   replay,
   staleTasks,
   stateDiagram,
+  summarizeTaskSettlements,
   TaskLifecycle,
   tasksApproachingDeadline,
   tasksByActor,
@@ -1421,6 +1430,7 @@ import {
   type SubscribeOptions,
   type TaskEvent,
   type TaskHistoryEntry,
+  type TaskSettlementsSummary,
   type TaskSnapshot,
   type TaskState,
   type TransitionEdge,
@@ -1993,6 +2003,99 @@ if (totalQuoted([]) !== 0) {
   throw new Error(
     "benchmark fixture failed: totalQuoted of an empty batch is not 0",
   );
+}
+
+// summarizeTaskSettlements fixture: the one-call batch summary over a
+// fixed MIXED batch of 10 tasks, reusing the same shapes totalQuoted
+// is defined over, plus two mismatches so the summary's mismatch
+// count and gap identity are both pinned:
+//   - STS-01..STS-03: PAID, quoted == paid (100 / 200 / 150) -> exact;
+//   - STS-04: PAID, quoted 300, paid 280 -> mismatched, delta -20;
+//   - STS-05: PAID, quoted 250, paid 260 -> mismatched, delta +10;
+//   - STS-06 / STS-07: PAID with no quote, paid 90 / 60 -> the
+//     unquoted split;
+//   - STS-08: PAID, quoted == paid (175) -> exact;
+//   - STS-09: ACCEPTED (in flight) carrying a 999 quote -> 0;
+//   - STS-10: ABANDONED (terminated the other way) carrying an 888
+//     quote -> 0.
+// Hand-computed expectation, in integer minor units — never derived
+// by calling summarizeTaskSettlements itself:
+//   tasks 10, paid 8,
+//   quotedTotal (100+200+150+300+250+175)*100 = 117500,
+//   paidTotal (100+200+150+280+260+90+60+175)*100 = 131500,
+//   gap 117500 - 131500 = -14000,
+//   mismatched 2, unquotedPaid 2, unquotedPaidTotal (90+60)*100 = 15000.
+// The gap identity is pinned too: gap + unquotedPaidTotal = 1000 is
+// the negated delta sum (-(-2000 + 1000) minor). The empty batch is
+// pinned to the all-zero summary once, outside the timed loop.
+const summarizeBatch: TaskLifecycle[] = [
+  buildPaidTask("BENCH-STS-01", { quotedAmount: 100, payoutAmount: 100 }),
+  buildPaidTask("BENCH-STS-02", { quotedAmount: 200, payoutAmount: 200 }),
+  buildPaidTask("BENCH-STS-03", { quotedAmount: 150, payoutAmount: 150 }),
+  buildPaidTask("BENCH-STS-04", { quotedAmount: 300, payoutAmount: 280 }),
+  buildPaidTask("BENCH-STS-05", { quotedAmount: 250, payoutAmount: 260 }),
+  buildPaidTask("BENCH-STS-06", { payoutAmount: 90 }),
+  buildPaidTask("BENCH-STS-07", { payoutAmount: 60 }),
+  buildPaidTask("BENCH-STS-08", { quotedAmount: 175, payoutAmount: 175 }),
+  buildQuotedNonPaidTask("BENCH-STS-09", 999, false),
+  buildQuotedNonPaidTask("BENCH-STS-10", 888, true),
+];
+const expectedTaskSettlementsSummary: TaskSettlementsSummary = {
+  tasks: 10,
+  paid: 8,
+  quotedTotal: 117500,
+  paidTotal: 131500,
+  gap: -14000,
+  mismatched: 2,
+  unquotedPaid: 2,
+  unquotedPaidTotal: 15000,
+};
+function checkTaskSettlementsSummary(
+  summary: TaskSettlementsSummary,
+): boolean {
+  return (
+    summary.tasks === expectedTaskSettlementsSummary.tasks &&
+    summary.paid === expectedTaskSettlementsSummary.paid &&
+    summary.quotedTotal === expectedTaskSettlementsSummary.quotedTotal &&
+    summary.paidTotal === expectedTaskSettlementsSummary.paidTotal &&
+    summary.gap === expectedTaskSettlementsSummary.gap &&
+    summary.mismatched === expectedTaskSettlementsSummary.mismatched &&
+    summary.unquotedPaid === expectedTaskSettlementsSummary.unquotedPaid &&
+    summary.unquotedPaidTotal ===
+      expectedTaskSettlementsSummary.unquotedPaidTotal
+  );
+}
+if (
+  summarizeBatch.length !== 10 ||
+  summarizeBatch
+    .slice(0, 8)
+    .some((t) => t.state !== "PAID" || t.history.length !== 8) ||
+  summarizeBatch[8]?.state !== "ACCEPTED" ||
+  summarizeBatch[8]?.history.length !== 2 ||
+  summarizeBatch[9]?.state !== "ABANDONED" ||
+  summarizeBatch[9]?.history.length !== 3 ||
+  !checkTaskSettlementsSummary(summarizeTaskSettlements(summarizeBatch))
+) {
+  throw new Error(
+    "benchmark fixture failed: summarizeTaskSettlements differs from the hand-computed expectation",
+  );
+}
+{
+  const empty = summarizeTaskSettlements([]);
+  if (
+    empty.tasks !== 0 ||
+    empty.paid !== 0 ||
+    empty.quotedTotal !== 0 ||
+    empty.paidTotal !== 0 ||
+    empty.gap !== 0 ||
+    empty.mismatched !== 0 ||
+    empty.unquotedPaid !== 0 ||
+    empty.unquotedPaidTotal !== 0
+  ) {
+    throw new Error(
+      "benchmark fixture failed: summarizeTaskSettlements of an empty batch is not all zeros",
+    );
+  }
 }
 
 // Settled amount of one PAID task, read from its last PAYOUT_COMPLETE
@@ -10004,6 +10107,18 @@ function benchTotalQuoted(): number {
   }, ITERATIONS);
 }
 
+function benchSummarizeTaskSettlements(): number {
+  return measure(() => {
+    if (
+      !checkTaskSettlementsSummary(summarizeTaskSettlements(summarizeBatch))
+    ) {
+      throw new Error(
+        "benchmark self-check failed: summarizeTaskSettlements",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchExpiredTasks(): number {
   return measure(() => {
     const out = expiredTasks(watchdogBatch, WATCHDOG_NOW);
@@ -11502,6 +11617,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks)", ops: benchNdjsonUnreconciledPayouts() },
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "totalQuoted (10 mixed tasks)", ops: benchTotalQuoted() },
+  { path: "summarizeTaskSettlements (10 mixed tasks)", ops: benchSummarizeTaskSettlements() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
   { path: "deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyResubmitDedupe() },

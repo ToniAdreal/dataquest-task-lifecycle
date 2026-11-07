@@ -1225,6 +1225,178 @@ export function totalQuoted(tasks: readonly TaskLifecycle[]): number {
 }
 
 /**
+ * One batch's quoted-vs-settled settlement summary, as returned by
+ * {@link summarizeTaskSettlements}. All money figures are integer
+ * minor units (cents) — the same {@link toMinorUnits} convention as
+ * {@link totalQuoted} and {@link totalPaidOut} — so no binary-float
+ * error can leak into a reconciliation total, however many tasks the
+ * batch holds.
+ */
+export interface TaskSettlementsSummary {
+  /** Number of tasks in the batch, of every state. */
+  tasks: number;
+  /** Number of `PAID` tasks in the batch. */
+  paid: number;
+  /** Sum of the last `ACCEPT` quotes across `PAID` tasks, in minor units. */
+  quotedTotal: number;
+  /** Sum of the recorded `PAYOUT_COMPLETE` amounts across `PAID` tasks, in minor units. */
+  paidTotal: number;
+  /**
+   * `quotedTotal - paidTotal`, in minor units: the batch's net
+   * owed-minus-settled gap. Negative means the batch settled more
+   * than it was quoted.
+   */
+  gap: number;
+  /**
+   * Number of `PAID` tasks whose settled amount differs from their
+   * quote — the {@link payoutMismatch} population, the same tasks
+   * {@link mismatchedPayouts} returns.
+   */
+  mismatched: number;
+  /**
+   * Number of `PAID` tasks with no recorded quote on their last
+   * `ACCEPT` entry (or no `ACCEPT` entry at all).
+   */
+  unquotedPaid: number;
+  /**
+   * Settled amount of the `unquotedPaid` tasks, in minor units — the
+   * part of `paidTotal` the gap cannot attribute to a quote.
+   */
+  unquotedPaidTotal: number;
+}
+
+/**
+ * Reconciliation helper: summarize a whole batch's quoted-vs-settled
+ * position in one call — the one-call form of the
+ * {@link totalQuoted} / {@link totalPaidOut} pair, plus the two
+ * splits a caller otherwise has to hand-scan for: how many `PAID`
+ * tasks actually mismatch their quote, and how much settled money
+ * has no recorded quote behind it. Until now a caller doing batch
+ * reconciliation had to run the three helpers and re-derive the
+ * quoteless deviation itself, and the gap's identity premise (every
+ * `PAID` task carries a quote) was scattered across
+ * {@link totalQuoted}'s documentation instead of being visible in
+ * the numbers.
+ *
+ * Honest accounting rules, all deliberate, aligned with
+ * {@link totalQuoted} and {@link totalPaidOut}:
+ *  - `tasks` counts every task in the batch, of every state; only
+ *    `PAID` tasks contribute to any money figure or to `paid`,
+ *    `mismatched`, or the `unquotedPaid*` counts — a quote on an
+ *    in-flight or otherwise-terminated task is a promise, not a
+ *    settlement, so it never enters a total;
+ *  - `quotedTotal` reads the quote from the LAST `ACCEPT` entry and
+ *    `paidTotal` from the `PAYOUT_COMPLETE` entry, the same
+ *    derivations `totalQuoted` and `totalPaidOut` use; a `PAID` task
+ *    with no recorded quote contributes 0 to `quotedTotal` and is
+ *    counted in `unquotedPaid`, with its settled amount in
+ *    `unquotedPaidTotal`;
+ *  - `gap` is `quotedTotal - paidTotal`, so the demo batch's gap
+ *    (-984900 minor units) is the same -9849 major units
+ *    `totalQuoted(tasks) - totalPaidOut(tasks)` reports;
+ *  - `mismatched` counts the tasks `payoutMismatch` flags — both
+ *    amounts recorded and different — so a task settled exactly as
+ *    quoted, or one missing either amount, is never counted.
+ *
+ * The gap identity, now visible in the numbers instead of only in
+ * documentation: `gap + unquotedPaidTotal` equals the negated sum of
+ * the per-task `payoutMismatch` deltas (in minor units), for every
+ * batch — the quoteless settled money is the only thing that can
+ * push the gap away from the mismatch sum. A batch where every
+ * `PAID` task carries a quote has `unquotedPaidTotal === 0`, so the
+ * gap is exactly the negated delta sum.
+ *
+ * Single-currency, by construction: tasks carry no currency field
+ * (the same no-currency convention as {@link toMinorUnits}), so the
+ * summary is a single-currency figure — a batch mixing currencies
+ * must be grouped by currency by the caller first, or the totals
+ * silently add unlike money.
+ *
+ * Overflow is fail-fast, not silent, with the same shape as
+ * {@link totalQuoted} and {@link totalPaidOut}: a legacy snapshot
+ * amount whose minor-unit conversion overflows, or a batch whose
+ * individually finite minor-unit amounts sum past the finite range,
+ * throws `task settlements summary computation overflowed: inputs
+ * too large` instead of returning a poisoned summary. The check runs
+ * after every addition, so a single overflowing entry is caught at
+ * its own addition rather than only at the return, and no partial
+ * summary is ever returned. This changes only the read side: legacy
+ * snapshots stay readable (their acceptance is unchanged); only
+ * summarizing them fails, loudly.
+ *
+ * Pure: reads the tasks, never mutates or dispatches. An empty input
+ * returns an all-zero summary.
+ */
+export function summarizeTaskSettlements(
+  tasks: readonly TaskLifecycle[],
+): TaskSettlementsSummary {
+  const overflow = (): Error =>
+    new Error(
+      "task settlements summary computation overflowed: inputs too large",
+    );
+  let paid = 0;
+  let quotedTotal = 0;
+  let paidTotal = 0;
+  let mismatched = 0;
+  let unquotedPaid = 0;
+  let unquotedPaidTotal = 0;
+  for (const task of tasks) {
+    if (task.state !== "PAID") continue;
+    paid += 1;
+    let accept: TaskHistoryEntry | undefined;
+    let complete: TaskHistoryEntry | undefined;
+    for (const entry of task.history) {
+      if (entry.event === "ACCEPT") accept = entry;
+      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+    }
+    let quotedMinorUnits = 0;
+    if (accept?.quotedAmount !== undefined) {
+      // The converter fails fast on a legacy giant (backlog #844); a
+      // quoted entry's conversion failure is this function's own
+      // overflow error, mirroring totalQuoted's #838 contract.
+      try {
+        quotedMinorUnits = toMinorUnits(accept.quotedAmount);
+      } catch {
+        throw overflow();
+      }
+    } else {
+      unquotedPaid += 1;
+    }
+    let paidMinorUnits = 0;
+    if (complete?.payoutAmount !== undefined) {
+      // Same fail-fast translation as the quoted half, mirroring
+      // totalPaidOut's contract.
+      try {
+        paidMinorUnits = toMinorUnits(complete.payoutAmount);
+      } catch {
+        throw overflow();
+      }
+    }
+    if (accept?.quotedAmount === undefined) {
+      unquotedPaidTotal += paidMinorUnits;
+      if (!Number.isFinite(unquotedPaidTotal)) throw overflow();
+    }
+    quotedTotal += quotedMinorUnits;
+    if (!Number.isFinite(quotedTotal)) throw overflow();
+    paidTotal += paidMinorUnits;
+    if (!Number.isFinite(paidTotal)) throw overflow();
+    if (payoutMismatch(task) !== undefined) mismatched += 1;
+  }
+  const gap = quotedTotal - paidTotal;
+  if (!Number.isFinite(gap)) throw overflow();
+  return {
+    tasks: tasks.length,
+    paid,
+    quotedTotal,
+    paidTotal,
+    gap,
+    mismatched,
+    unquotedPaid,
+    unquotedPaidTotal,
+  };
+}
+
+/**
  * One task's quoted-vs-settled discrepancy, as returned by
  * {@link payoutMismatch}.
  */

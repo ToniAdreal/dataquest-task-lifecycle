@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1133 tests, all local
+npm test   # 1145 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1119,6 +1119,32 @@ batch pins the shape, gap -9849 against a -249.5 delta sum, the
 counts in the batch totals but is invisible to `payoutMismatch()`,
 so it sits outside that identity by construction.
 
+The one-call form of that pair is `summarizeTaskSettlements()`: it
+returns the whole batch position at once — task and `PAID` counts,
+`quotedTotal` and `paidTotal` in integer minor units, the `gap`
+(`quotedTotal - paidTotal`), the `mismatched` count, and the
+`unquotedPaid` / `unquotedPaidTotal` split that makes the gap's
+identity visible in the numbers instead of only in documentation:
+`gap + unquotedPaidTotal` is the negated sum of the per-task
+`payoutMismatch()` deltas, for every batch.
+
+```ts
+import { summarizeTaskSettlements } from "dataquest-task-lifecycle";
+
+summarizeTaskSettlements(allTasks);
+// => { tasks: 6, paid: 3, quotedTotal: 650000, paidTotal: 1634900,
+//      gap: -984900, mismatched: 1, unquotedPaid: 1,
+//      unquotedPaidTotal: 1009850 }
+```
+
+The demo batch pins the shape: 6 tasks, 3 `PAID`, quoted 650000,
+paid 1634900, gap -984900, 1 mismatched (DEMO-005, delta -249.5),
+1 unquoted `PAID` task (DEMO-001, settled 10098.5 with no recorded
+quote). Single-currency by construction — tasks carry no currency
+field, so a batch mixing currencies must be grouped by currency by
+the caller first — and overflow is fail-fast, like the two helpers
+it builds on. An empty batch returns an all-zero summary.
+
 ### Payout webhooks
 
 The in-process `subscribe()` hook cannot notify anything outside the
@@ -1934,7 +1960,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1133 tests covering the happy path, reject→resubmit
+`npm test` runs 1145 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2024,7 +2050,14 @@ webhook carrying the same derived quote (`quotedAmount`: canonical
 key order after `payoutAmount`, signature-covered with tamper
 rejection, whole-key omission when the last ACCEPT entry is quoteless,
 zero quote not omitted, and last-ACCEPT-wins cross-checked against
-`payoutMismatch` on the same histories)), and the audit-history
+`payoutMismatch` on the same histories)), and the batch settlement
+summary (`summarizeTaskSettlements`: demo-batch numbers pinned in
+integer minor units, empty batch all zeros, two-unquoted deviation
+split, all-quoted gap identity against the per-task deltas, non-PAID
+exclusion, minor-unit integer-ness on a 0.1 + 0.2 batch, quote
+without a recorded payout neither mismatched nor unquoted,
+exact-settlement non-mismatch, legacy-giant and
+accumulation-only overflow fail-fast, and purity), and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,
@@ -2145,7 +2178,7 @@ history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
 with a full hash-chain re-verification), payout reconciliation
 screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut` /
-`totalQuoted` over a batch of tasks), NDJSON x unreconciled screening
+`totalQuoted` / `summarizeTaskSettlements` over a batch of tasks), NDJSON x unreconciled screening
 (`historyToNdjson` -> `historyFromNdjson` ->
 `TaskLifecycle.fromHistory` -> `unreconciledPayouts` over the same
 12-task screening batch), payout webhook fan-out delivery
@@ -2399,7 +2432,15 @@ PAID without a quote, 2 non-PAID carrying quotes that must contribute
 0); its per-iteration self-check pins the returned total to the
 hand-computed sum of the contributing quotes (100 + 200 + 150 + 300 +
 250 + 175 = 1175), and the empty batch is pinned to 0 once, outside
-the timed loop. The NDJSON x
+the timed loop. The `summarizeTaskSettlements` path runs the one-call
+batch summary over its own fixed mixed batch of 10 tasks (6 PAID
+quoted-and-settled, 2 of them mismatched, 2 PAID without a quote, 2
+non-PAID carrying quotes that must contribute 0); its per-iteration
+self-check pins all eight summary fields to the hand-computed
+expectation (tasks 10, paid 8, quoted 117500, paid 131500, gap
+-14000, mismatched 2, unquotedPaid 2, unquotedPaidTotal 15000, all in
+minor units), and the empty batch is pinned to the all-zero summary
+once, outside the timed loop. The NDJSON x
 unreconciled row runs the whole forwarder-to-reconciliation chain
 over that same batch on every iteration: each task is exported to
 NDJSON, parsed back, and rebuilt with `TaskLifecycle.fromHistory`,
@@ -3126,7 +3167,7 @@ The `diffTaskSnapshots` path runs one snapshot comparison over a fixed 25-entry 
 The `payoutAging` path runs one batch aging pass over a fixed 10-task batch on every iteration (no network, no randomness, no wall clock): seven unreconciled PAID tasks whose completion dates land in every bucket including both pinned endpoints (exactly 7 days lands in days7To30, exactly 30 days lands in over30Days), one PAID stand-in with no completion entry (the defensive unknown shape), one reconciled PAID task, and one PAYOUT_PENDING task, the last two excluded from every bucket. Its per-iteration self-check pins the four bucket counts and the pinned age days (2 and 6 under 7 days, 7, 22, and 29 in days7To30, 30 and 59 over 30 days, one unknown) to the hand-written expectations written out in the bench comments; outside the timed loop, an invalid `now` is pinned to its exact fail-fast error; one timed pass is one aging pass over 10 tasks.
 The `tasksByPayoutRef` path runs one reverse lookup over a fixed 6-task batch on every iteration (no network, no randomness, no wall clock): two PAID tasks settled under "xfer-bench-01" with a different-ref task between them, one PAID task settled under "xfer-bench-02", one PAID task whose REQUEST_PAYOUT alone names "xfer-bench-01" (its completion entry carries no ref, so it must not match), one PAID task with no ref, and one fresh DRAFT task. Its per-iteration self-check pins the two-hit slice [BENCH-REF-01, BENCH-REF-03] in input order holding the same task objects; outside the timed loop, the "xfer-bench-02" contrast finds only BENCH-REF-02, and an empty or non-string ref is pinned to its exact fail-fast error; one timed pass is one lookup over 6 tasks.
 See the throughput row below. One real run on
-2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05, the totalQuoted row measured 2026-11-06, and the maxVisitsByState row measured 2026-11-07, and the requireActor row measured 2026-11-07:
+2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05, the totalQuoted row measured 2026-11-06, and the maxVisitsByState row measured 2026-11-07, and the requireActor row measured 2026-11-07, and the summarizeTaskSettlements row measured 2026-11-07:
 | path | throughput |
 |------|------------|
 | dispatch (full lifecycle, 8 dispatches) | ~12,719 ops/sec (78.62 µs/op) |
@@ -3158,6 +3199,7 @@ See the throughput row below. One real run on
 | NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks) | ~262.3 ops/sec (3812.04 µs/op) |
 | totalPaidOut (12 PAID tasks) | ~42,085 ops/sec (23.76 µs/op) |
 | totalQuoted (10 mixed tasks) | ~13,733 ops/sec (72.82 µs/op) |
+| summarizeTaskSettlements (10 mixed tasks) | ~17,804 ops/sec (56.17 µs/op) |
 | deliverPayoutWebhookToMany (4 endpoints) | ~6,464 ops/sec (154.71 µs/op) |
 | deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~2,779 ops/sec (359.83 µs/op) |
 | deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~1,312 ops/sec (762.25 µs/op) |
