@@ -2074,7 +2074,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the eighty-seven hot
+`npm run bench` measures locally-observed throughput for the eighty-eight hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2082,7 +2082,10 @@ idempotency dedupe (`dispatch` with a pinned
 duplicate on a fresh task), dispatch payout-reference
 enforcement (`dispatch` with `requirePayoutRef: true` —
 one with-reference `PAYOUT_COMPLETE` on a fresh task
-driven to `PAYOUT_PENDING`), dispatch optimistic-concurrency
+driven to `PAYOUT_PENDING`), dispatch actor-attribution
+enforcement (`dispatch` with `requireActor: true` — one
+with-actor `PAYOUT_COMPLETE` on a fresh task driven to
+`PAYOUT_PENDING`), dispatch optimistic-concurrency
 guard (`dispatch` with `expectedSeq` — one guarded
 `START_CAPTURE` on a fresh task driven to a pinned
 2-entry history), dispatch dispute budget
@@ -2801,6 +2804,29 @@ default task (option unset) is pinned to still settle
 without a reference; one timed pass is one fresh enforced
 task driven to `PAYOUT_PENDING` plus its with-reference
 settlement dispatch. The
+dispatch `requireActor` path runs one enforced
+settlement dispatch on a fresh task on every iteration
+(no network, no randomness, no wall clock): the task is
+constructed with `{ requireActor: true }` and driven
+through the pinned lifecycle steps to `PAYOUT_PENDING`
+under fixed timestamps, then `PAYOUT_COMPLETE` carries
+the pinned actor — the audit-attribution guard every
+enforced dispatch pays, previously invisible inside the
+plain dispatch row, whose tasks never enable the option.
+Because the dispatch settles the task, its numbers
+include the fresh-task rebuild cost. Its per-iteration
+self-check pins the dispatch return to PAID, the history
+to exactly 8 entries, and the last entry to the pinned
+settlement fields (seq 8, `PAYOUT_COMPLETE`, at BASE +
+7s, carrying the pinned actor verbatim); outside the
+timed loop, an actor-less dispatch on an enforced task
+is pinned to throw exactly `actor required: dispatch
+must carry a non-empty actor when requireActor is
+enabled` and to leave state and history untouched, and
+a default task (option unset) is pinned to still settle
+without an actor; one timed pass is one fresh enforced
+task driven to `PAYOUT_PENDING` plus its with-actor
+settlement dispatch. The
 dispatch `expectedSeq` path runs one guarded dispatch on
 a fresh task on every iteration (no network, no
 randomness, no wall clock): the task is driven through
@@ -3081,12 +3107,13 @@ The `diffTaskSnapshots` path runs one snapshot comparison over a fixed 25-entry 
 The `payoutAging` path runs one batch aging pass over a fixed 10-task batch on every iteration (no network, no randomness, no wall clock): seven unreconciled PAID tasks whose completion dates land in every bucket including both pinned endpoints (exactly 7 days lands in days7To30, exactly 30 days lands in over30Days), one PAID stand-in with no completion entry (the defensive unknown shape), one reconciled PAID task, and one PAYOUT_PENDING task, the last two excluded from every bucket. Its per-iteration self-check pins the four bucket counts and the pinned age days (2 and 6 under 7 days, 7, 22, and 29 in days7To30, 30 and 59 over 30 days, one unknown) to the hand-written expectations written out in the bench comments; outside the timed loop, an invalid `now` is pinned to its exact fail-fast error; one timed pass is one aging pass over 10 tasks.
 The `tasksByPayoutRef` path runs one reverse lookup over a fixed 6-task batch on every iteration (no network, no randomness, no wall clock): two PAID tasks settled under "xfer-bench-01" with a different-ref task between them, one PAID task settled under "xfer-bench-02", one PAID task whose REQUEST_PAYOUT alone names "xfer-bench-01" (its completion entry carries no ref, so it must not match), one PAID task with no ref, and one fresh DRAFT task. Its per-iteration self-check pins the two-hit slice [BENCH-REF-01, BENCH-REF-03] in input order holding the same task objects; outside the timed loop, the "xfer-bench-02" contrast finds only BENCH-REF-02, and an empty or non-string ref is pinned to its exact fail-fast error; one timed pass is one lookup over 6 tasks.
 See the throughput row below. One real run on
-2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05, the totalQuoted row measured 2026-11-06, and the maxVisitsByState row measured 2026-11-07:
+2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05, the totalQuoted row measured 2026-11-06, and the maxVisitsByState row measured 2026-11-07, and the requireActor row measured 2026-11-07:
 | path | throughput |
 |------|------------|
 | dispatch (full lifecycle, 8 dispatches) | ~12,719 ops/sec (78.62 µs/op) |
 | dispatch idempotency dedupe (keyed dispatch + duplicate) | ~53,598 ops/sec (18.66 µs/op) |
 | dispatch requirePayoutRef (with payoutRef) | ~14,459 ops/sec (69.16 µs/op) |
+| dispatch requireActor (with actor) | ~10,100 ops/sec (99.01 µs/op) |
 | dispatch expectedSeq (optimistic concurrency guard) | ~28,719 ops/sec (34.82 µs/op) |
 | dispatch maxDisputes (dispute budget, 1 DISPUTE) | ~11,972 ops/sec (83.53 µs/op) |
 | dispatch maxResubmits (retry budget, 1 RESUBMIT) | ~19,849 ops/sec (50.38 µs/op) |
