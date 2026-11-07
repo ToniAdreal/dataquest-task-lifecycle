@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo gains a `totalQuoted` quoted-total branch (backlog #946):
+  the finance pass now also sums the owed half of the settlement
+  batch — `totalQuoted()` over the five screened tasks plus one more
+  task (DEMO-085) ACCEPTed with a quote of 9999 and then REJECTed,
+  pinning the owed total 6500 (2500 + 4000 across the 2 quoted PAID
+  tasks; the quoteless PAID task, the two non-PAID tasks, and the
+  rejected quoted task contribute 0) and the quoted-vs-settled gap
+  -9849 (the batch settled more than it was quoted, because DEMO-001
+  settled 10098.5 with no recorded quote). The probe task is built
+  silently (bare dispatches, no printed drive — the patrol segments
+  build their probe tasks the same way), so the subscription branch
+  keeps its "sixth task" label. `DemoResult` gains `totalQuoted`
+  and `quotedRejectedTask`; the README demo intro gains the branch.
+  New demo test pins the totals, the probe task's history, and the
+  printed lines verbatim.
+
 - `totalQuoted` batch-sum benchmark row (backlog #935): `bench/bench.ts`
   measures `totalQuoted(tasks)` over its own fixed mixed batch of 10
   tasks (6 PAID with quotes, 2 PAID without a quote, 2 non-PAID

@@ -260,6 +260,11 @@ Task DEMO-005: DRAFT
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
   totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)
 
+Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):
+  DEMO-085: ACCEPT quoted 9999, then REJECTED in review (a quote on a non-PAID task must not enter the owed total)
+  totalQuoted: 6500 (2500 + 4000 across the 2 quoted PAID tasks; DEMO-001 has no quote, DEMO-002 and DEMO-003 are not PAID, DEMO-085 was quoted 9999 but rejected)
+  quoted-vs-settled gap: totalQuoted - totalPaidOut = 6500 - 16349 = -9849 (negative: the batch settled more than it was quoted — DEMO-001 settled 10098.5 with no recorded quote)
+
 Minor-unit display branch (formatMinorUnits over the settlement amounts):
   formatMinorUnits(10098) = "100.98"
   formatMinorUnits(1) = "0.01"
@@ -956,7 +961,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 835);
+  assert.equal(lines.length, 840);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1406,6 +1411,65 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the 3 PAID tasks/);
 });
 
+test("demo quotes the owed half of the finance pass: totalQuoted pins 6500 and the gap -9849", async () => {
+  const { quotedRejectedTask, totalPaid, totalQuoted, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // The owed half sums only PAID tasks' last ACCEPT quotes: 2500
+  // (DEMO-004) + 4000 (DEMO-005). DEMO-001 is PAID but quoteless,
+  // DEMO-002/DEMO-003 are not PAID.
+  assert.equal(totalQuoted, 6500);
+  // The exclusion probe: DEMO-085 was ACCEPTed with a quote of 9999
+  // and then REJECTed in review, so its quote never settles — adding
+  // it to the batch leaves the total unchanged (the demo's own
+  // fail-fast check pins the same equality in-process).
+  assert.equal(quotedRejectedTask.id, "DEMO-085");
+  assert.equal(quotedRejectedTask.state, "REJECTED");
+  assert.equal(quotedRejectedTask.isTerminal, false);
+  assert.equal(quotedRejectedTask.history.length, 6);
+  assert.deepEqual(
+    quotedRejectedTask.history.map((h) => [h.event, h.from, h.to]),
+    [
+      ["PUBLISH", "DRAFT", "OPEN"],
+      ["ACCEPT", "OPEN", "ACCEPTED"],
+      ["START_CAPTURE", "ACCEPTED", "CAPTURING"],
+      ["SUBMIT", "CAPTURING", "SUBMITTED"],
+      ["BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW"],
+      ["REJECT", "IN_REVIEW", "REJECTED"],
+    ],
+  );
+  assert.equal(
+    quotedRejectedTask.history.find((h) => h.event === "ACCEPT")!.quotedAmount,
+    9999,
+  );
+  // The batch settled more than it was quoted, because DEMO-001
+  // settled 10098.5 with no recorded quote: 6500 - 16349 = -9849.
+  assert.equal(totalPaid, 16349);
+  assert.equal(totalQuoted - totalPaid, -9849);
+  // The branch prints after the totalPaidOut line and before the
+  // minor-unit display branch, with the pinned numbers verbatim.
+  const quotedAt = text.indexOf(
+    "Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):",
+  );
+  assert.ok(quotedAt > text.indexOf("totalPaidOut: 16349"), "quoted branch must follow the finance pass");
+  assert.ok(
+    quotedAt < text.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):"),
+    "quoted branch must precede the minor-unit display branch",
+  );
+  assert.match(
+    text,
+    /DEMO-085: ACCEPT quoted 9999, then REJECTED in review \(a quote on a non-PAID task must not enter the owed total\)/,
+  );
+  assert.match(
+    text,
+    /totalQuoted: 6500 \(2500 \+ 4000 across the 2 quoted PAID tasks; DEMO-001 has no quote, DEMO-002 and DEMO-003 are not PAID, DEMO-085 was quoted 9999 but rejected\)/,
+  );
+  assert.match(
+    text,
+    /quoted-vs-settled gap: totalQuoted - totalPaidOut = 6500 - 16349 = -9849 \(negative: the batch settled more than it was quoted — DEMO-001 settled 10098\.5 with no recorded quote\)/,
+  );
+});
+
 test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", async () => {
   const reconLines = (ls: string[]) =>
     ls.slice(
@@ -1415,9 +1479,11 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   const a = reconLines((await runDemo()).lines);
   const b = reconLines((await runDemo()).lines);
   // Header + (task header + 8 transitions + note) x2 + 4 screening
-  // lines; every timestamp in the segment is a fixed literal that
-  // never reaches the printed lines, so no normalization is needed.
-  assert.equal(a.length, 25);
+  // lines + 5 quoted-total lines (blank, header, DEMO-085 note,
+  // totalQuoted, gap); every timestamp in the segment is a fixed
+  // literal that never reaches the printed lines, so no
+  // normalization is needed.
+  assert.equal(a.length, 30);
   assert.deepEqual(a, b);
 });
 
@@ -3313,7 +3379,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 835);
+  assert.equal(out.trimEnd().split("\n").length, 840);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
