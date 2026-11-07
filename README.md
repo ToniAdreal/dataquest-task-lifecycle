@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1108 tests, all local
+npm test   # 1115 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1103,7 +1103,13 @@ and overflow is fail-fast with
 where every task carries both amounts, the net gap equals the sum of
 `quoted - paid` over the tasks `mismatchedPayouts()` flags — each
 `payoutMismatch()` delta is `paid - quoted`, so the batch gap is the
-negated sum of the per-task deltas. A quoteless or unpaid task still
+negated sum of the per-task deltas. That identity holds if and only
+if every `PAID` task carries a quote: a quoteless `PAID` task
+contributes 0 to the quoted total but its settled amount to the paid
+total, so the gap additionally absorbs that settled amount — the demo
+batch pins the shape, gap -9849 against a -249.5 delta sum, the
+-10098.5 difference being exactly DEMO-001's quoteless settlement of
+10098.5. A quoteless or unpaid task still
 counts in the batch totals but is invisible to `payoutMismatch()`,
 so it sits outside that identity by construction.
 
@@ -1922,7 +1928,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1108 tests covering the happy path, reject→resubmit
+`npm test` runs 1115 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2003,7 +2009,10 @@ exact-settlement and missing-amount and non-PAID undefined, and
 non-PAID exclusion, non-ACCEPT quote ignored, second-ACCEPT
 impossibility pinning last-wins by construction, legacy-giant and
 accumulation-only overflow fail-fast, batch-gap identity against
-`totalPaidOut` and the per-task deltas, cent-exact multi-task sums,
+`totalPaidOut` and the per-task deltas plus its quoteless-settled
+boundary (demo-batch deviation, multi-quoteless sum, all-quoteless
+negated settled total, no-payout-amount quoteless case, empty batch,
+non-PAID exclusion), cent-exact multi-task sums,
 and purity with rehydrated tasks, and the payout
 webhook carrying the same derived quote (`quotedAmount`: canonical
 key order after `payoutAmount`, signature-covered with tamper

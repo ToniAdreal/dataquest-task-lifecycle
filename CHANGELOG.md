@@ -103,6 +103,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `totalQuoted` JSDoc narrows the batch-gap identity's premise
+  (backlog #954): the gap `totalQuoted(tasks) - totalPaidOut(tasks)`
+  was documented as unconditionally equal to the sum of `quoted -
+  paid` over the tasks `mismatchedPayouts` flags. That holds if and
+  only if every `PAID` task in the batch carries a recorded quote —
+  the demo batch already falsifies the unconditional reading (gap
+  -9849 against a -249.5 delta sum; the -10098.5 difference is
+  DEMO-001's quoteless settlement). The JSDoc now states the premise
+  and the deviation rule (the gap additionally absorbs the settled
+  amounts of quoteless `PAID` tasks); the README reconciliation
+  section carries the same premise. New
+  `test/totalQuotedGapBoundary.test.ts` (7 cases) pins the
+  demo-batch numbers, the all-quoted identity, the multi-quoteless
+  deviation sum, the all-quoteless negated settled total, the
+  no-payout-amount quoteless case, the empty batch, and non-PAID
+  exclusion.
+
 - `toMinorUnits` rejects non-finite input (backlog #844): the
   converter was `Math.round(amount * 100)` with no finiteness check,
   so `toMinorUnits(1e308)` silently returned `Infinity` and any

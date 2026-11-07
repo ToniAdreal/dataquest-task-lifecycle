@@ -1177,11 +1177,20 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
  *
  * Together with {@link totalPaidOut} this closes the batch
  * quoted-vs-settled comparison: `totalQuoted(tasks) -
- * totalPaidOut(tasks)` is the batch's net owed-minus-settled gap,
- * equal to the sum of `quoted - paid` over the tasks
- * {@link mismatchedPayouts} flags (each {@link payoutMismatch}
+ * totalPaidOut(tasks)` is the batch's net owed-minus-settled gap.
+ * That gap equals the sum of `quoted - paid` over the tasks
+ * {@link mismatchedPayouts} flags — each {@link payoutMismatch}
  * `delta` is `paid - quoted`, so the batch gap is the negated sum of
- * the per-task deltas).
+ * the per-task deltas — if and only if every `PAID` task in the batch
+ * carries a recorded quote. A `PAID` task with no quote contributes 0
+ * to `totalQuoted` but its settled amount to `totalPaidOut`, so the
+ * gap additionally absorbs that settled amount: with quoteless
+ * settled tasks the gap is the negated delta sum minus the settled
+ * amounts of the quoteless `PAID` tasks. The demo batch pins the
+ * shape (backlog #954): gap -9849 against a -249.5 delta sum, the
+ * -10098.5 difference being exactly DEMO-001's quoteless settlement.
+ * Do not read the gap as a pure per-task mismatch sum on a batch that
+ * may contain quoteless settled tasks.
  *
  * Pure: reads the tasks, never mutates or dispatches.
  */
