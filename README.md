@@ -2071,7 +2071,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the eighty-six hot
+`npm run bench` measures locally-observed throughput for the eighty-seven hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2088,7 +2088,11 @@ on a fresh task driven to a pinned 6-entry history in
 `REJECTED`), dispatch retry budget
 (`dispatch` with `maxResubmits` — one budgeted
 `RESUBMIT` on a fresh task driven to a pinned 6-entry
-history in `REJECTED`), event-sourced
+history in `REJECTED`), dispatch state-visit budget
+(`dispatch` with `maxVisitsByState` — one budgeted
+`RESUBMIT` into `CAPTURING` on a fresh task driven to a
+pinned 6-entry history in `REJECTED`, the second of 2
+budgeted visits), event-sourced
 `replay`/`fromHistory`, `verifyHistoryChain`, keyed hash-chain
 verification (`verifyHistoryChain` with `auditSecret`), payout webhook
 build/verify, payout webhook secret-rotation verification
@@ -2850,6 +2854,43 @@ with an illegal snapshot budget pinned to its exact
 `invalid snapshot` error; one timed pass is one fresh
 budgeted task driven to the pinned 6-entry history plus
 its budgeted dispute dispatch. The
+dispatch `maxVisitsByState` path runs one budgeted
+`RESUBMIT` into `CAPTURING` on a fresh task on every
+iteration (no network, no randomness, no wall clock):
+the task is constructed with
+`maxVisitsByState: { CAPTURING: 2 }` and driven through
+the pinned lifecycle steps to a 6-entry history in
+REJECTED under fixed timestamps, then `RESUBMIT`
+spends the second of the 2 budgeted CAPTURING visits —
+the per-state visit cap every resubmission loop pays on
+a task that must not cycle through capture forever,
+previously invisible inside the plain dispatch row,
+whose tasks carry no budget, and inside the snapshot
+row, where `maxVisitsByState` appears only as a fixture
+field. Because the dispatch mutates the task, its
+numbers include the fresh-task rebuild cost. Its
+per-iteration self-check pins the dispatch return to
+CAPTURING, the history to exactly 7 entries, and the
+last entry to the pinned step fields (seq 7, `RESUBMIT`,
+at BASE + 6s); outside the timed loop, a second
+`RESUBMIT` after one full resubmit round is pinned to
+throw exactly
+`state visit budget exhausted: CAPTURING already visited 2 of 2 times`
+and to leave state and history byte-identical, a budget
+of 1 is pinned to make the first `RESUBMIT` throw
+`state visit budget exhausted: CAPTURING already visited 1 of 1 times`
+at once because the first pass already spent the visit,
+a task built without the option is pinned to run
+repeated resubmit rounds (the pre-budget default), a
+snapshot round-trip is pinned to keep the budget
+exhausted (the used count is history-derived, so it
+does not reset), and illegal budgets (0, -1 and 1.5),
+an unknown state, and a non-object map are pinned to
+throw their exact `invalid option` errors, with an
+illegal snapshot budget pinned to its exact
+`invalid snapshot` error; one timed pass is one fresh
+budgeted task driven to the pinned 6-entry history plus
+its budgeted resubmit dispatch. The
 dispatch `rolePolicy` path runs one authorized `ACCEPT`
 on a fresh task on every iteration (no network, no
 randomness, no wall clock): the task is constructed with
@@ -3037,7 +3078,7 @@ The `diffTaskSnapshots` path runs one snapshot comparison over a fixed 25-entry 
 The `payoutAging` path runs one batch aging pass over a fixed 10-task batch on every iteration (no network, no randomness, no wall clock): seven unreconciled PAID tasks whose completion dates land in every bucket including both pinned endpoints (exactly 7 days lands in days7To30, exactly 30 days lands in over30Days), one PAID stand-in with no completion entry (the defensive unknown shape), one reconciled PAID task, and one PAYOUT_PENDING task, the last two excluded from every bucket. Its per-iteration self-check pins the four bucket counts and the pinned age days (2 and 6 under 7 days, 7, 22, and 29 in days7To30, 30 and 59 over 30 days, one unknown) to the hand-written expectations written out in the bench comments; outside the timed loop, an invalid `now` is pinned to its exact fail-fast error; one timed pass is one aging pass over 10 tasks.
 The `tasksByPayoutRef` path runs one reverse lookup over a fixed 6-task batch on every iteration (no network, no randomness, no wall clock): two PAID tasks settled under "xfer-bench-01" with a different-ref task between them, one PAID task settled under "xfer-bench-02", one PAID task whose REQUEST_PAYOUT alone names "xfer-bench-01" (its completion entry carries no ref, so it must not match), one PAID task with no ref, and one fresh DRAFT task. Its per-iteration self-check pins the two-hit slice [BENCH-REF-01, BENCH-REF-03] in input order holding the same task objects; outside the timed loop, the "xfer-bench-02" contrast finds only BENCH-REF-02, and an empty or non-string ref is pinned to its exact fail-fast error; one timed pass is one lookup over 6 tasks.
 See the throughput row below. One real run on
-2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05 and the totalQuoted row measured 2026-11-06:
+2026-11-04, plus the tasksByPayoutRef and parseMinorUnits rows measured 2026-11-05, the totalQuoted row measured 2026-11-06, and the maxVisitsByState row measured 2026-11-07:
 | path | throughput |
 |------|------------|
 | dispatch (full lifecycle, 8 dispatches) | ~12,719 ops/sec (78.62 µs/op) |
@@ -3046,6 +3087,7 @@ See the throughput row below. One real run on
 | dispatch expectedSeq (optimistic concurrency guard) | ~28,719 ops/sec (34.82 µs/op) |
 | dispatch maxDisputes (dispute budget, 1 DISPUTE) | ~11,972 ops/sec (83.53 µs/op) |
 | dispatch maxResubmits (retry budget, 1 RESUBMIT) | ~19,849 ops/sec (50.38 µs/op) |
+| dispatch maxVisitsByState (visit budget, 2 CAPTURING visits) | ~3,360 ops/sec (297.58 µs/op) |
 | dispatch rolePolicy (authorized ACCEPT dispatch) | ~65,701 ops/sec (15.22 µs/op) |
 | dispatch {at} (explicit timestamp) | ~50,339 ops/sec (19.87 µs/op) |
 | replay (8-entry history) | ~17,822 ops/sec (56.11 µs/op) |
