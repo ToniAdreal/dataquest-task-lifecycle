@@ -1364,6 +1364,25 @@
  *      the dedupe runs under an injected fixed clock, so no
  *      entry expires or is evicted in the timed loop.
  *
+ *  66. Event-filter listing — `tasksByEvent` over a fixed
+ *      6-task mixed-history batch (see the event fixture below):
+ *      the timed loop filters for "RESUBMIT", self-checking
+ *      the hand-pinned slice [BENCH-EVENT-03] in input order
+ *      holding the same task object — the twice-resubmitted
+ *      task matches exactly once, so the row measures the
+ *      history scan with its match-once semantics, not a
+ *      per-entry expansion. Outside the timed loop, the
+ *      DISPUTE contrast is pinned once: `tasksByEvent(batch,
+ *      "DISPUTE")` returns exactly [BENCH-EVENT-01,
+ *      BENCH-EVENT-05] — and the EXPIRE contrast returns
+ *      exactly [BENCH-EVENT-04] — while an unknown event
+ *      fails fast with the exact `invalid tasksByEvent`
+ *      error instead of an empty list. The filter is pure,
+ *      so the same batch serves every iteration with no
+ *      rebuild. No network, no randomness, and no wall
+ *      clock: events come from the fixed fixture, mirroring
+ *      the #970 test semantics and the #979 demo segment.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -1410,6 +1429,7 @@ import {
   TaskLifecycle,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByEvent,
   tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
@@ -2421,6 +2441,79 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: tasksByActor batch shape",
+  );
+}
+// Event-filter fixture (backlog #982): a fixed 6-task batch mirroring
+// the #970 test semantics and the #979 demo segment — a disputed task,
+// a never-disputed task, a twice-resubmitted task, an expired task, a
+// second disputed task interleaved after the resubmitted one, and a
+// fresh task with no history at all. The filter is pure, so this single
+// batch serves every timed iteration with no rebuild. The event
+// sequences are the #970 ones: DISPUTE needs the full review-reject
+// path, RESUBMIT twice needs two full resubmit rounds, EXPIRE needs
+// only PUBLISH — written out here as step lists, never derived by
+// calling tasksByEvent itself.
+const EVENT_DISPUTED_STEPS: TaskEvent[] = [
+  "PUBLISH",
+  "ACCEPT",
+  "START_CAPTURE",
+  "SUBMIT",
+  "BEGIN_REVIEW",
+  "REJECT",
+  "DISPUTE",
+];
+const EVENT_RESUBMITTED_TWICE_STEPS: TaskEvent[] = [
+  "PUBLISH",
+  "ACCEPT",
+  "START_CAPTURE",
+  "SUBMIT",
+  "BEGIN_REVIEW",
+  "REJECT",
+  "RESUBMIT",
+  "SUBMIT",
+  "BEGIN_REVIEW",
+  "REJECT",
+  "RESUBMIT",
+];
+const EVENT_EXPIRED_STEPS: TaskEvent[] = ["PUBLISH", "EXPIRE"];
+function buildEventTask(id: string, steps: TaskEvent[]): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  steps.forEach((event, i) => {
+    task.dispatch(event, {
+      at: new Date(BASE_MS + i * HOUR_MS).toISOString(),
+    });
+  });
+  return task;
+}
+const eventBatch: TaskLifecycle[] = [
+  buildEventTask("BENCH-EVENT-01", EVENT_DISPUTED_STEPS),
+  buildEventTask("BENCH-EVENT-02", ["PUBLISH"]),
+  buildEventTask("BENCH-EVENT-03", EVENT_RESUBMITTED_TWICE_STEPS),
+  buildEventTask("BENCH-EVENT-04", EVENT_EXPIRED_STEPS),
+  buildEventTask("BENCH-EVENT-05", EVENT_DISPUTED_STEPS),
+  buildEventTask("BENCH-EVENT-06", []),
+];
+const expectedByEventResubmit = [eventBatch[2]];
+const expectedByEventResubmitIds = ["BENCH-EVENT-03"];
+let byEventUnknownThrew = false;
+try {
+  tasksByEvent(eventBatch, "DISPUT" as TaskEvent);
+} catch (error) {
+  byEventUnknownThrew =
+    error instanceof Error &&
+    error.message === 'invalid tasksByEvent: unknown event "DISPUT"';
+}
+if (
+  tasksByEvent(eventBatch, "RESUBMIT").map((t) => t.id).join(",") !==
+    expectedByEventResubmitIds.join(",") ||
+  tasksByEvent(eventBatch, "DISPUTE").map((t) => t.id).join(",") !==
+    "BENCH-EVENT-01,BENCH-EVENT-05" ||
+  tasksByEvent(eventBatch, "EXPIRE").map((t) => t.id).join(",") !==
+    "BENCH-EVENT-04" ||
+  !byEventUnknownThrew
+) {
+  throw new Error(
+    "benchmark fixture failed: tasksByEvent batch shape",
   );
 }
 if (
@@ -10215,6 +10308,23 @@ function benchTasksByActor(): number {
   }, ITERATIONS);
 }
 
+function benchTasksByEvent(): number {
+  return measure(() => {
+    // Shared fixture batch per iteration: the filter is pure, so
+    // no rebuild is needed. Per-iteration self-check: exactly the
+    // hand-written RESUBMIT slice, in batch order, holding the
+    // same task object — the twice-resubmitted task appears
+    // exactly once (see the event fixture above).
+    const out = tasksByEvent(eventBatch, "RESUBMIT");
+    if (
+      out.length !== expectedByEventResubmit.length ||
+      out.some((t, i) => t !== expectedByEventResubmit[i])
+    ) {
+      throw new Error("benchmark self-check failed: tasksByEvent");
+    }
+  }, ITERATIONS);
+}
+
 function benchReconcilePayouts(): number {
   return measure(() => {
     // Shared fixture batch + ledger per iteration: reconcilePayouts
@@ -11670,6 +11780,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "nextSlaDeadline (8 mixed tasks, earliest future deadline)", ops: benchNextSlaDeadline() },
   { path: "tasksByState (12 mixed-state tasks, OPEN slice)", ops: benchTasksByState() },
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
+  { path: "tasksByEvent (6 mixed tasks, RESUBMIT slice)", ops: benchTasksByEvent() },
   { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
   { path: "diffTaskSnapshots (25-entry history, 3 appended, payout + SLA change)", ops: benchDiffTaskSnapshots() },
   { path: "payoutAging (10-task batch, four buckets + 7d/30d boundaries)", ops: benchPayoutAging() },

@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `tasksByEvent(tasks, event)` (backlog #982): one
+  event-filter lookup over a fixed 6-task mixed-history batch (a
+  disputed task, a never-disputed task, a twice-resubmitted task, an
+  expired task, a second disputed task, and a fresh task with no
+  history), self-checked per iteration for the one-hit RESUBMIT slice
+  [BENCH-EVENT-03] in input order holding the same task object, so
+  the twice-resubmitted task appears exactly once; the DISPUTE
+  contrast [BENCH-EVENT-01, BENCH-EVENT-05], the EXPIRE contrast
+  [BENCH-EVENT-04], and the unknown-event fail-fast are pinned once
+  outside the timed loop. Measured 2026-11-08 at ~86,086 ops/sec
+  (11.62 µs/op); README Benchmarks prose, detail paragraph, and
+  throughput table updated to ninety paths.
+
 - Batch filter `tasksByEvent(tasks, event)` (backlog #970): the
   event counterpart to `tasksByActor` — returns, in input order,
   every task whose audit history contains the given event, holding
