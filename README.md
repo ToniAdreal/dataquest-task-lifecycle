@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1158 tests, all local
+npm test   # 1171 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -985,6 +985,27 @@ import { tasksByEvent } from "dataquest-task-lifecycle";
 // tasks match on their history, and an unknown event (including a
 // state name such as "DISPUTED") throws instead of returning [].
 const disputed = tasksByEvent(allTasks, "DISPUTE");
+```
+
+The four selectors above each filter on one axis. `tasksByFilters()`
+combines them: give any subset of `state`, `actor`, `event`, and
+`payoutRef`, and it returns the tasks matching every condition given,
+in input order, in a single pass over the batch — the board query
+"tasks the moderator disputed while IN_REVIEW" without chaining
+filters and intersecting the results:
+
+```ts
+import { tasksByFilters } from "dataquest-task-lifecycle";
+
+// Pure: reads the tasks, never mutates them. Each condition uses its
+// single-axis selector's rule and validation, an empty condition
+// object returns every task, and a typo in any axis throws instead
+// of returning [].
+const moderatedDisputes = tasksByFilters(allTasks, {
+  state: "IN_REVIEW",
+  actor: "moderator",
+  event: "DISPUTE",
+});
 ```
 
 The other half of the loop pairs those tasks against an external
@@ -1983,7 +2004,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1158 tests covering the happy path, reject→resubmit
+`npm test` runs 1171 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -26,6 +26,7 @@ export {
   tasksApproachingDeadline,
   tasksByActor,
   tasksByEvent,
+  tasksByFilters,
   tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
@@ -89,6 +90,7 @@ export type {
   TaskSnapshot,
   TaskSnapshotDiff,
   TaskState,
+  TasksByFiltersOptions,
   TransitionEdge,
   UnknownPayoutAgingEntry,
 } from "./taskLifecycle.js";

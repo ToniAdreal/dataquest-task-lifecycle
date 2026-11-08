@@ -11,6 +11,15 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Combined batch filter `tasksByFilters(tasks, { state?, actor?,
+  event?, payoutRef? })` (backlog #990): the combined counterpart
+  to the single-axis selectors — returns, in input order, the tasks
+  matching every condition given (AND), in a single pass over the
+  batch, holding the same task objects. Each condition uses its
+  single-axis selector's validation and matching rule (unknown
+  state/event, empty or non-string actor/payoutRef all fail fast),
+  and an empty condition object returns every task.
+
 - Benchmark row for `tasksByEvent(tasks, event)` (backlog #982): one
   event-filter lookup over a fixed 6-task mixed-history batch (a
   disputed task, a never-disputed task, a twice-resubmitted task, an

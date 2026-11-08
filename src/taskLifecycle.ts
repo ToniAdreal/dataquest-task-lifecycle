@@ -482,6 +482,116 @@ export function tasksByEvent(
 }
 
 /**
+ * Combined batch filter: which conditions a task must satisfy to be
+ * selected, one per axis of the single-axis selectors.
+ *
+ * Every field is optional; a field left out (or the whole object left
+ * empty) does not filter on that axis. Conditions combine with AND:
+ * a task is selected only when it satisfies every condition given.
+ */
+export interface TasksByFiltersOptions {
+  /** Current state the task must be in (same rule as {@link tasksByState}). */
+  state?: TaskState;
+  /** Actor whose name must appear on at least one history entry (same rule as {@link tasksByActor}). */
+  actor?: string;
+  /** Event that must appear at least once in the history (same rule as {@link tasksByEvent}). */
+  event?: TaskEvent;
+  /** Payout reference the `PAYOUT_COMPLETE` entry must carry (same rule as {@link tasksByPayoutRef}). */
+  payoutRef?: string;
+}
+
+/**
+ * Batch filter: from a batch of tasks, return the ones matching every
+ * condition given, in input order.
+ *
+ * This is the combined counterpart to the single-axis selectors
+ * {@link tasksByState}, {@link tasksByActor}, {@link tasksByEvent},
+ * and {@link tasksByPayoutRef}: a board that wants "tasks the
+ * moderator disputed while IN_REVIEW" had to chain the single-axis
+ * filters and intersect the results — and each chained filter
+ * re-scanned every task's history. This helper does the same
+ * intersection in one pass:
+ *
+ *   const moderatedDisputes = tasksByFilters(allTasks, {
+ *     state: "IN_REVIEW",
+ *     actor: "moderator",
+ *     event: "DISPUTE",
+ *   });
+ *
+ * Pure: reads the tasks' current states and histories, never
+ * mutates, dispatches, or copies the tasks — the returned array
+ * holds the same task objects, in input order, so callers can act
+ * on them directly. An empty condition object selects every task,
+ * so the same call shape serves both "everything" and "exactly
+ * this slice". Each condition uses its single-axis selector's
+ * validation and matching rule, so `state` rejects unknown states,
+ * `event` rejects unknown events, and an empty or non-string
+ * `actor`/`payoutRef` fails fast instead of silently returning an
+ * empty list — a typo in any axis cannot masquerade as "no task
+ * matches this combination".
+ */
+export function tasksByFilters(
+  tasks: readonly TaskLifecycle[],
+  filters: TasksByFiltersOptions,
+): TaskLifecycle[] {
+  if (filters.state !== undefined && !STATES.has(filters.state)) {
+    throw new Error(
+      `invalid tasksByFilters: unknown state "${String(filters.state)}"`,
+    );
+  }
+  if (
+    filters.actor !== undefined &&
+    (typeof filters.actor !== "string" || filters.actor.length === 0)
+  ) {
+    throw new Error(
+      `invalid tasksByFilters: actor must be a non-empty string, got ${JSON.stringify(filters.actor)}`,
+    );
+  }
+  if (filters.event !== undefined && !EVENTS.has(filters.event)) {
+    throw new Error(
+      `invalid tasksByFilters: unknown event "${String(filters.event)}"`,
+    );
+  }
+  if (
+    filters.payoutRef !== undefined &&
+    (typeof filters.payoutRef !== "string" ||
+      filters.payoutRef.length === 0)
+  ) {
+    throw new Error(
+      `invalid tasksByFilters: payoutRef must be a non-empty string, got ${JSON.stringify(filters.payoutRef)}`,
+    );
+  }
+  return tasks.filter((task) => {
+    if (filters.state !== undefined && task.state !== filters.state) {
+      return false;
+    }
+    if (
+      filters.actor !== undefined &&
+      !task.history.some((entry) => entry.actor === filters.actor)
+    ) {
+      return false;
+    }
+    if (
+      filters.event !== undefined &&
+      !task.history.some((entry) => entry.event === filters.event)
+    ) {
+      return false;
+    }
+    if (
+      filters.payoutRef !== undefined &&
+      !task.history.some(
+        (entry) =>
+          entry.event === "PAYOUT_COMPLETE" &&
+          entry.payoutRef === filters.payoutRef,
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Per-task outcome of {@link expireOverdueTasks}.
  */
 export interface ExpireOverdueResult {
