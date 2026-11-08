@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1145 tests, all local
+npm test   # 1156 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -962,6 +962,22 @@ import { tasksByPayoutRef } from "dataquest-task-lifecycle";
 // never mutates them. A request-only reference never matches, and
 // an empty or non-string reference throws instead of returning [].
 const settled = tasksByPayoutRef(allTasks, "xfer-88f2");
+```
+
+The event slice is the same shape over history rather than
+settlement. `tasksByEvent()` returns every task whose audit history
+contains the given event, in input order — the batch answer to
+"which tasks were ever disputed" or "which tasks went through a
+resubmit round":
+
+```ts
+import { tasksByEvent } from "dataquest-task-lifecycle";
+
+// Tasks that were ever disputed. Pure: reads the tasks, never
+// mutates them. A task that resubmitted twice appears once, terminal
+// tasks match on their history, and an unknown event (including a
+// state name such as "DISPUTED") throws instead of returning [].
+const disputed = tasksByEvent(allTasks, "DISPUTE");
 ```
 
 The other half of the loop pairs those tasks against an external
@@ -1960,7 +1976,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1145 tests covering the happy path, reject→resubmit
+`npm test` runs 1156 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

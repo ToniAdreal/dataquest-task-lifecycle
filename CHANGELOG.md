@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Batch filter `tasksByEvent(tasks, event)` (backlog #970): the
+  event counterpart to `tasksByActor` — returns, in input order,
+  every task whose audit history contains the given event, holding
+  the same task objects. A task matches once no matter how many of
+  its entries carry the event, terminal tasks match on their history
+  exactly like any other task, and an unknown event (anything
+  outside the `TaskEvent` set, including a state name such as
+  `"DISPUTED"`) fails fast with
+  `invalid tasksByEvent: unknown event "..."`, the same wording
+  style as `tasksByState`. New `test/tasksByEvent.test.ts` pins the
+  DISPUTE / RESUBMIT / EXPIRE slices, the twice-resubmitted
+  single-appearance, the empty batch, the no-hit empty list, the
+  unknown-event (typo, state name, non-string) rejections, input
+  order, input immutability, the fresh-task no-history case, and
+  terminal-task history matching.
+
 - `summarizeTaskSettlements(tasks)` batch settlement summary
   (backlog #966): the one-call form of the `totalQuoted` /
   `totalPaidOut` pair — task and `PAID` counts, `quotedTotal` and

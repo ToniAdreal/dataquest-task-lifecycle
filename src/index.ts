@@ -25,6 +25,7 @@ export {
   summarizeTaskSettlements,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByEvent,
   tasksByPayoutRef,
   tasksByState,
   totalPaidOut,

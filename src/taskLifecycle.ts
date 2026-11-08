@@ -441,6 +441,47 @@ export function tasksByPayoutRef(
 }
 
 /**
+ * Batch filter: from a batch of tasks, return the ones whose audit
+ * history contains at least one entry for the given event, in input
+ * order.
+ *
+ * This is the event counterpart to {@link tasksByActor}: a caller
+ * that wants to list every task ever disputed, or every task that
+ * went through a resubmit round, had to hand-write the same history
+ * scan — and a hand-written scan has no shared answer for an
+ * unknown event string. This helper gives that listing one shared,
+ * pure entry point:
+ *
+ *   const disputed = tasksByEvent(allTasks, "DISPUTE");
+ *
+ * Pure: reads the tasks' histories, never mutates, dispatches, or
+ * copies the tasks — the returned array holds the same task objects,
+ * in input order, so callers can act on them directly. A task
+ * matches as soon as any one history entry carries the event, and
+ * matches only once no matter how many of its entries do, so a task
+ * that resubmitted twice is listed once. Terminal tasks match
+ * exactly like any other task — an EXPIRED task still answers "was
+ * it ever expired", because the question is about its history, not
+ * its current state. An unknown event (anything outside the
+ * TaskEvent set, including a state name such as "DISPUTED") fails
+ * fast instead of silently returning an empty list, so a typo
+ * ("DISPUT") cannot masquerade as "no task ever saw this event".
+ */
+export function tasksByEvent(
+  tasks: readonly TaskLifecycle[],
+  event: TaskEvent,
+): TaskLifecycle[] {
+  if (!EVENTS.has(event)) {
+    throw new Error(
+      `invalid tasksByEvent: unknown event "${String(event)}"`,
+    );
+  }
+  return tasks.filter((task) =>
+    task.history.some((entry) => entry.event === event),
+  );
+}
+
+/**
  * Per-task outcome of {@link expireOverdueTasks}.
  */
 export interface ExpireOverdueResult {
