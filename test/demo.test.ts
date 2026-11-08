@@ -74,6 +74,7 @@ import {
   stateDiagram,
   tasksApproachingDeadline,
   tasksByActor,
+  tasksByEvent,
   tasksByPayoutRef,
   tasksByState,
   toMinorUnits,
@@ -431,6 +432,41 @@ Task DEMO-053: DRAFT
   tasksByActor([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "contributor"): DEMO-051 (1 task)
   contrast: tasksByState([DEMO-050, DEMO-051, DEMO-052, DEMO-053], "OPEN"): DEMO-050, DEMO-052 (2 tasks) — the two slices are orthogonal: DEMO-052 is OPEN but anonymous so no actor filter claims it, DEMO-051 and DEMO-053 are ACCEPTED yet moderator-touched, and DEMO-053 matches once despite two moderator entries
   filtering is pure: no task was dispatched or mutated by either filter
+
+Event-filter branch (tasksByEvent over four more tasks, audit history vs state):
+Task DEMO-086: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  DISPUTE         REJECTED     -> DISPUTED  (contributor)
+Task DEMO-087: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  RESUBMIT        REJECTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  RESUBMIT        REJECTED     -> CAPTURING  (contributor)
+Task DEMO-088: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  EXPIRE          OPEN         -> EXPIRED  (system)
+Task DEMO-089: DRAFT
+  DEMO-086: state DISPUTED, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, DISPUTE
+  DEMO-087: state CAPTURING, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, RESUBMIT
+  DEMO-088: state EXPIRED, events PUBLISH, EXPIRE
+  DEMO-089: state DRAFT, events none
+  tasksByEvent([DEMO-086, DEMO-087, DEMO-088, DEMO-089], "DISPUTE"): DEMO-086 (1 task)
+  tasksByEvent([DEMO-086, DEMO-087, DEMO-088, DEMO-089], "RESUBMIT"): DEMO-087 (1 task)
+  tasksByEvent([DEMO-086, DEMO-087, DEMO-088, DEMO-089], "EXPIRE"): DEMO-088 (1 task)
+  contrast: the event slice cuts across states — DEMO-086 is DISPUTED, DEMO-087 is CAPTURING after its second resubmit, DEMO-088 is EXPIRED, and DEMO-089 has no history, so no state filter could reproduce any of the three slices
+  filtering is pure: no task was dispatched or mutated by any filter
 
 Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):
 Task DEMO-077: DRAFT
@@ -962,7 +998,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 841);
+  assert.equal(lines.length, 876);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2361,7 +2397,7 @@ test("demo actor-filter segment is deterministic: two runs print byte-identical 
   const actorLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):"),
-      ls.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):") - 1,
+      ls.indexOf("Event-filter branch (tasksByEvent over four more tasks, audit history vs state):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2383,6 +2419,136 @@ test("demo actor-filter segment is deterministic: two runs print byte-identical 
   assert.deepEqual(
     a.actorFilterOpenState.map((t) => t.id),
     b.actorFilterOpenState.map((t) => t.id),
+  );
+});
+
+test("demo shows the event-filter branch in-process: dispute, resubmit and expire slices cut across states", async () => {
+  const {
+    eventFilterTasks,
+    eventFilterDisputed,
+    eventFilterResubmitted,
+    eventFilterExpired,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // The four branch tasks end in the hand-written states with
+  // fixed-literal histories — no wall clock anywhere.
+  assert.deepEqual(
+    eventFilterTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-086", "DISPUTED", 7],
+      ["DEMO-087", "CAPTURING", 11],
+      ["DEMO-088", "EXPIRED", 2],
+      ["DEMO-089", "DRAFT", 0],
+    ],
+  );
+  // The event slices: one task per event, and the twice-resubmitted
+  // task matches the RESUBMIT slice exactly once; the fresh task
+  // matches no event at all.
+  assert.deepEqual(
+    eventFilterDisputed.map((t) => t.id),
+    ["DEMO-086"],
+  );
+  assert.deepEqual(
+    eventFilterResubmitted.map((t) => t.id),
+    ["DEMO-087"],
+  );
+  assert.deepEqual(
+    eventFilterExpired.map((t) => t.id),
+    ["DEMO-088"],
+  );
+  // An independent re-screening of the returned tasks reproduces
+  // all three slices, holding the same task objects — the demo
+  // segment is not self-certifying.
+  const rescreened = tasksByEvent(eventFilterTasks, "RESUBMIT");
+  assert.deepEqual(
+    rescreened.map((t) => t.id),
+    ["DEMO-087"],
+  );
+  assert.equal(rescreened[0], eventFilterTasks[1]);
+  assert.deepEqual(
+    tasksByEvent(eventFilterTasks, "DISPUTE").map((t) => t.id),
+    ["DEMO-086"],
+  );
+  assert.deepEqual(
+    tasksByEvent(eventFilterTasks, "EXPIRE").map((t) => t.id),
+    ["DEMO-088"],
+  );
+  assert.deepEqual(tasksByEvent(eventFilterTasks, "PUBLISH").map((t) => t.id), [
+    "DEMO-086",
+    "DEMO-087",
+    "DEMO-088",
+  ]);
+  // Filtering is pure: the tasks keep their states and history
+  // lengths after all three filters ran inside the demo.
+  assert.deepEqual(
+    eventFilterTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["DISPUTED", 7],
+      ["CAPTURING", 11],
+      ["EXPIRED", 2],
+      ["DRAFT", 0],
+    ],
+  );
+  // The branch is printed after the actor-filter branch and
+  // before the payout-reference branch, with its lines verbatim.
+  const eventAt = text.indexOf(
+    "Event-filter branch (tasksByEvent over four more tasks, audit history vs state):",
+  );
+  assert.ok(
+    eventAt >
+      text.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):"),
+    "event-filter branch must follow the actor-filter branch",
+  );
+  assert.ok(
+    text.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):") >
+      eventAt,
+    "payout-reference branch must follow the event-filter branch",
+  );
+  assert.match(text, /DEMO-086: state DISPUTED, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, DISPUTE/);
+  assert.match(text, /DEMO-087: state CAPTURING, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, RESUBMIT/);
+  assert.match(text, /DEMO-089: state DRAFT, events none/);
+  assert.match(
+    text,
+    /tasksByEvent\(\[DEMO-086, DEMO-087, DEMO-088, DEMO-089\], "DISPUTE"\): DEMO-086 \(1 task\)/,
+  );
+  assert.match(
+    text,
+    /tasksByEvent\(\[DEMO-086, DEMO-087, DEMO-088, DEMO-089\], "RESUBMIT"\): DEMO-087 \(1 task\)/,
+  );
+  assert.match(
+    text,
+    /tasksByEvent\(\[DEMO-086, DEMO-087, DEMO-088, DEMO-089\], "EXPIRE"\): DEMO-088 \(1 task\)/,
+  );
+});
+
+test("demo event-filter segment is deterministic: two runs print byte-identical event lines", async () => {
+  const eventLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Event-filter branch (tasksByEvent over four more tasks, audit history vs state):"),
+      ls.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = eventLines(a.lines);
+  // Header + (task header + steps) x 4 + 4 per-task lines +
+  // three selection lines + contrast line + purity line; every
+  // timestamp in the segment is a fixed literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 34);
+  assert.deepEqual(segA, eventLines(b.lines));
+  assert.deepEqual(
+    a.eventFilterDisputed.map((t) => t.id),
+    b.eventFilterDisputed.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.eventFilterResubmitted.map((t) => t.id),
+    b.eventFilterResubmitted.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.eventFilterExpired.map((t) => t.id),
+    b.eventFilterExpired.map((t) => t.id),
   );
 });
 
@@ -3398,7 +3564,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 841);
+  assert.equal(out.trimEnd().split("\n").length, 876);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

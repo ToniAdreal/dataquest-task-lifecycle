@@ -27,6 +27,16 @@ change type; no entry describes a feature that is not in the history.
   order, input immutability, the fresh-task no-history case, and
   terminal-task history matching.
 
+- CLI demo gains an event-filter branch (backlog #979): four
+  more tasks (DEMO-086–DEMO-089) slice the same batch by audit
+  history — `tasksByEvent()` selects the disputed task, the
+  twice-resubmitted task (matched once), and the expired task,
+  while the fresh task matches no event. New
+  `test/demo.test.ts` cases pin the three slices, the
+  single-appearance of the twice-resubmitted task, the purity of
+  all three filters, the printed lines, and the byte-identical
+  determinism of the segment.
+
 - `summarizeTaskSettlements(tasks)` batch settlement summary
   (backlog #966): the one-call form of the `totalQuoted` /
   `totalPaidOut` pair — task and `PAID` counts, `quotedTotal` and
