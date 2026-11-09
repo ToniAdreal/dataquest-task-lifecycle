@@ -337,6 +337,21 @@ export type BuildPayoutWebhooksResult =
  * {@link buildPayoutWebhook} is unaffected: calling it twice for the
  * same task is legitimate.
  *
+ * Duplicate detection: the batch keeps the set of `eventId`s it has
+ * already issued (successfully signed) in this call. When the
+ * factory returns an `eventId` already in that set, that task is NOT
+ * signed and instead fails as `{ taskId, error }` with
+ * `duplicate eventId "<id>" in batch: eventIds must be unique within
+ * a batch`, and later tasks are still attempted — the per-item
+ * isolation above applies to duplicates too. Only issued ids are
+ * recorded: a task whose build fails (a non-PAID task, a non-string
+ * or empty factory value) never claims its `eventId`, so a later
+ * task may legitimately reuse that value. This is the
+ * dataquest-side peer of escrow's `buildSettlementWebhooks`
+ * issuedEventIds guard (the escrow side guards the same factory
+ * failure — a reset counter or fixed value — for settlement
+ * webhooks).
+ *
  * `eventId` semantics: one DISTINCT `eventId` per task (see
  * {@link BuildPayoutWebhooksOptions.eventIdFactory}); the shared
  * element is the generation strategy and the `now` timestamp, never
@@ -412,6 +427,9 @@ export function buildPayoutWebhooks(
     );
   }
   const eventIdFactory = options.eventIdFactory ?? randomUUID;
+  // eventIds already issued (successfully signed) in this batch only:
+  // a failed build never claims its id, so a later task may reuse it.
+  const issuedEventIds = new Set<string>();
   return tasks.map((task) => {
     const taskId =
       task !== null &&
@@ -420,11 +438,24 @@ export function buildPayoutWebhooks(
         ? (task as TaskLifecycle).id
         : "unknown";
     try {
+      const eventId = eventIdFactory();
+      // A factory bug (counter reset, fixed value) must not ship two
+      // signed webhooks under one eventId: the receiver's dedupe would
+      // drop the second payout as an apparent duplicate while the
+      // sender believes it delivered. The duplicate is never signed,
+      // and later entries are still attempted.
+      if (issuedEventIds.has(eventId)) {
+        return {
+          taskId,
+          error: `duplicate eventId "${eventId}" in batch: eventIds must be unique within a batch`,
+        };
+      }
       const webhook = buildPayoutWebhook(task, secret, {
         now: options.now,
-        eventId: eventIdFactory(),
+        eventId,
         requirePayoutRef: options.requirePayoutRef,
       });
+      issuedEventIds.add(eventId);
       return { taskId, webhook };
     } catch (err) {
       return {

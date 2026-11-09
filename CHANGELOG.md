@@ -202,6 +202,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `buildPayoutWebhooks` rejects a duplicate `eventId` in the batch
+  (backlog #998): the batch previously kept no record of the
+  `eventId`s it had already issued, so a buggy `eventIdFactory`
+  (counter reset, fixed value) shipped two signed payout webhooks
+  under one `eventId`, and a receiver deduplicating on `eventId`
+  dropped the second payout as an apparent duplicate while the
+  sender believed it delivered. The batch now keeps the set of
+  issued `eventId`s: a repeated id fails only that entry as
+  `{ taskId, error }` with `duplicate eventId "…" in batch: eventIds
+  must be unique within a batch` — never signed, never occupying a
+  slot — and later entries are still attempted. Only issued ids are
+  recorded, so a failed build never claims its id and a later task
+  may legitimately reuse that value. This is the dataquest-side peer
+  of escrow's `buildSettlementWebhooks` issuedEventIds guard. New
+  `test/payoutWebhookBatchDuplicateEventId.test.ts` (8 cases) pins
+  the fixed-value factory (first signed, second the duplicate
+  error), the still-attempted later entry, the failed build not
+  claiming its id, the unaffected distinct-id factory, the verbatim
+  error text, the unmasked empty/non-string factory validation
+  errors, and the unaffected single build.
+
 - `buildPayoutWebhooks` rejects a repeated `taskId` in the batch
   (backlog #997): the batch previously mapped tasks with no
   de-duplication, so one task listed twice produced two signed

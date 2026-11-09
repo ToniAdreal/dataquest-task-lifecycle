@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1179 tests, all local
+npm test   # 1187 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1266,7 +1266,15 @@ the whole batch before anything is built — two entries for one task
 would sign two webhooks with different `eventId`s for the same
 payout, which a receiver deduplicating on `eventId` could not
 recognize as one payout. The single build is unaffected: calling it
-twice for the same task is legitimate. Call-level configuration errors throw for the whole batch
+twice for the same task is legitimate. A second exception, per entry
+rather than per batch: when the `eventIdFactory` returns an `eventId`
+already issued in this batch (a counter reset or fixed value), that
+entry records `duplicate eventId "…" in batch: eventIds must be
+unique within a batch` as its `{ taskId, error }` and is never
+signed, while later entries are still attempted — and a failed build
+never claims its id, so a later task may legitimately reuse that
+value. This mirrors escrow's `buildSettlementWebhooks`
+issued-`eventId` guard. Call-level configuration errors throw for the whole batch
 instead — an empty secret, an invalid shared `now`, or a non-array
 `tasks`. The batch shares the `now` timestamp and the `eventId`
 generation strategy (`opts.eventIdFactory`, called once per task;
@@ -2009,7 +2017,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1179 tests covering the happy path, reject→resubmit
+`npm test` runs 1187 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
