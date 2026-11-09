@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark row for `tasksByFilters(tasks, { state?, actor?,
+  event?, payoutRef? })` (backlog #1009): one combined-filter
+  lookup over a fixed 6-task mixed batch mirroring the #990 test
+  and the #1004 demo segment (a plain IN_REVIEW task, a disputed
+  task, a task that went through a full dispute round and came back
+  to IN_REVIEW, two PAID tasks settled under different refs, and a
+  fresh task with no history), self-checked per iteration for the
+  one-hit reviewer + IN_REVIEW + REJECT slice [BENCH-FILTER-03] in
+  input order holding the same task object; the two-condition
+  contrast [BENCH-FILTER-01, BENCH-FILTER-03], the payoutRef
+  contrast [BENCH-FILTER-04], the empty-filter whole-batch return,
+  and the unknown-state / unknown-event / empty-actor fail-fast
+  errors are pinned once outside the timed loop. Measured
+  2026-11-09 at ~106,333 ops/sec (9.40 µs/op); README Benchmarks
+  prose, detail paragraph, and throughput table updated to
+  ninety-one paths.
+
 - CLI demo combined-filter segment (backlog #1004): `npm run demo`
   now shows `tasksByFilters()` over a fixed 6-task mixed batch —
   the board query `{ state: "IN_REVIEW", actor: "reviewer",

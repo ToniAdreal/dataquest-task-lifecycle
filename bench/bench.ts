@@ -1383,6 +1383,25 @@
  *      clock: events come from the fixed fixture, mirroring
  *      the #970 test semantics and the #979 demo segment.
  *
+ *  67. Combined-filter listing — `tasksByFilters` over a fixed
+ *      6-task mixed batch (see the combined-filter fixture
+ *      below): the timed loop filters for `{ state: "IN_REVIEW",
+ *      actor: "reviewer", event: "REJECT" }`, self-checking the
+ *      hand-pinned slice [BENCH-FILTER-03] in input order holding
+ *      the same task object — the task that went through a full
+ *      dispute round and came back to review is the only one
+ *      matching all three conditions. Outside the timed loop,
+ *      the two-condition contrast finds [BENCH-FILTER-01,
+ *      BENCH-FILTER-03], the payoutRef axis finds only
+ *      BENCH-FILTER-04, the empty filter returns the whole batch,
+ *      and an unknown state / unknown event / empty actor fails
+ *      fast with the exact `invalid tasksByFilters` error instead
+ *      of an empty list. The filter is pure, so the same batch
+ *      serves every iteration with no rebuild. No network, no
+ *      randomness, and no wall clock: events come from the fixed
+ *      fixture, mirroring the #990 test semantics and the #1004
+ *      demo segment.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -1430,6 +1449,7 @@ import {
   tasksApproachingDeadline,
   tasksByActor,
   tasksByEvent,
+  tasksByFilters,
   tasksByPayoutRef,
   tasksByState,
   totalPaidOut,
@@ -10717,6 +10737,165 @@ function benchTasksByPayoutRef(): number {
   }, ITERATIONS);
 }
 
+// Combined-filter fixture (backlog #1009): a fixed 6-task batch
+// mirroring the #990 test and the #1004 demo segment — a plain
+// IN_REVIEW task the reviewer BEGIN_REVIEWed but never rejected, a
+// disputed task (right actor and event, wrong state), a task that
+// went through a full dispute round and is back IN_REVIEW (the only
+// task matching all three timed conditions), two PAID tasks settled
+// under different refs, and a fresh DRAFT task with no history. The
+// filter is pure, so this single batch serves every timed iteration
+// with no rebuild. The timed pass is one combined lookup over the
+// 6-task batch: `{ state: "IN_REVIEW", actor: "reviewer", event:
+// "REJECT" }`, in input order, holding the same task object. The
+// step lists are the #990 ones, written out here as (event, actor)
+// pairs with the same per-step timestamp offsets as the event
+// fixture, never derived by calling tasksByFilters itself.
+const FILTER_PLAIN_REVIEW_STEPS: Array<{ event: TaskEvent; actor: string }> = [
+  { event: "PUBLISH", actor: "researcher" },
+  { event: "ACCEPT", actor: "contributor" },
+  { event: "START_CAPTURE", actor: "contributor" },
+  { event: "SUBMIT", actor: "contributor" },
+  { event: "BEGIN_REVIEW", actor: "reviewer" },
+];
+const FILTER_DISPUTED_STEPS: Array<{ event: TaskEvent; actor: string }> = [
+  ...FILTER_PLAIN_REVIEW_STEPS,
+  { event: "REJECT", actor: "reviewer" },
+  { event: "DISPUTE", actor: "moderator" },
+];
+const FILTER_REVIEWED_REJECTED_STEPS: Array<{
+  event: TaskEvent;
+  actor: string;
+}> = [
+  ...FILTER_DISPUTED_STEPS,
+  { event: "ARBITRATE_REJECT", actor: "moderator" },
+  { event: "RESUBMIT", actor: "contributor" },
+  { event: "SUBMIT", actor: "contributor" },
+  { event: "BEGIN_REVIEW", actor: "reviewer" },
+];
+function buildFilterTask(
+  id: string,
+  steps: Array<{ event: TaskEvent; actor: string }>,
+): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  steps.forEach(({ event, actor }, i) => {
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * HOUR_MS).toISOString(),
+    });
+  });
+  return task;
+}
+const combinedFilterBatch: TaskLifecycle[] = [
+  buildFilterTask("BENCH-FILTER-01", FILTER_PLAIN_REVIEW_STEPS),
+  buildFilterTask("BENCH-FILTER-02", FILTER_DISPUTED_STEPS),
+  buildFilterTask("BENCH-FILTER-03", FILTER_REVIEWED_REJECTED_STEPS),
+  buildPaidTask("BENCH-FILTER-04", {
+    quotedAmount: 100,
+    payoutAmount: 100,
+    payoutRef: "xfer-bench-01",
+  }),
+  buildPaidTask("BENCH-FILTER-05", {
+    quotedAmount: 200,
+    payoutAmount: 200,
+    payoutRef: "xfer-bench-02",
+  }),
+  new TaskLifecycle("BENCH-FILTER-06"),
+];
+const expectedByCombinedFilter = [combinedFilterBatch[2]];
+const expectedByCombinedFilterIds = ["BENCH-FILTER-03"];
+
+function checkTasksByFilters(out: TaskLifecycle[]): void {
+  if (
+    out.length !== expectedByCombinedFilter.length ||
+    out.some((t, i) => t !== expectedByCombinedFilter[i])
+  ) {
+    throw new Error("benchmark self-check failed: tasksByFilters");
+  }
+}
+
+// Pre-checks outside timing: the timed shape itself is correct,
+// dropping the event condition widens the slice to the two
+// IN_REVIEW reviewer-touched tasks, the payoutRef axis finds only
+// its own PAID task, the empty filter returns the whole batch, and
+// an unknown state / unknown event / empty actor fails fast with the
+// exact error instead of an empty list (never timed).
+checkTasksByFilters(
+  tasksByFilters(combinedFilterBatch, {
+    state: "IN_REVIEW",
+    actor: "reviewer",
+    event: "REJECT",
+  }),
+);
+if (
+  tasksByFilters(combinedFilterBatch, {
+    state: "IN_REVIEW",
+    actor: "reviewer",
+  })
+    .map((t) => t.id)
+    .join(",") !== "BENCH-FILTER-01,BENCH-FILTER-03" ||
+  tasksByFilters(combinedFilterBatch, { payoutRef: "xfer-bench-01" })
+    .map((t) => t.id)
+    .join(",") !== "BENCH-FILTER-04" ||
+  tasksByFilters(combinedFilterBatch, {})
+    .map((t) => t.id)
+    .join(",") !== combinedFilterBatch.map((t) => t.id).join(",")
+) {
+  throw new Error("benchmark fixture failed: tasksByFilters batch shape");
+}
+let byFiltersUnknownStateThrew = false;
+try {
+  tasksByFilters(combinedFilterBatch, { state: "OPENN" as TaskState });
+} catch (error) {
+  byFiltersUnknownStateThrew =
+    error instanceof Error &&
+    error.message === 'invalid tasksByFilters: unknown state "OPENN"';
+}
+let byFiltersUnknownEventThrew = false;
+try {
+  tasksByFilters(combinedFilterBatch, { event: "REJEC" as TaskEvent });
+} catch (error) {
+  byFiltersUnknownEventThrew =
+    error instanceof Error &&
+    error.message === 'invalid tasksByFilters: unknown event "REJEC"';
+}
+let byFiltersEmptyActorThrew = false;
+try {
+  tasksByFilters(combinedFilterBatch, { actor: "" });
+} catch (error) {
+  byFiltersEmptyActorThrew =
+    error instanceof Error &&
+    error.message ===
+      'invalid tasksByFilters: actor must be a non-empty string, got ""';
+}
+if (
+  !byFiltersUnknownStateThrew ||
+  !byFiltersUnknownEventThrew ||
+  !byFiltersEmptyActorThrew
+) {
+  throw new Error(
+    "benchmark self-check failed: tasksByFilters illegal filter",
+  );
+}
+
+function benchTasksByFilters(): number {
+  return measure(() => {
+    // Shared fixture batch per iteration: the filter is pure, so
+    // no rebuild is needed. Per-iteration self-check: exactly the
+    // hand-written one-hit slice, in batch order, holding the same
+    // task object — the task that went through a full dispute round
+    // and came back to review is the only one matching all three
+    // conditions (see the combined-filter fixture above).
+    checkTasksByFilters(
+      tasksByFilters(combinedFilterBatch, {
+        state: "IN_REVIEW",
+        actor: "reviewer",
+        event: "REJECT",
+      }),
+    );
+  }, ITERATIONS);
+}
+
 // The demo's pinned `formatMinorUnits` vectors (see src/demo.ts),
 // plus the finance-pass total: 1634900 minor units renders
 // "16349.00". The -0 vector renders "0.00" without a minus sign —
@@ -11781,6 +11960,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "tasksByState (12 mixed-state tasks, OPEN slice)", ops: benchTasksByState() },
   { path: "tasksByActor (6 mixed-actor tasks, moderator slice)", ops: benchTasksByActor() },
   { path: "tasksByEvent (6 mixed tasks, RESUBMIT slice)", ops: benchTasksByEvent() },
+  { path: "tasksByFilters (6 mixed tasks, reviewer + IN_REVIEW + REJECT slice)", ops: benchTasksByFilters() },
   { path: "reconcilePayouts (5 PAID tasks, 4 ledger rows, five groups)", ops: benchReconcilePayouts() },
   { path: "diffTaskSnapshots (25-entry history, 3 appended, payout + SLA change)", ops: benchDiffTaskSnapshots() },
   { path: "payoutAging (10-task batch, four buckets + 7d/30d boundaries)", ops: benchPayoutAging() },
