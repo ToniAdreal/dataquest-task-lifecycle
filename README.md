@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1187 tests, all local
+npm test   # 1189 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -149,7 +149,14 @@ settlement (DEMO-080), the task that only requested under
 "xfer-88f2" (DEMO-081), and the fresh task with no history
 (DEMO-082) match neither lookup — only a `PAYOUT_COMPLETE` entry
 counts as settlement evidence, and both lookups are pure; no task
-is dispatched or mutated), a state visit budget branch that drives
+is dispatched or mutated), a combined-filter branch that drives six
+more tasks under fixed-literal timestamps and asks all three
+questions at once — `tasksByFilters()` with `{ state: "IN_REVIEW",
+actor: "reviewer", event: "REJECT" }` selects only DEMO-092 (the
+task that went through a full dispute round and came back to
+review), while dropping the event condition widens the slice to
+DEMO-090 and DEMO-092 — each condition narrows, and both calls are
+pure; no task is dispatched or mutated), a state visit budget branch that drives
 two more tasks under fixed-literal timestamps — DEMO-083 carries
 `maxVisitsByState: { CAPTURING: 2 }` and is driven to REJECTED
 (CAPTURING visited 1 of 2), takes one RESUBMIT round back through
@@ -2017,7 +2024,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1187 tests covering the happy path, reject→resubmit
+`npm test` runs 1189 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo combined-filter segment (backlog #1004): `npm run demo`
+  now shows `tasksByFilters()` over a fixed 6-task mixed batch —
+  the board query `{ state: "IN_REVIEW", actor: "reviewer",
+  event: "REJECT" }` selects only DEMO-092 (the task that went
+  through a full dispute round and came back to review), and
+  dropping the event condition widens the slice to DEMO-090 and
+  DEMO-092, so each condition visibly narrows; the segment is
+  self-checked against the hand-pinned hit lists and cross-checked
+  by the demo tests against direct library calls.
+
 - Combined batch filter `tasksByFilters(tasks, { state?, actor?,
   event?, payoutRef? })` (backlog #990): the combined counterpart
   to the single-axis selectors — returns, in input order, the tasks

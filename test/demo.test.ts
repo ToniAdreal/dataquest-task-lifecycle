@@ -75,6 +75,7 @@ import {
   tasksApproachingDeadline,
   tasksByActor,
   tasksByEvent,
+  tasksByFilters,
   tasksByPayoutRef,
   tasksByState,
   toMinorUnits,
@@ -523,6 +524,63 @@ Task DEMO-081: DRAFT
   tasksByPayoutRef([DEMO-077, DEMO-078, DEMO-079, DEMO-080, DEMO-081, DEMO-082], "xfer-99g3"): DEMO-079 (1 task)
   contrast: only a PAYOUT_COMPLETE entry counts — DEMO-080 settled ref-less, DEMO-081 only names xfer-88f2 on its REQUEST_PAYOUT, and DEMO-082 has no history, so none of the three matches either lookup
   reverse lookup is pure: no task was dispatched or mutated by either call
+
+Combined-filter branch (tasksByFilters over six more tasks, one pass, all four axes):
+Task DEMO-090: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+Task DEMO-091: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  DISPUTE         REJECTED     -> DISPUTED  (moderator)
+Task DEMO-092: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  DISPUTE         REJECTED     -> DISPUTED  (moderator)
+  ARBITRATE_REJECT DISPUTED     -> REJECTED  (moderator)
+  RESUBMIT        REJECTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+Task DEMO-093: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-094: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+Task DEMO-095: DRAFT
+  DEMO-090: state IN_REVIEW, actors researcher, contributor, reviewer, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW
+  DEMO-091: state DISPUTED, actors researcher, contributor, reviewer, moderator, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, DISPUTE
+  DEMO-092: state IN_REVIEW, actors researcher, contributor, reviewer, moderator, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, DISPUTE, ARBITRATE_REJECT, RESUBMIT
+  DEMO-093: state PAID, actors researcher, contributor, reviewer, system, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, APPROVE, REQUEST_PAYOUT, PAYOUT_COMPLETE
+  DEMO-094: state PAID, actors researcher, contributor, reviewer, system, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, APPROVE, REQUEST_PAYOUT, PAYOUT_COMPLETE
+  DEMO-095: state DRAFT, actors none, events none
+  tasksByFilters([DEMO-090, DEMO-091, DEMO-092, DEMO-093, DEMO-094, DEMO-095], { state: "IN_REVIEW", actor: "reviewer", event: "REJECT" }): DEMO-092 (1 task)
+  tasksByFilters([DEMO-090, DEMO-091, DEMO-092, DEMO-093, DEMO-094, DEMO-095], { state: "IN_REVIEW", actor: "reviewer" }): DEMO-090, DEMO-092 (2 tasks)
+  contrast: each condition narrows the slice — DEMO-090 is IN_REVIEW and reviewer-touched but was never rejected, DEMO-091 was rejected by the reviewer yet sits DISPUTED, DEMO-093 and DEMO-094 are PAID, and DEMO-095 has no history, so only DEMO-092 survives all three conditions; dropping the REJECT condition widens the hit list to DEMO-090 and DEMO-092
+  filtering is pure: no task was dispatched or mutated by either call
 
 State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):
 Task DEMO-083: DRAFT
@@ -998,7 +1056,7 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 876);
+  assert.equal(lines.length, 933);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2644,7 +2702,7 @@ test("demo payout-reference segment is deterministic: two runs print byte-identi
   const refLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):"),
-      ls.indexOf("State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):") - 1,
+      ls.indexOf("Combined-filter branch (tasksByFilters over six more tasks, one pass, all four axes):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2662,6 +2720,139 @@ test("demo payout-reference segment is deterministic: two runs print byte-identi
   assert.deepEqual(
     a.payoutRefOtherFound.map((t) => t.id),
     b.payoutRefOtherFound.map((t) => t.id),
+  );
+});
+
+test("demo shows the combined-filter branch in-process: reviewer-rejected tasks back in review, one pass, each condition narrows", async () => {
+  const {
+    combinedFilterTasks,
+    combinedFilterReviewedRejected,
+    combinedFilterReviewed,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // The six branch tasks end in the hand-written states with
+  // fixed-literal histories — the same mixed batch shape as the
+  // `tasksByFilters` tests.
+  assert.deepEqual(
+    combinedFilterTasks.map((t) => [t.id, t.state, t.history.length]),
+    [
+      ["DEMO-090", "IN_REVIEW", 5],
+      ["DEMO-091", "DISPUTED", 7],
+      ["DEMO-092", "IN_REVIEW", 11],
+      ["DEMO-093", "PAID", 8],
+      ["DEMO-094", "PAID", 8],
+      ["DEMO-095", "DRAFT", 0],
+    ],
+  );
+  // The board query from the backlog: IN_REVIEW tasks the
+  // reviewer rejected — only the task that went through a full
+  // dispute round and came back to review survives all three
+  // conditions.
+  assert.deepEqual(
+    combinedFilterReviewedRejected.map((t) => t.id),
+    ["DEMO-092"],
+  );
+  // Dropping the REJECT condition widens the slice to the plain
+  // in-review task as well — each condition narrows.
+  assert.deepEqual(
+    combinedFilterReviewed.map((t) => t.id),
+    ["DEMO-090", "DEMO-092"],
+  );
+  // An independent re-screening of the returned tasks reproduces
+  // both slices, holding the same task objects — the demo
+  // segment is not self-certifying.
+  const rescreened = tasksByFilters(combinedFilterTasks, {
+    state: "IN_REVIEW",
+    actor: "reviewer",
+    event: "REJECT",
+  });
+  assert.deepEqual(
+    rescreened.map((t) => t.id),
+    ["DEMO-092"],
+  );
+  assert.equal(rescreened[0], combinedFilterTasks[2]);
+  assert.deepEqual(
+    tasksByFilters(combinedFilterTasks, {
+      state: "IN_REVIEW",
+      actor: "reviewer",
+    }).map((t) => t.id),
+    ["DEMO-090", "DEMO-092"],
+  );
+  // The same hit under the `tasksByFilters` tests' own board
+  // query (moderator-disputed tasks back in review).
+  assert.deepEqual(
+    tasksByFilters(combinedFilterTasks, {
+      state: "IN_REVIEW",
+      actor: "moderator",
+      event: "DISPUTE",
+    }).map((t) => t.id),
+    ["DEMO-092"],
+  );
+  // Filtering is pure: the tasks keep their states and history
+  // lengths after both filters ran inside the demo.
+  assert.deepEqual(
+    combinedFilterTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["IN_REVIEW", 5],
+      ["DISPUTED", 7],
+      ["IN_REVIEW", 11],
+      ["PAID", 8],
+      ["PAID", 8],
+      ["DRAFT", 0],
+    ],
+  );
+  // The branch is printed after the payout-reference branch and
+  // before the state visit budget branch, with its lines verbatim.
+  const combinedAt = text.indexOf(
+    "Combined-filter branch (tasksByFilters over six more tasks, one pass, all four axes):",
+  );
+  assert.ok(
+    combinedAt >
+      text.indexOf("Payout-reference reverse-lookup branch (tasksByPayoutRef over six more tasks, settlement evidence vs request):"),
+    "combined-filter branch must follow the payout-reference branch",
+  );
+  assert.ok(
+    text.indexOf("State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):") >
+      combinedAt,
+    "state visit budget branch must follow the combined-filter branch",
+  );
+  assert.match(text, /DEMO-090: state IN_REVIEW, actors researcher, contributor, reviewer, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW/);
+  assert.match(text, /DEMO-092: state IN_REVIEW, actors researcher, contributor, reviewer, moderator, events PUBLISH, ACCEPT, START_CAPTURE, SUBMIT, BEGIN_REVIEW, REJECT, DISPUTE, ARBITRATE_REJECT, RESUBMIT/);
+  assert.match(text, /DEMO-095: state DRAFT, actors none, events none/);
+  assert.match(
+    text,
+    /tasksByFilters\(\[DEMO-090, DEMO-091, DEMO-092, DEMO-093, DEMO-094, DEMO-095\], \{ state: "IN_REVIEW", actor: "reviewer", event: "REJECT" \}\): DEMO-092 \(1 task\)/,
+  );
+  assert.match(
+    text,
+    /tasksByFilters\(\[DEMO-090, DEMO-091, DEMO-092, DEMO-093, DEMO-094, DEMO-095\], \{ state: "IN_REVIEW", actor: "reviewer" \}\): DEMO-090, DEMO-092 \(2 tasks\)/,
+  );
+});
+
+test("demo combined-filter segment is deterministic: two runs print byte-identical combined lines", async () => {
+  const combinedLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Combined-filter branch (tasksByFilters over six more tasks, one pass, all four axes):"),
+      ls.indexOf("State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = combinedLines(a.lines);
+  // Header + (task header + steps) for six tasks (one
+  // header-only) + 6 per-task lines + two selection lines +
+  // contrast line + purity line; every timestamp in the segment
+  // is a fixed literal, so no normalization is needed.
+  assert.equal(segA.length, 56);
+  assert.deepEqual(segA, combinedLines(b.lines));
+  assert.deepEqual(
+    a.combinedFilterReviewedRejected.map((t) => t.id),
+    b.combinedFilterReviewedRejected.map((t) => t.id),
+  );
+  assert.deepEqual(
+    a.combinedFilterReviewed.map((t) => t.id),
+    b.combinedFilterReviewed.map((t) => t.id),
   );
 });
 
@@ -3564,7 +3755,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 876);
+  assert.equal(out.trimEnd().split("\n").length, 933);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
