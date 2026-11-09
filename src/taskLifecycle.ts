@@ -528,12 +528,41 @@ export interface TasksByFiltersOptions {
  * `event` rejects unknown events, and an empty or non-string
  * `actor`/`payoutRef` fails fast instead of silently returning an
  * empty list — a typo in any axis cannot masquerade as "no task
- * matches this combination".
+ * matches this combination". The same fail-closed rule covers the
+ * filter keys themselves: only `state`, `actor`, `event`, and
+ * `payoutRef` are accepted, so a misspelled axis name such as
+ * `states` throws `invalid tasksByFilters: unknown filter
+ * "states"` instead of being silently ignored and returning the
+ * unfiltered batch — and a non-object `filters` argument throws
+ * instead of surfacing a `TypeError` from the first property read.
+ * Mirrors the escrow state machine's `escrowsByFilters`, which has
+ * three axes and no `payoutRef` counterpart.
  */
 export function tasksByFilters(
   tasks: readonly TaskLifecycle[],
   filters: TasksByFiltersOptions,
 ): TaskLifecycle[] {
+  if (
+    typeof filters !== "object" ||
+    filters === null ||
+    Array.isArray(filters)
+  ) {
+    throw new Error(
+      `invalid tasksByFilters: filters must be an object, got ${filters === null ? "null" : Array.isArray(filters) ? "array" : typeof filters}`,
+    );
+  }
+  for (const key of Object.keys(filters)) {
+    if (
+      key !== "state" &&
+      key !== "actor" &&
+      key !== "event" &&
+      key !== "payoutRef"
+    ) {
+      throw new Error(
+        `invalid tasksByFilters: unknown filter "${key}"`,
+      );
+    }
+  }
   if (filters.state !== undefined && !STATES.has(filters.state)) {
     throw new Error(
       `invalid tasksByFilters: unknown state "${String(filters.state)}"`,

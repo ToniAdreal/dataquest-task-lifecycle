@@ -288,3 +288,148 @@ test("tasksByFilters: empty input returns an empty array", () => {
   assert.deepEqual(tasksByFilters([], { state: "IN_REVIEW" }), []);
   assert.deepEqual(tasksByFilters([], {}), []);
 });
+
+test("tasksByFilters: an unknown filter key fails fast, naming the key (backlog #1013)", () => {
+  const batch = mixedBatch();
+  // The classic typo: `state` misspelled as `states` used to be
+  // silently ignored and return the unfiltered batch.
+  assert.throws(
+    () => tasksByFilters(batch, { states: "IN_REVIEW" } as never),
+    /invalid tasksByFilters: unknown filter "states"/,
+  );
+  // Case variants of a legal axis are not legal axes.
+  assert.throws(
+    () => tasksByFilters(batch, { State: "IN_REVIEW" } as never),
+    /invalid tasksByFilters: unknown filter "State"/,
+  );
+  // A plausible-but-nonexistent axis is rejected the same way.
+  assert.throws(
+    () => tasksByFilters(batch, { status: "IN_REVIEW" } as never),
+    /invalid tasksByFilters: unknown filter "status"/,
+  );
+  // The payoutRef axis is case-sensitive too.
+  assert.throws(
+    () => tasksByFilters(batch, { payoutref: "xfer-88f2" } as never),
+    /invalid tasksByFilters: unknown filter "payoutref"/,
+  );
+  // The whitelist scan runs before any filtering, even on an
+  // empty batch.
+  assert.throws(
+    () => tasksByFilters([], { states: "IN_REVIEW" } as never),
+    /invalid tasksByFilters: unknown filter "states"/,
+  );
+});
+
+test("tasksByFilters: a legal condition plus an unknown key throws instead of returning a partial slice", () => {
+  const batch = mixedBatch();
+  // The legal half alone would select [t-review-a,
+  // t-review-disputed]; the unknown half must not be dropped and
+  // the call must not return that slice as if the extra condition
+  // never existed.
+  assert.throws(
+    () =>
+      tasksByFilters(batch, {
+        state: "IN_REVIEW",
+        states: "IN_REVIEW",
+      } as never),
+    /invalid tasksByFilters: unknown filter "states"/,
+  );
+  assert.throws(
+    () =>
+      tasksByFilters(batch, {
+        actor: "moderator",
+        status: "IN_REVIEW",
+      } as never),
+    /invalid tasksByFilters: unknown filter "status"/,
+  );
+});
+
+test("tasksByFilters: a non-object filters argument throws a configuration error, not a TypeError", () => {
+  const batch = mixedBatch();
+  assert.throws(
+    () => tasksByFilters(batch, null as never),
+    /invalid tasksByFilters: filters must be an object, got null/,
+  );
+  assert.throws(
+    () => tasksByFilters(batch, undefined as never),
+    /invalid tasksByFilters: filters must be an object, got undefined/,
+  );
+  assert.throws(
+    () => tasksByFilters(batch, 42 as never),
+    /invalid tasksByFilters: filters must be an object, got number/,
+  );
+  assert.throws(
+    () => tasksByFilters(batch, "IN_REVIEW" as never),
+    /invalid tasksByFilters: filters must be an object, got string/,
+  );
+  assert.throws(
+    () => tasksByFilters(batch, [] as never),
+    /invalid tasksByFilters: filters must be an object, got array/,
+  );
+});
+
+test("tasksByFilters: the key whitelist is checked before value validation", () => {
+  const batch = mixedBatch();
+  // Both the key and the value are wrong here: the unknown-key
+  // error wins, because the whitelist scan runs at the entry.
+  assert.throws(
+    () =>
+      tasksByFilters(batch, {
+        state: "IN_REVIEWW",
+        states: "IN_REVIEW",
+      } as never),
+    /invalid tasksByFilters: unknown filter "states"/,
+  );
+  assert.throws(
+    () =>
+      tasksByFilters(batch, {
+        actor: "",
+        payoutref: "xfer-88f2",
+      } as never),
+    /invalid tasksByFilters: unknown filter "payoutref"/,
+  );
+});
+
+test("tasksByFilters: all four legal keys still combine after the guard (backlog #1013)", () => {
+  const batch = mixedBatch();
+  // The four-axis slice from the existing intersection test must
+  // be unchanged by the whitelist: the guard only rejects keys
+  // outside the four.
+  assert.deepEqual(
+    tasksByFilters(batch, {
+      state: "PAID",
+      actor: "system",
+      event: "PAYOUT_COMPLETE",
+      payoutRef: "xfer-88f2",
+    }).map((t) => t.id),
+    ["t-paid-a"],
+  );
+  // And the empty filter still selects the whole batch.
+  assert.deepEqual(
+    tasksByFilters(batch, {}).map((t) => t.id),
+    [
+      "t-review-a",
+      "t-disputed",
+      "t-review-disputed",
+      "t-paid-a",
+      "t-paid-b",
+      "t-draft",
+    ],
+  );
+});
+
+test("tasksByFilters: an explicitly-undefined legal key is still not a condition", () => {
+  const batch = mixedBatch();
+  // undefined values are the "condition absent" spelling, so they
+  // must survive the whitelist scan (the key itself is legal) and
+  // not throw.
+  assert.equal(
+    tasksByFilters(batch, {
+      state: undefined,
+      actor: undefined,
+      event: undefined,
+      payoutRef: undefined,
+    }).length,
+    6,
+  );
+});

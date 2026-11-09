@@ -245,6 +245,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `tasksByFilters` rejects unknown filter keys fail-closed (backlog
+  #1013): the combined filter previously read only the four known
+  axes (`state`, `actor`, `event`, `payoutRef`), so a typo'd key
+  such as `states` was silently ignored and the call returned the
+  unfiltered batch. The entry now scans `filters` against the
+  four-key whitelist before any value is validated, so an unknown
+  key throws `invalid tasksByFilters: unknown filter "<name>"`
+  naming the key, and a non-object `filters` argument throws a
+  configuration error instead of surfacing a `TypeError` from the
+  first property read. Mirrors the escrow state machine's
+  `escrowsByFilters` guard (backlog #1012), which has three axes
+  and no `payoutRef` counterpart. Six new tests in
+  `test/tasksByFilters.test.ts` pin the four typo/case variants
+  naming the key, the legal+unknown mix throwing before any
+  filtering, the five non-object shapes, the whitelist winning
+  over value validation, the four-axis slice unchanged, and
+  explicitly-undefined legal keys still meaning "condition absent".
+
 - `TaskLifecycleOptions` unknown fields now fail closed (backlog
   #1006): the constructor scans `opts` against a `TASK_OPTION_FIELDS`
   whitelist before any field is consumed, so a typo'd key such as
