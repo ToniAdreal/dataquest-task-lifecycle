@@ -212,6 +212,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `TaskLifecycleOptions` unknown fields now fail closed (backlog
+  #1006): the constructor scans `opts` against a `TASK_OPTION_FIELDS`
+  whitelist before any field is consumed, so a typo'd key such as
+  `maxResubmit` throws `invalid task options: unknown option
+  "maxResubmit"` instead of silently running with the default
+  unlimited budget. Non-object `opts` are rejected the same way.
+  `fromHistory` inherits the guard through the constructor; `fromJSON`
+  builds its own options object from the parsed snapshot, so it can
+  never carry an unknown field. Mirrors the escrow state machine's
+  `ESCROW_OPTION_FIELDS` guard (backlog #548). New
+  `test/taskOptionsUnknownFields.test.ts` (10 cases) pins the
+  all-nine-legal-fields construction with the budget really biting,
+  five typo/case variants naming the field, the legal+unknown mix
+  throwing before any field is consumed, the empty/omitted-opts
+  paths, and both `fromHistory` directions.
+
 - `buildPayoutWebhooks` rejects a duplicate `eventId` in the batch
   (backlog #998): the batch previously kept no record of the
   `eventId`s it had already issued, so a buggy `eventIdFactory`

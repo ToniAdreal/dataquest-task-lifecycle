@@ -2033,6 +2033,31 @@ export interface TaskLifecycleOptions {
   slaDeadlines?: Partial<Record<TaskState, Date | string>>;
 }
 
+/**
+ * Whitelist of `TaskLifecycleOptions` field names. A field outside this
+ * set is rejected, never silently dropped: a typo'd `maxResubmits`
+ * (e.g. `maxResubmit`) would otherwise parse as "no budget" and
+ * quietly disable the resubmit retry control. Mirrors the escrow
+ * state machine's `ESCROW_OPTION_FIELDS` guard (backlog #548) on the
+ * same principle — constructor options are live risk controls
+ * (budgets, RBAC, payout evidence, audit key), so a misspelled key is
+ * worse here than in a snapshot. `TaskLifecycle.fromHistory` funnels
+ * its `opts` through the same constructor, so the rebuild path gets
+ * the same protection; `fromJSON` builds its own options object from
+ * the parsed snapshot, so it can never carry an unknown field.
+ */
+const TASK_OPTION_FIELDS = new Set([
+  "maxResubmits",
+  "maxDisputes",
+  "maxVisitsByState",
+  "rolePolicy",
+  "requirePayoutRef",
+  "requireActor",
+  "idempotencyKeys",
+  "auditSecret",
+  "slaDeadlines",
+]);
+
 function assertRequirePayoutRef(value: unknown, tag: string): boolean {
   if (value === undefined) return false;
   if (typeof value !== "boolean") {
@@ -3375,6 +3400,19 @@ export class TaskLifecycle {
   constructor(id: string, opts?: TaskLifecycleOptions) {
     if (typeof id !== "string" || id.length === 0) {
       throw new Error("invalid task: id must be a non-empty string");
+    }
+    if (opts !== undefined) {
+      if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+        throw new Error("invalid task options: opts must be an object");
+      }
+      // Unknown option fields fail closed (see TASK_OPTION_FIELDS),
+      // checked before any field is consumed so a typo is reported as
+      // itself, not as a missing-field default.
+      for (const key of Object.keys(opts)) {
+        if (!TASK_OPTION_FIELDS.has(key)) {
+          throw new Error(`invalid task options: unknown option "${key}"`);
+        }
+      }
     }
     this.id = id;
     this._maxResubmits = assertMaxResubmits(opts?.maxResubmits, "invalid option");
