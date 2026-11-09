@@ -202,7 +202,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
-- `totalQuoted` JSDoc narrows the batch-gap identity's premise
+- `buildPayoutWebhooks` rejects a repeated `taskId` in the batch
+  (backlog #997): the batch previously mapped tasks with no
+  de-duplication, so one task listed twice produced two signed
+  payout webhooks with different `eventId`s, and a receiver
+  deduplicating on `eventId` could not tell they were the same
+  payout. The batch now scans `taskId`s up front and throws
+  `buildPayoutWebhooks: duplicate taskId "…" in batch: …` before
+  building anything (all duplicated ids named, each once) — the
+  escrow-side peer of the `buildSettlementReports`
+  duplicate-`escrowId` guard (#993). The single
+  `buildPayoutWebhook` is unaffected, and entries with no string
+  id keep their per-task failure. New
+  `test/payoutWebhookBatchDuplicateTaskId.test.ts` (8 cases) pins
+  the fail-closed throw, the never-called `eventIdFactory`, the
+  non-PAID duplicate pair, multiple duplicates, the unchanged
+  distinct-id path, the unaffected single build, the malformed
+  entry behavior, and the unchanged empty-secret error.
   (backlog #954): the gap `totalQuoted(tasks) - totalPaidOut(tasks)`
   was documented as unconditionally equal to the sum of `quoted -
   paid` over the tasks `mismatchedPayouts` flags. That holds if and

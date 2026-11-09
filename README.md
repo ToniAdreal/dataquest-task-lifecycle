@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1171 tests, all local
+npm test   # 1179 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1261,7 +1261,12 @@ const results = buildPayoutWebhooks(tasks, webhookSecret, { now: new Date() });
 
 Each task is attempted independently: a non-`PAID` task records its
 single-build error as `{ taskId, error }` and never blocks later
-tasks. Call-level configuration errors throw for the whole batch
+tasks. One exception: a repeated `taskId` in the batch throws for
+the whole batch before anything is built — two entries for one task
+would sign two webhooks with different `eventId`s for the same
+payout, which a receiver deduplicating on `eventId` could not
+recognize as one payout. The single build is unaffected: calling it
+twice for the same task is legitimate. Call-level configuration errors throw for the whole batch
 instead — an empty secret, an invalid shared `now`, or a non-array
 `tasks`. The batch shares the `now` timestamp and the `eventId`
 generation strategy (`opts.eventIdFactory`, called once per task;
@@ -2004,7 +2009,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1171 tests covering the happy path, reject→resubmit
+`npm test` runs 1179 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

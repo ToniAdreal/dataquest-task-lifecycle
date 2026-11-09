@@ -325,6 +325,18 @@ export type BuildPayoutWebhooksResult =
  * build's rules, never swallowed per task), an invalid shared `now`,
  * or a non-function `eventIdFactory`.
  *
+ * One exception to per-item isolation: a repeated `taskId` aborts
+ * the whole batch. Two entries for the same task would produce two
+ * signed payout webhooks with different `eventId`s, and a receiver
+ * deduplicating on `eventId` could not tell they are the same payout
+ * — the duplicate would look like a second payout. So the batch
+ * fails closed before building anything: it throws an error naming
+ * the duplicate id(s) and produces no webhooks at all. This is a
+ * caller bug (a mistyped batch list), not a per-task failure, so it
+ * is a throw, not a per-entry error. The single-task
+ * {@link buildPayoutWebhook} is unaffected: calling it twice for the
+ * same task is legitimate.
+ *
  * `eventId` semantics: one DISTINCT `eventId` per task (see
  * {@link BuildPayoutWebhooksOptions.eventIdFactory}); the shared
  * element is the generation strategy and the `now` timestamp, never
@@ -367,6 +379,36 @@ export function buildPayoutWebhooks(
   ) {
     throw new Error(
       "cannot build payout webhooks: invalid 'now' timestamp",
+    );
+  }
+  // Duplicate taskIds fail the whole batch before anything is built
+  // (the escrow buildSettlementReports guard, backlog #993): two
+  // entries for one task would sign two webhooks with different
+  // eventIds for the same payout. Only string ids are scanned — a
+  // malformed entry with no string id keeps its per-task failure
+  // below, exactly as before.
+  const seenIds = new Set<string>();
+  const duplicateIds: string[] = [];
+  for (const task of tasks) {
+    const id =
+      task !== null &&
+      typeof task === "object" &&
+      typeof (task as TaskLifecycle).id === "string"
+        ? (task as TaskLifecycle).id
+        : undefined;
+    if (id === undefined) continue;
+    if (seenIds.has(id)) {
+      if (!duplicateIds.includes(id)) {
+        duplicateIds.push(id);
+      }
+    } else {
+      seenIds.add(id);
+    }
+  }
+  if (duplicateIds.length > 0) {
+    const quoted = duplicateIds.map((id) => `"${id}"`).join(", ");
+    throw new Error(
+      `buildPayoutWebhooks: duplicate taskId ${quoted} in batch: taskIds must be unique within a batch (a repeated task would produce two signed payout webhooks with different eventIds, and a receiver deduplicating on eventId could not tell they are the same payout)`,
     );
   }
   const eventIdFactory = options.eventIdFactory ?? randomUUID;
