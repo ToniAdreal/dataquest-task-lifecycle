@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1199 tests, all local
+npm test   # 1213 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1374,6 +1374,38 @@ starts them at zero. The snapshot bridges one process across its own
 restart only; two processes restoring the same snapshot afterwards
 diverge, so it is not a substitute for shared storage.
 
+The unsigned snapshot above is trusted configuration: anyone who can
+rewrite the persisted file can delete a consumed `eventId` (a retried
+duplicate payout notification is then processed a second time) or inject a
+forged one (a legitimate payout notification is then dropped as an apparent
+duplicate). When the persisted file is not fully trusted, use the
+signed envelope instead — `exportSignedSnapshot(secret)` returns
+`{ v: 1, snapshot, mac }` with `mac` = HMAC-SHA256 over the canonical
+JSON of the snapshot, and
+`PayoutEventDedupe.restoreSignedSnapshot(envelope, secret, opts)`
+(alias `fromSignedSnapshot`) verifies it before restoring:
+
+```ts
+// before shutdown:
+persist(JSON.stringify(dedupe.exportSignedSnapshot(process.env.DEDUPE_SNAPSHOT_SECRET!)));
+// at startup:
+const dedupe2 = PayoutEventDedupe.restoreSignedSnapshot(JSON.parse(saved), process.env.DEDUPE_SNAPSHOT_SECRET!, { ttlMs: 24 * 60 * 60_000 });
+```
+
+The secret is never written into the envelope, and the two forms do
+not accept each other — a signed envelope is rejected by the unsigned
+`restore()`, and an unsigned snapshot is rejected by the signed
+restore, so a signed restore cannot silently downgrade to the
+trusted-configuration path. A tampered entry, a tampered `seenAtMs`,
+a tampered `mac`, or a wrong secret all fail closed with no store
+produced, and a MAC-valid envelope whose snapshot is itself malformed
+still fails the strict snapshot validation. The MAC is integrity
+protection only, not encryption: the eventIds inside are wire-visible
+values, so keep the secret where the snapshot writer keeps its other
+signing-side secrets. This mirrors the sibling escrow
+`SettlementEventDedupe` signed snapshot (`exportSignedSnapshot` /
+`restoreSignedSnapshot`), same envelope shape and canonical form.
+
 `maxAgeMs` alone leaves the future direction unbounded: a
 legitimately-signed payload issued far into the future (a sender clock
 set wrong or fast) would gain a near-unbounded replay window. Pass
@@ -2024,7 +2056,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1199 tests covering the happy path, reject→resubmit
+`npm test` runs 1213 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

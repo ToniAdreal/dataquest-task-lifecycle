@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- HMAC-signed snapshot envelope for `PayoutEventDedupe` (backlog
+  #1011): `exportSignedSnapshot(secret)` returns `{ v: 1, snapshot,
+  mac }` with `mac` = HMAC-SHA256 over the canonical JSON of the
+  snapshot, and `PayoutEventDedupe.restoreSignedSnapshot(envelope,
+  secret, opts)` (alias `fromSignedSnapshot`) verifies the MAC in
+  constant time before any snapshot parsing, so a rewritten persisted
+  file — a deleted consumed `eventId`, an injected forged one, a
+  shifted `seenAtMs` — fails closed at startup instead of silently
+  reopening the double-payout window or discarding a legitimate
+  payout. Same envelope shape and canonical form as the sibling
+  escrow `SettlementEventDedupe` signed snapshot (#1010) and the
+  rfc9421 `ReplayCache` signed snapshot. The unsigned snapshot stays
+  accepted as trusted configuration and the two forms never accept
+  each other; the secret is never written into the envelope and the
+  MAC is integrity protection only, not encryption.
+
 - Benchmark row for `tasksByFilters(tasks, { state?, actor?,
   event?, payoutRef? })` (backlog #1009): one combined-filter
   lookup over a fixed 6-task mixed batch mirroring the #990 test

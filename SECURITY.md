@@ -92,6 +92,26 @@ webhook signatures (`src/settlementWebhook.ts`).
   (`assertAuditSecret` in `src/taskLifecycle.ts`). The MAC comparison
   itself runs in constant time (`timingSafeEqual` after a length guard),
   so an online verifier exposes no per-byte timing oracle.
+
+  Dedupe snapshots get the same treatment as an opt-in layer:
+  `PayoutEventDedupe.exportSignedSnapshot(secret)` wraps the
+  unsigned `{ v: 1, entries }` snapshot in an HMAC-SHA256 envelope
+  `{ v: 1, snapshot, mac }` (same shape and canonical form as the
+  sibling escrow `SettlementEventDedupe` signed snapshot and the
+  rfc9421 `ReplayCache` signed snapshot), and
+  `restoreSignedSnapshot(envelope, secret)` verifies the MAC in
+  constant time before any snapshot parsing. A rewritten persisted
+  file — a deleted consumed `eventId`, an injected forged one, a
+  shifted `seenAtMs` — then fails closed at startup instead of
+  silently reopening the double-payout window or discarding a
+  legitimate payout as an apparent duplicate. The unsigned
+  snapshot stays accepted as trusted configuration, and the two
+  forms never accept each other, so a signed restore cannot
+  silently downgrade. The MAC is integrity protection only, not
+  encryption: the eventIds inside are wire-visible values, and the
+  secret is never written into the envelope — a restored dedupe
+  must be handed the secret again, like the audit secret above, and
+  key storage and distribution remain the caller's responsibility.
 - **Strict snapshot and history validation.** `TaskLifecycle.fromJSON`
   runs `parseSnapshot` (`src/taskLifecycle.ts`) on untrusted input:
   the schema-version gate (`v`, when present, must be exactly

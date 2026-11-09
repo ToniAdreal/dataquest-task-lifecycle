@@ -799,6 +799,124 @@ export interface PayoutEventDedupeSnapshot {
 }
 
 /**
+ * Integrity-protected form of a {@link PayoutEventDedupeSnapshot},
+ * produced by `PayoutEventDedupe.exportSignedSnapshot(secret)` and
+ * consumed by `PayoutEventDedupe.restoreSignedSnapshot(envelope,
+ * secret, opts?)` (see those methods for the exact contract). Same
+ * envelope shape as the sibling escrow-state-machine-ts
+ * `SettlementEventDedupe` signed snapshot
+ * (`SettlementEventDedupeSignedSnapshotEnvelope`) and the rfc9421
+ * `ReplayCache` signed snapshot
+ * (`ReplayCacheSignedSnapshotEnvelope`).
+ *
+ * - `v`: envelope format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `snapshot`: the wrapped {@link PayoutEventDedupeSnapshot},
+ *   exactly as `exportSnapshot()` produces it (live ids only, with
+ *   their original first-seen timestamps).
+ * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
+ *   `snapshot` (object keys sorted recursively, array order
+ *   preserved) under the caller's secret.
+ *
+ * The envelope carries no secret: the secret is caller configuration,
+ * never persisted in the envelope, and the same secret must be
+ * supplied at restore time. An envelope with any other field is
+ * rejected, so a caller cannot smuggle extra data (including a
+ * secret) past restore. The MAC is integrity protection only — it
+ * proves the snapshot was not rewritten by anyone without the
+ * secret — not confidentiality: the eventIds inside are not secrets
+ * (they are wire-visible values from signed webhooks), and the
+ * envelope itself is plain JSON. A caller that needs the snapshot
+ * kept private must encrypt it separately; this envelope does not.
+ */
+export interface PayoutEventDedupeSignedSnapshotEnvelope {
+  v: 1;
+  snapshot: PayoutEventDedupeSnapshot;
+  mac: string;
+}
+
+/**
+ * Canonical JSON for snapshot MACing: object keys sorted
+ * recursively (so a JSON round-trip that reorders keys still
+ * verifies), array order preserved (reordering entries would change
+ * which id wins a duplicate, so it must change the MAC), and
+ * primitives via `JSON.stringify`. A non-JSON value (notably
+ * `undefined`, which `JSON.stringify` would silently drop) throws
+ * instead of being silently normalized — a MAC computed over a
+ * silently altered document would be worse than no MAC.
+ * Same semantics as the sibling escrow `SettlementEventDedupe`
+ * signed snapshot's canonical form. (Named distinctly from the
+ * payload-shaped `canonicalJson` above, which only handles
+ * `PayoutWebhookPayload`.)
+ */
+function canonicalJsonForSnapshot(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error(
+        "PayoutEventDedupe: cannot canonicalize a non-finite number for snapshot signing",
+      );
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map((entry) => canonicalJsonForSnapshot(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalJsonForSnapshot(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error(
+    `PayoutEventDedupe: cannot canonicalize a non-JSON value of type ${typeof value} for snapshot signing`,
+  );
+}
+
+/**
+ * Validate a signed-snapshot secret and return its bytes. A secret
+ * is a non-empty string (UTF-8) or a non-empty `Buffer` — the same
+ * input shapes as the sibling escrow `SettlementEventDedupe` helper,
+ * and deliberately without a length floor: this MAC is integrity
+ * protection for a list of already wire-visible eventIds, and the
+ * backlog contract for this helper rejects only an empty secret, so
+ * a shorter caller secret is the caller's risk to take (use a long
+ * random secret; the envelope never records how long it was). An
+ * empty or wrongly typed secret is a caller-configuration error,
+ * thrown before any store state is touched.
+ */
+function signedSnapshotSecretBytes(secret: unknown): Buffer {
+  if (typeof secret === "string") {
+    if (secret.length === 0)
+      throw new Error(
+        "PayoutEventDedupe: signed snapshot secret must not be empty",
+      );
+    return Buffer.from(secret, "utf8");
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0)
+      throw new Error(
+        "PayoutEventDedupe: signed snapshot secret must not be empty",
+      );
+    return secret;
+  }
+  throw new Error(
+    `PayoutEventDedupe: signed snapshot secret must be a non-empty string or Buffer, got ${typeof secret}`,
+  );
+}
+
+/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+function computeSnapshotMac(
+  snapshot: PayoutEventDedupeSnapshot,
+  secretBytes: Buffer,
+): string {
+  return createHmac("sha256", secretBytes)
+    .update(canonicalJsonForSnapshot(snapshot), "utf8")
+    .digest("hex");
+}
+
+/**
  * Receiver-side deduplication store for payout webhook `eventId`s.
  *
  * `verifyPayoutWebhook`'s freshness window is only defense-in-depth:
@@ -825,7 +943,13 @@ export interface PayoutEventDedupeSnapshot {
  * across its own restart: `exportSnapshot()` before shutdown and
  * `PayoutEventDedupe.restore()` at startup (see
  * {@link PayoutEventDedupeSnapshot}) — but that covers only the
- * process that saved the snapshot, never a fleet. A deployment with
+ * process that saved the snapshot, never a fleet. The unsigned
+ * snapshot is trusted configuration: anyone who can rewrite the
+ * persisted file can delete a consumed id or inject a forged one.
+ * When the persisted file is not fully trusted, use the signed
+ * envelope instead — `exportSignedSnapshot(secret)` /
+ * `restoreSignedSnapshot(envelope, secret)` (see
+ * {@link PayoutEventDedupeSignedSnapshotEnvelope}). A deployment with
  * multiple receiver processes must deduplicate over shared storage
  * (a database unique constraint, Redis, …) instead. Within one
  * process the store is exact: an id is a duplicate if and only if
@@ -961,6 +1085,36 @@ export class PayoutEventDedupe {
   }
 
   /**
+   * Export the current snapshot wrapped in an HMAC-signed envelope
+   * (see {@link PayoutEventDedupeSignedSnapshotEnvelope}):
+   * `{ v: 1, snapshot, mac }` where `mac` is HMAC-SHA256 over the
+   * canonical JSON of the snapshot under `secret`. Persist the
+   * envelope (plain JSON) before a restart and restore it with
+   * {@link PayoutEventDedupe.restoreSignedSnapshot} — a process
+   * that restarts keeps rejecting eventIds seen inside their TTL,
+   * and anyone who rewrites the persisted entries without the
+   * secret is caught at restore instead of silently reopening the
+   * double-payout window (deleting a consumed id) or silently
+   * discarding a legitimate payout (injecting a forged id).
+   *
+   * The secret is never written into the envelope, and the envelope
+   * is integrity protection only, not encryption: the eventIds
+   * inside are wire-visible values, so the envelope itself needs no
+   * secrecy, but the secret must be kept where the snapshot writer
+   * keeps its other signing-side secrets. An empty secret is a
+   * caller-configuration error. The unsigned `exportSnapshot()`
+   * path is unchanged: this envelope is opt-in, and a caller that
+   * never signs keeps the old trusted-configuration semantics.
+   */
+  exportSignedSnapshot(
+    secret: string | Buffer,
+  ): PayoutEventDedupeSignedSnapshotEnvelope {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const snapshot = this.exportSnapshot();
+    return { v: 1, snapshot, mac: computeSnapshotMac(snapshot, secretBytes) };
+  }
+
+  /**
    * Rebuild a dedupe from a snapshot produced by `exportSnapshot()`
    * (typically after a `JSON.parse` of the persisted form). `opts`
    * configures the *new* dedupe (`ttlMs`/`maxEntries`/`now`) and is
@@ -1063,6 +1217,108 @@ export class PayoutEventDedupe {
     opts: PayoutEventDedupeOptions = {},
   ): PayoutEventDedupe {
     return PayoutEventDedupe.restore(snapshot, opts);
+  }
+
+  /**
+   * Rebuild a dedupe from a signed envelope produced by
+   * {@link PayoutEventDedupe.exportSignedSnapshot} (typically
+   * after a `JSON.parse` of the persisted form). `opts` configures
+   * the *new* dedupe (`ttlMs`/`maxEntries`/`now`) and is validated
+   * exactly like the constructor's. The returned dedupe is a fresh
+   * object — nothing is installed into any existing dedupe, so a
+   * failed restore leaves the caller's dedupes untouched (and their
+   * `stats()` counters unmoved: a failed restore counts nothing).
+   *
+   * Restore is fail-closed in the same order as the unsigned path,
+   * with authenticity checked first: an envelope with an unknown
+   * field (including a smuggled `secret`), a version other than
+   * `1`, a malformed `mac`, or a MAC that does not match the
+   * snapshot under `secret` throws a descriptive configuration
+   * `Error` and no dedupe is produced — a tampered entry, a tampered
+   * `seenAtMs`, or a wrong secret all fail here, before any snapshot
+   * parsing, so a tampered envelope can never partially install. A
+   * MAC-valid envelope whose snapshot is itself malformed then
+   * fails through the same strict snapshot validation as
+   * {@link PayoutEventDedupe.restore}, again with no dedupe
+   * produced. The MAC comparison is constant-time over equal-length
+   * hex digests; a wrong-length `mac` is rejected as malformed
+   * before comparison.
+   *
+   * On success the semantics are exactly
+   * {@link PayoutEventDedupe.restore}'s: expired entries are
+   * dropped, over-capacity snapshots keep the newest entries, TTLs
+   * keep counting from each entry's original `seenAtMs`, and the
+   * observability counters start at zero.
+   *
+   * The unsigned `restore()` and this signed restore do not accept
+   * each other's input: an unsigned snapshot has no `mac` (and an
+   * `entries` field where the envelope expects `snapshot`), and a
+   * signed envelope has fields the unsigned path rejects — so a
+   * caller cannot silently downgrade a signed restore to the
+   * trusted-configuration path.
+   */
+  static restoreSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: PayoutEventDedupeOptions = {},
+  ): PayoutEventDedupe {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const fail = (detail: string): never => {
+      throw new Error(
+        `PayoutEventDedupe: invalid signed snapshot envelope: ${detail}`,
+      );
+    };
+    if (
+      typeof envelope !== "object" ||
+      envelope === null ||
+      Array.isArray(envelope)
+    )
+      fail("expected an object of the form { v: 1, snapshot, mac }");
+    const record = envelope as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "snapshot" && key !== "mac")
+        fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const mac = record.mac;
+    if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
+      throw new Error(
+        "PayoutEventDedupe: invalid signed snapshot envelope: mac must be a 64-character lowercase hex HMAC-SHA256 digest",
+      );
+    const snapshot = record.snapshot;
+    if (
+      typeof snapshot !== "object" ||
+      snapshot === null ||
+      Array.isArray(snapshot)
+    )
+      fail('"snapshot" must be an object');
+    const expectedMac = computeSnapshotMac(
+      snapshot as PayoutEventDedupeSnapshot,
+      secretBytes,
+    );
+    const macBytes = Buffer.from(mac, "hex");
+    const expectedBytes = Buffer.from(expectedMac, "hex");
+    if (
+      macBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(macBytes, expectedBytes)
+    )
+      throw new Error(
+        "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+      );
+    // MAC verified — now the same strict structural validation as restore().
+    return PayoutEventDedupe.restore(snapshot, opts);
+  }
+
+  /** Alias of {@link PayoutEventDedupe.restoreSignedSnapshot} (snapshot naming). */
+  static fromSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: PayoutEventDedupeOptions = {},
+  ): PayoutEventDedupe {
+    return PayoutEventDedupe.restoreSignedSnapshot(envelope, secret, opts);
   }
 
   /**
