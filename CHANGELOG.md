@@ -27,6 +27,26 @@ change type; no entry describes a feature that is not in the history.
   each other; the secret is never written into the envelope and the
   MAC is integrity protection only, not encryption.
 
+- HMAC-signed snapshot envelope for `TaskLifecycle` (backlog
+  #1018): `exportSignedSnapshot(secret)` returns `{ v: 1, snapshot,
+  mac }` with `mac` = HMAC-SHA256 over the canonical JSON of the
+  whole snapshot, and `TaskLifecycle.restoreSignedSnapshot(envelope,
+  secret, opts)` (alias `fromSignedSnapshot`) verifies the MAC in
+  constant time before any snapshot parsing. The audit hash chain
+  covers history entries only, so without the envelope a rewritten
+  persisted file could push an SLA deadline back, loosen a budget or
+  a policy, or clear consumed idempotency keys without breaking any
+  history link; with it, any such rewrite fails closed at restore
+  with no task produced. Same envelope shape and canonical form as
+  the sibling escrow `Escrow` signed snapshot (#1017) and this
+  repo's `PayoutEventDedupe` signed snapshot (#1011).
+  `opts.auditSecret` is handed through to `fromJSON`, so a keyed
+  history chain still needs its own key on restore; the envelope
+  secret need not equal the audit secret. The unsigned snapshot stays
+  accepted as trusted configuration and the two forms never accept
+  each other; the secret is never written into the envelope and the
+  MAC is integrity protection only, not encryption.
+
 - Benchmark row for `tasksByFilters(tasks, { state?, actor?,
   event?, payoutRef? })` (backlog #1009): one combined-filter
   lookup over a fixed 6-task mixed batch mirroring the #990 test

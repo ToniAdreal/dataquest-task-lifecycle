@@ -87,6 +87,7 @@ export type {
   TaskEventListener,
   TaskHistoryEntry,
   TaskLifecycleOptions,
+  TaskLifecycleSignedSnapshotEnvelope,
   TaskSettlementsSummary,
   TaskSnapshot,
   TaskSnapshotDiff,

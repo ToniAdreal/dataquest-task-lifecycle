@@ -112,6 +112,23 @@ webhook signatures (`src/settlementWebhook.ts`).
   secret is never written into the envelope — a restored dedupe
   must be handed the secret again, like the audit secret above, and
   key storage and distribution remain the caller's responsibility.
+
+  Task snapshots get the same treatment as an opt-in layer:
+  `TaskLifecycle.exportSignedSnapshot(secret)` wraps the whole
+  `TaskSnapshot` in an HMAC-SHA256 envelope `{ v: 1, snapshot, mac }`
+  (same shape and canonical form as the sibling escrow `Escrow`
+  signed snapshot and this repo's `PayoutEventDedupe` signed
+  snapshot), and `restoreSignedSnapshot(envelope, secret, opts)`
+  verifies the MAC in constant time before any snapshot parsing.
+  The audit hash chain covers history entries only, so without the
+  envelope a rewritten persisted file could push an SLA deadline
+  back, loosen a budget or a policy, or clear consumed idempotency
+  keys without breaking any history link; with it, any such rewrite
+  fails closed at restore with no task produced. The envelope secret
+  need not equal the task's `auditSecret` — `opts.auditSecret` is
+  still handed through to `fromJSON`, so a keyed chain re-verifies
+  under its own key — and the unsigned snapshot stays accepted as
+  trusted configuration, the two forms never accepting each other.
 - **Strict snapshot and history validation.** `TaskLifecycle.fromJSON`
   runs `parseSnapshot` (`src/taskLifecycle.ts`) on untrusted input:
   the schema-version gate (`v`, when present, must be exactly

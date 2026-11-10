@@ -2532,6 +2532,54 @@ const HISTORY_ENTRY_FIELDS = new Set([
   "hash",
 ]);
 
+/**
+ * Integrity-protected form of a {@link TaskSnapshot}, produced by
+ * `TaskLifecycle.exportSignedSnapshot(secret)` and consumed by
+ * `TaskLifecycle.restoreSignedSnapshot(envelope, secret, opts?)` (see those
+ * methods for the exact contract). Same envelope shape as the sibling
+ * escrow-state-machine-ts `Escrow` signed snapshot
+ * (`EscrowSignedSnapshotEnvelope`, backlog #1017) and this repo's
+ * `PayoutEventDedupe` signed snapshot
+ * (`PayoutEventDedupeSignedSnapshotEnvelope`, backlog #1011).
+ *
+ * - `v`: envelope format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `snapshot`: the wrapped {@link TaskSnapshot}, exactly as
+ *   `toJSON()` produces it.
+ * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
+ *   `snapshot` (object keys sorted recursively, array order
+ *   preserved) under the caller's secret.
+ *
+ * Why this exists: the audit hash chain covers the history entries
+ * only — the snapshot-level fields (`state`, `slaDeadlines`,
+ * `maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`,
+ * `idempotencyKeys`) sit outside the chain, so a rewritten persisted
+ * snapshot could push an SLA deadline back, loosen a budget or a
+ * policy, or clear consumed idempotency keys without breaking any
+ * history link. The envelope MAC covers the whole snapshot, so any
+ * such rewrite fails closed at restore.
+ *
+ * The envelope carries no secret: the secret is caller configuration,
+ * never persisted in the envelope, and the same secret must be
+ * supplied at restore time. An envelope with any other field is
+ * rejected, so a caller cannot smuggle extra data (including a
+ * secret) past restore. The MAC is integrity protection only — it
+ * proves the snapshot was not rewritten by anyone without the
+ * secret — not confidentiality: the snapshot contents are plain
+ * JSON, and the envelope itself is plain JSON. A caller that needs
+ * the snapshot kept private must encrypt it separately; this
+ * envelope does not. The envelope secret need not equal the task's
+ * `auditSecret` (they protect different things — the chain and the
+ * snapshot envelope — and are managed independently);
+ * `opts.auditSecret` is still handed to `fromJSON` on restore so a
+ * keyed history chain re-verifies.
+ */
+export interface TaskLifecycleSignedSnapshotEnvelope {
+  v: 1;
+  snapshot: TaskSnapshot;
+  mac: string;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -3235,6 +3283,88 @@ export function parseHistory(
 export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
   const entries = parseHistory(history, opts);
   return entries.length === 0 ? "DRAFT" : entries[entries.length - 1].to;
+}
+
+/**
+ * Canonical JSON for snapshot MACing: object keys sorted
+ * recursively (so a JSON round-trip that reorders keys still
+ * verifies), array order preserved (reordering history entries would
+ * change the audit trail, so it must change the MAC), and
+ * primitives via `JSON.stringify`. A non-JSON value (notably
+ * `undefined`, which `JSON.stringify` would silently drop) throws
+ * instead of being silently normalized — a MAC computed over a
+ * silently altered document would be worse than no MAC.
+ * Same semantics as the sibling `PayoutEventDedupe` signed
+ * snapshot's canonical form (`src/settlementWebhook.ts`).
+ */
+function canonicalJsonForSignedSnapshot(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error(
+        "TaskLifecycle: cannot canonicalize a non-finite number for snapshot signing",
+      );
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (Array.isArray(value))
+    return `[${value.map((entry) => canonicalJsonForSignedSnapshot(entry)).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `{${keys
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJsonForSignedSnapshot(record[key])}`,
+      )
+      .join(",")}}`;
+  }
+  throw new Error(
+    `TaskLifecycle: cannot canonicalize a non-JSON value of type ${typeof value} for snapshot signing`,
+  );
+}
+
+/**
+ * Validate a signed-snapshot secret and return its bytes. A secret
+ * is a non-empty string (UTF-8) or a non-empty `Buffer` — the same
+ * input shapes as the sibling `PayoutEventDedupe` helper, and
+ * deliberately without a length floor: this MAC is integrity
+ * protection for a persisted snapshot, and the backlog contract
+ * for this helper rejects only an empty secret, so a shorter caller
+ * secret is the caller's risk to take (use a long random secret;
+ * the envelope never records how long it was). An empty or
+ * wrongly typed secret is a caller-configuration error, thrown
+ * before any task state is touched.
+ */
+function signedSnapshotSecretBytes(secret: unknown): Buffer {
+  if (typeof secret === "string") {
+    if (secret.length === 0)
+      throw new Error(
+        "TaskLifecycle: signed snapshot secret must not be empty",
+      );
+    return Buffer.from(secret, "utf8");
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0)
+      throw new Error(
+        "TaskLifecycle: signed snapshot secret must not be empty",
+      );
+    return secret;
+  }
+  throw new Error(
+    `TaskLifecycle: signed snapshot secret must be a non-empty string or Buffer, got ${typeof secret}`,
+  );
+}
+
+/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+function computeSignedSnapshotMac(
+  snapshot: TaskSnapshot,
+  secretBytes: Buffer,
+): string {
+  return createHmac("sha256", secretBytes)
+    .update(canonicalJsonForSignedSnapshot(snapshot), "utf8")
+    .digest("hex");
 }
 
 /**
@@ -4152,6 +4282,38 @@ export class TaskLifecycle {
   }
 
   /**
+   * Export the current snapshot wrapped in an HMAC-signed envelope
+   * (see {@link TaskLifecycleSignedSnapshotEnvelope}):
+   * `{ v: 1, snapshot, mac }` where `mac` is HMAC-SHA256 over the
+   * canonical JSON of the snapshot under `secret`. Persist the
+   * envelope (plain JSON) before a restart and restore it with
+   * {@link TaskLifecycle.restoreSignedSnapshot} — a process that
+   * restarts keeps its state, SLA deadlines, budgets, policy, and
+   * consumed idempotency keys, and anyone who rewrites the persisted
+   * file without the secret is caught at restore instead of silently
+   * pushing a deadline back, loosening a budget or a policy, or
+   * clearing consumed keys.
+   *
+   * The secret is never written into the envelope, and the envelope
+   * is integrity protection only, not encryption: the snapshot
+   * contents are plain JSON, so the secret must be kept where the
+   * snapshot writer keeps its other signing-side secrets. An empty
+   * secret is a caller-configuration error. The unsigned `toJSON()`
+   * path is unchanged: this envelope is opt-in, and a caller that
+   * never signs keeps the old trusted-configuration semantics.
+   * The envelope secret need not equal the task's `auditSecret`;
+   * on restore, `opts.auditSecret` is still handed to `fromJSON` so a
+   * keyed history chain re-verifies under its own key.
+   */
+  exportSignedSnapshot(
+    secret: string | Buffer,
+  ): TaskLifecycleSignedSnapshotEnvelope {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const snapshot = this.toJSON();
+    return { v: 1, snapshot, mac: computeSignedSnapshotMac(snapshot, secretBytes) };
+  }
+
+  /**
    * Rebuild a TaskLifecycle from an untrusted snapshot (e.g. one read
    * back from a store). Throws a specific error on any malformed or
    * inconsistent input — see parseSnapshot for the full checklist.
@@ -4189,6 +4351,98 @@ export class TaskLifecycle {
       task.setSlaDeadline(deadline, state as TaskState);
     }
     return task;
+  }
+
+  /**
+   * Rebuild a TaskLifecycle from a signed envelope produced by
+   * {@link TaskLifecycle.exportSignedSnapshot} (typically after a
+   * `JSON.parse` of the persisted form). `opts` is passed straight
+   * through to {@link TaskLifecycle.fromJSON} — including
+   * `opts.auditSecret`, which feeds the snapshot's hash-chain
+   * re-verification, so a keyed chain restores only under its own key
+   * (and a keyed chain restored without the key, or with the wrong
+   * key, is rejected as broken, exactly as on the unsigned path).
+   *
+   * Restore is fail-closed in the same order as the unsigned path,
+   * with authenticity checked first: an envelope with an unknown
+   * field (including a smuggled `secret`), a version other than
+   * `1`, a malformed `mac`, or a MAC that does not match the
+   * snapshot under `secret` throws a descriptive configuration
+   * `Error` and no task is produced — a tampered `state`,
+   * `slaDeadlines`, `maxResubmits`, `maxDisputes`,
+   * `maxVisitsByState`, `rolePolicy`, or `idempotencyKeys`, a
+   * tampered history entry, or a wrong secret all fail here, before
+   * any snapshot parsing, so a tampered envelope can never partially
+   * install. A MAC-valid envelope whose snapshot is itself malformed
+   * then fails through the same strict snapshot validation as
+   * {@link TaskLifecycle.fromJSON}, again with no task produced. The
+   * MAC comparison is constant-time over equal-length hex digests; a
+   * wrong-length `mac` is rejected as malformed before comparison.
+   *
+   * The unsigned `fromJSON()` and this signed restore do not accept
+   * each other's input: an unsigned snapshot has no `mac` (and
+   * fields where the envelope expects `snapshot`), and a signed
+   * envelope has fields the unsigned path rejects — so a caller
+   * cannot silently downgrade a signed restore to the
+   * trusted-configuration path.
+   */
+  static restoreSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts?: TaskLifecycleOptions,
+  ): TaskLifecycle {
+    const secretBytes = signedSnapshotSecretBytes(secret);
+    const fail = (detail: string): never => {
+      throw new Error(
+        `TaskLifecycle: invalid signed snapshot envelope: ${detail}`,
+      );
+    };
+    if (
+      typeof envelope !== "object" ||
+      envelope === null ||
+      Array.isArray(envelope)
+    )
+      fail("expected an object of the form { v: 1, snapshot, mac }");
+    const record = envelope as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "snapshot" && key !== "mac")
+        fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const mac = record.mac;
+    if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
+      throw new Error(
+        "TaskLifecycle: invalid signed snapshot envelope: mac must be a 64-character lowercase hex HMAC-SHA256 digest",
+      );
+    const snapshot = record.snapshot;
+    if (
+      typeof snapshot !== "object" ||
+      snapshot === null ||
+      Array.isArray(snapshot)
+    )
+      fail('"snapshot" must be an object');
+    const expectedMac = computeSignedSnapshotMac(
+      snapshot as TaskSnapshot,
+      secretBytes,
+    );
+    if (!constantTimeHexEqual(expectedMac, mac))
+      throw new Error(
+        "TaskLifecycle: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+      );
+    // MAC verified — now the same strict structural validation as fromJSON().
+    return TaskLifecycle.fromJSON(snapshot, opts);
+  }
+
+  /** Alias of {@link TaskLifecycle.restoreSignedSnapshot} (snapshot naming). */
+  static fromSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts?: TaskLifecycleOptions,
+  ): TaskLifecycle {
+    return TaskLifecycle.restoreSignedSnapshot(envelope, secret, opts);
   }
 
   /**

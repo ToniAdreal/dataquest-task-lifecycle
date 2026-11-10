@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1219 tests, all local
+npm test   # 1230 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -757,6 +757,30 @@ typo like `deadlline` or `payoutAmout` fails loudly instead of quietly
 dropping the SLA deadlines or payout amount it was meant to carry.
 Snapshots produced by `toJSON()` always pass, and legacy snapshots
 without `v` are unaffected.
+
+Signed snapshots close the remaining gap: the hash chain covers
+history entries only, so the snapshot-level fields (`state`,
+`slaDeadlines`, `maxResubmits`, `maxDisputes`, `maxVisitsByState`,
+`rolePolicy`, `idempotencyKeys`) sit outside it — a rewritten
+persisted file could push an SLA deadline back, loosen a budget or a
+policy, or clear consumed idempotency keys without breaking any
+history link. `task.exportSignedSnapshot(secret)` wraps the snapshot
+in `{ v: 1, snapshot, mac }` (HMAC-SHA256 over the canonical JSON of
+the whole snapshot, same envelope shape as the sibling
+escrow-state-machine-ts `Escrow` signed snapshot and this repo's
+`PayoutEventDedupe` signed snapshot), and
+`TaskLifecycle.restoreSignedSnapshot(envelope, secret, opts?)` (alias
+`fromSignedSnapshot`) verifies the MAC in constant time before any
+snapshot parsing — a tampered field, a wrong secret, or a smuggled
+extra field fails closed with no task produced, and a MAC-valid
+envelope whose snapshot is itself malformed still fails strict
+snapshot validation. `opts.auditSecret` is handed through to
+`fromJSON`, so a keyed history chain still needs its own key on
+restore; the envelope secret need not equal the audit secret. The
+secret is never written into the envelope, the MAC is integrity
+protection only (not encryption), and the unsigned path is
+unchanged — the two forms never accept each other, so a signed
+restore cannot silently downgrade to trusted configuration.
 
 To answer "what moved since the last snapshot I stored" without
 hand-written field compares, `diffTaskSnapshots(before, after)`
@@ -2056,7 +2080,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1219 tests covering the happy path, reject→resubmit
+`npm test` runs 1230 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
