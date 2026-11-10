@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1275 tests, all local
+npm test   # 1293 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1590,6 +1590,48 @@ values, so keep the secret where the snapshot writer keeps its other
 signing-side secrets. Same envelope shape and canonical form as the
 `PayoutEventDedupe` signed envelope.
 
+The outbox records only — it never retries on its own. The opt-in
+`retryPayoutWebhookOutbox(outbox, deliverOne, opts?)` runner is the
+one correct retry loop over the ledger, so callers do not have to
+hand-write it (and hand-write its two easiest mistakes: retrying a
+dead letter, and forgetting to clear a pair after a success). You
+supply the re-delivery — usually one line wrapping
+`deliverPayoutWebhook` — and the runner takes the pending list,
+re-delivers each pair, acknowledges successes, records failures
+toward the dead letter, and sleeps the exponential backoff between
+rounds. This module reports delivery failure instead of throwing it,
+so the wrapper returns `result.ok` rather than a try/catch:
+
+```ts
+import { retryPayoutWebhookOutbox } from "dataquest-task-lifecycle";
+
+const summary = await retryPayoutWebhookOutbox(
+  outbox,
+  async (endpoint, eventId) => {
+    // Rebuild the signed webhook for this (endpoint, eventId) pair
+    // and deliver it; `true` means the receiver answered 2xx.
+    // `maxAttempts: 1` leaves the retry policy to the runner.
+    const result = await deliverPayoutWebhook(endpoint, webhook, { maxAttempts: 1 });
+    return result.ok;
+  },
+  { maxRounds: 3, backoffMs: 1000 },
+);
+// summary: { attempted, acknowledged, stillPending, deadLettered, aborted }
+```
+
+Each round re-reads `outbox.pending()`, so dead-lettered pairs are
+never re-delivered and a pair that dead-letters mid-run is not
+revisited. `maxRounds` (default 1) bounds the loop; `backoffMs`
+(default 1000) is the exponential base between rounds, with opt-in
+`jitterMs`; `maxConcurrency` (default 1, serial) bounds the
+in-flight re-deliveries the same way `deliverPayoutWebhookToMany`
+bounds its fan-out; `signal` aborts at round boundaries with
+already-made attempts kept. A `deliverOne` that throws is recorded
+as a failed attempt with its message, never a runner crash. Honest
+limit: the runner is in-process only and persists nothing — a dead
+process loses the ledger unless it exported a snapshot first (see
+Limitations).
+
 `npm run demo` includes a payout webhook timeout segment: the
 main task's signed webhook is delivered to a hanging injected
 fetch under a pinned `timeoutMs` of 50 with `maxAttempts: 1`, and
@@ -2113,8 +2155,13 @@ Security scope, the caller-trust model, and what this library does
   receivers deduplicate on the shared `eventId`. The
   `PayoutWebhookOutbox` failure ledger is likewise in-process only: a
   process that dies loses it unless it exported a snapshot first, and
-  the outbox records failures but never retries — the retry loop stays
-  the caller's job. Webhook-shaped
+  the outbox itself never retries, but the opt-in
+  `retryPayoutWebhookOutbox` runner re-delivers the pending pairs
+  in-process (bounded rounds, exponential backoff, dead letters never
+  retried) — it is still process-local and persists nothing, so a
+  deployment that needs retries across restarts or processes must
+  build them over shared storage (a database outbox table, a
+  queue, …) instead. Webhook-shaped
   payout *signing* does exist — `buildPayoutWebhook`/
   `verifyPayoutWebhook` derive and HMAC-sign a `PAYOUT_COMPLETE`
   notification from a PAID task's audit history — and single-endpoint
@@ -2149,7 +2196,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1275 tests covering the happy path, reject→resubmit
+`npm test` runs 1293 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

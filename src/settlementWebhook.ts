@@ -1543,10 +1543,14 @@ function computeOutboxSnapshotMac(
  * that answer: record each attempt, ask `pending()` what still needs a
  * retry and `deadLetter()` what needs a human.
  *
- * The outbox records; it never retries. The retry loop stays the
- * caller's job (it owns the backoff policy, the abort signal, and the
- * decision to stop), exactly as the README Limitations section says:
- * there is no durable queue and no cross-process retry here. It is
+ * The outbox records; it never retries on its own. The opt-in
+ * {@link retryPayoutWebhookOutbox} runner re-delivers the pending
+ * pairs in-process (bounded rounds, exponential backoff, dead letters
+ * never retried) for callers that want the loop without hand-writing
+ * it; a hand-written loop stays possible too (the caller then owns
+ * the backoff policy, the abort signal, and the decision to stop).
+ * Either way there is no durable queue and no cross-process retry
+ * here, exactly as the README Limitations section says. It is
  * also process-local: a process that dies loses the ledger unless it
  * exported a snapshot first (see
  * {@link PayoutWebhookOutboxSnapshot} for the trusted-configuration
@@ -2008,6 +2012,336 @@ export class PayoutWebhookOutbox {
   ): PayoutWebhookOutbox {
     return PayoutWebhookOutbox.restoreSignedSnapshot(envelope, secret, opts);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Outbox retry runner                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Abortable sleep for the retry runner's between-rounds backoff: the
+ * default `sleepImpl` when the caller injects none. Built on
+ * {@link sleepWithSignal} over the module's {@link defaultSleep}, so
+ * an abort rejects — the runner converts a rejection while the
+ * signal is aborted into `aborted: true` in the summary, and a
+ * rejection while the signal is live propagates as a bug in the
+ * sleep implementation.
+ */
+async function sleepAbortable(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const aborted = await sleepWithSignal(ms, defaultSleep, signal);
+  if (aborted) throw new Error("payout webhook outbox retry aborted");
+}
+
+/**
+ * One re-delivery attempt by {@link retryPayoutWebhookOutbox}:
+ * re-send the payout event for `(endpoint, eventId)` and report
+ * whether the receiver accepted it (`true` = 2xx). The runner does
+ * not build or sign the payload — wrap {@link deliverPayoutWebhook}
+ * (or any transport that returns a boolean) so the runner stays
+ * transport-agnostic and testable with a stub. Per this module's
+ * report-don't-throw convention, wrap the delivery's result object
+ * (`result.ok`) rather than a try/catch: `deliverPayoutWebhook`
+ * reports a failure as `{ ok: false, ... }`, it never throws one.
+ */
+export type PayoutWebhookOutboxDeliverOne = (
+  endpoint: string,
+  eventId: string,
+) => Promise<boolean>;
+
+/** Options for {@link retryPayoutWebhookOutbox}. All fields optional. */
+export interface PayoutWebhookOutboxRetryOptions {
+  /**
+   * How many rounds over the pending list to run. Default 1: one pass
+   * over whatever is pending when the call starts. Each round
+   * re-reads `outbox.pending()`, so pairs acknowledged or
+   * dead-lettered in an earlier round are not revisited. Must be a
+   * positive integer.
+   */
+  maxRounds?: number;
+  /**
+   * Base backoff between rounds in milliseconds. The wait before
+   * round `r` (1-based, i.e. the second round waits `backoffMs`, the
+   * third `backoffMs * 2`) is `backoffMs * 2^(r-1)` — the same
+   * exponential schedule as {@link deliverPayoutWebhook}'s
+   * per-attempt backoff. Default 1000. May be 0 in tests.
+   */
+  backoffMs?: number;
+  /**
+   * Opt-in jitter, in milliseconds, added on top of each between-rounds
+   * backoff (`backoffMs * 2^(r-1) + Math.random() * jitterMs`).
+   * Default `0` — the delay schedule is exactly the deterministic
+   * backoff sequence. `Math.random` is only de-synchronizing retry
+   * schedules, never generating secret material.
+   */
+  jitterMs?: number;
+  /**
+   * Maximum number of re-deliveries in flight at once within a round.
+   * Default 1 (serial): one pair at a time, in `pending()` order.
+   * Set it higher for a bounded pool — a new pair starts only when
+   * one settles — the same pool semantics as
+   * `DeliverPayoutWebhookToManyOptions.maxConcurrency`, so a
+   * 50-pair backlog never opens 50 simultaneous connections. Must be
+   * a positive integer when present. Results are reported per pair
+   * through the outbox either way; the summary counts do not depend
+   * on the concurrency.
+   */
+  maxConcurrency?: number;
+  /**
+   * Optional external abort signal. Checked at round boundaries: an
+   * abort stops the run before the next round starts (and aborts the
+   * between-rounds sleep), and the summary reports `aborted: true`
+   * with whatever the earlier rounds already did — acknowledged
+   * pairs stay acknowledged, recorded failures stay recorded. A
+   * round already in flight runs to its end; the signal does not
+   * cancel an in-flight `deliverOne` call itself — a `deliverOne`
+   * that wraps `deliverPayoutWebhook` should be passed the same
+   * signal so the delivery aborts too.
+   */
+  signal?: AbortSignal;
+  /**
+   * Sleep implementation for the between-rounds backoff. Defaults to
+   * an abortable `setTimeout` sleep (the same helper
+   * {@link deliverPayoutWebhook} uses, via {@link sleepWithSignal}).
+   * Inject a stub in tests to record the delay sequence without
+   * waiting, or a custom clock in production. The implementation
+   * receives the runner's `signal` and must honor it: a sleep that
+   * rejects while the signal is aborted ends the run as
+   * `aborted: true`; a sleep that rejects while the signal is NOT
+   * aborted is a bug in the sleep implementation and propagates.
+   */
+  sleepImpl?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Clock source (milliseconds since the epoch) for the `at` stamped
+   * on the attempts the runner records. Defaults to `Date.now`.
+   * Inject a fake clock for deterministic tests. This is the
+   * runner's clock only — the outbox keeps the clock it was built
+   * with for attempts recorded without an explicit `at`.
+   */
+  now?: () => number;
+}
+
+/**
+ * Aggregate outcome of {@link retryPayoutWebhookOutbox}. Counts
+ * are exact: `attempted` is the number of `deliverOne` calls made,
+ * `acknowledged` the number of pairs cleared by a successful
+ * re-delivery, and `stillPending`/`deadLettered` are the outbox's
+ * own `pending()`/`deadLetter()` lengths when the run ended — so
+ * `attempted` always equals the number of re-delivery attempts, and
+ * `acknowledged + stillPending + deadLettered` is the number of
+ * pairs the run started with, minus any pair that was already
+ * dead-lettered (those were never attempted).
+ */
+export interface PayoutWebhookOutboxRetrySummary {
+  /** Number of `deliverOne` calls made. */
+  attempted: number;
+  /** Number of pairs cleared by a successful re-delivery. */
+  acknowledged: number;
+  /** Pairs still pending when the run ended (`outbox.pending().length`). */
+  stillPending: number;
+  /** Pairs dead-lettered when the run ended (`outbox.deadLetter().length`). */
+  deadLettered: number;
+  /** `true` only when the run stopped early because `signal` aborted. */
+  aborted: boolean;
+}
+
+/**
+ * Re-deliver a {@link PayoutWebhookOutbox}'s pending pairs — the
+ * opt-in retry loop for the failure ledger, so callers do not have to
+ * hand-write the same loop (and hand-write its two easiest mistakes:
+ * retrying a dead letter, and forgetting to clear a pair after a
+ * success).
+ *
+ * Semantics, mirroring the outbox's own counting rules:
+ * - Each round works on a fresh `outbox.pending()` snapshot: pairs
+ *   already dead-lettered are never re-delivered, and a pair that
+ *   dead-letters mid-run (its `recordAttempt` hits `maxAttempts`)
+ *   is not revisited by a later round.
+ * - A successful re-delivery (`deliverOne` resolves `true`) calls
+ *   `outbox.acknowledge(endpoint, eventId)`, clearing the pair so a
+ *   later failure counts from 1 again.
+ * - A failed re-delivery (`false`, or a `deliverOne` that throws)
+ *   calls `outbox.recordAttempt({ endpoint, eventId, ok: false,
+ *   error?, at })`, pushing the pair one step toward the dead
+ *   letter; a thrown error is recorded with its message and never
+ *   crashes the run. A `deliverOne` that resolves to a non-boolean
+ *   is a caller bug and throws before anything is recorded for
+ *   that pair.
+ * - Between rounds the runner sleeps the exponential backoff
+ *   (`backoffMs * 2^(r-1)`, plus opt-in `jitterMs`); with the
+ *   default `maxRounds: 1` there is no sleep at all.
+ * - `signal` aborts at round boundaries (see
+ *   {@link PayoutWebhookOutboxRetryOptions.signal}): already-made
+ *   attempts keep their results, and the summary reports
+ *   `aborted: true`.
+ *
+ * Honest limits: the runner is in-process only — it retries the
+ * pairs this process's outbox holds, and a process that dies loses
+ * the ledger unless it exported a snapshot first (see the outbox's
+ * snapshot methods). It introduces no durable queue: the runner
+ * never persists anything, and `maxRounds` bounds the loop so a
+ * run cannot spin forever on a permanently-down endpoint. A
+ * deployment that needs retries across restarts or processes must
+ * build them over shared storage (a database outbox table, a
+ * queue, …) instead.
+ */
+export async function retryPayoutWebhookOutbox(
+  outbox: PayoutWebhookOutbox,
+  deliverOne: PayoutWebhookOutboxDeliverOne,
+  opts: PayoutWebhookOutboxRetryOptions = {},
+): Promise<PayoutWebhookOutboxRetrySummary> {
+  if (!(outbox instanceof PayoutWebhookOutbox)) {
+    throw new Error(
+      "retryPayoutWebhookOutbox: outbox must be a PayoutWebhookOutbox",
+    );
+  }
+  if (typeof deliverOne !== "function") {
+    throw new Error(
+      "retryPayoutWebhookOutbox: deliverOne must be a function",
+    );
+  }
+  const maxRounds = opts.maxRounds ?? 1;
+  if (!Number.isInteger(maxRounds) || maxRounds < 1) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: maxRounds must be a positive integer, got ${String(
+        opts.maxRounds,
+      )}`,
+    );
+  }
+  const backoffMs = opts.backoffMs ?? 1000;
+  if (!Number.isFinite(backoffMs) || backoffMs < 0) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: backoffMs must be a non-negative number, got ${String(
+        opts.backoffMs,
+      )}`,
+    );
+  }
+  const jitterMs = opts.jitterMs ?? 0;
+  if (!Number.isFinite(jitterMs) || jitterMs < 0) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: jitterMs must be a non-negative number, got ${String(
+        opts.jitterMs,
+      )}`,
+    );
+  }
+  const maxConcurrency = opts.maxConcurrency ?? 1;
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: maxConcurrency must be a positive integer, got ${String(
+        opts.maxConcurrency,
+      )}`,
+    );
+  }
+  if (opts.signal !== undefined && !(opts.signal instanceof AbortSignal)) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: signal must be an AbortSignal, got ${String(
+        opts.signal,
+      )}`,
+    );
+  }
+  if (opts.sleepImpl !== undefined && typeof opts.sleepImpl !== "function") {
+    throw new Error(
+      "retryPayoutWebhookOutbox: sleepImpl must be a function",
+    );
+  }
+  if (opts.now !== undefined && typeof opts.now !== "function") {
+    throw new Error("retryPayoutWebhookOutbox: now must be a function");
+  }
+  const signal = opts.signal;
+  const clock = opts.now ?? Date.now;
+  const sleep = opts.sleepImpl ?? sleepAbortable;
+
+  let attempted = 0;
+  let acknowledged = 0;
+  let aborted = false;
+
+  for (let round = 0; round < maxRounds; round++) {
+    // Round boundary: an abort stops the run before the next round
+    // starts; whatever earlier rounds did stays recorded.
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
+    const entries = outbox.pending();
+    if (entries.length === 0) break;
+    // Bounded pool over this round's snapshot (default serial): a
+    // worker takes the next entry only when one settles, and the
+    // single-worker loop assigns indices without awaiting between
+    // read and increment, so no two workers take one entry. The
+    // snapshot is per round — a pair acknowledged or dead-lettered
+    // here is not revisited by a later round.
+    let next = 0;
+    const runWorker = async (): Promise<void> => {
+      for (;;) {
+        const index = next;
+        next += 1;
+        if (index >= entries.length) return;
+        const entry = entries[index];
+        let ok: boolean;
+        try {
+          ok = await deliverOne(entry.endpoint, entry.eventId);
+        } catch (err) {
+          // A throwing deliverOne is a failed attempt, not a runner
+          // crash: record it with the error message and keep going.
+          attempted += 1;
+          outbox.recordAttempt({
+            endpoint: entry.endpoint,
+            eventId: entry.eventId,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            at: clock(),
+          });
+          continue;
+        }
+        if (typeof ok !== "boolean") {
+          throw new Error(
+            `retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got ${typeof ok}`,
+          );
+        }
+        attempted += 1;
+        if (ok) {
+          outbox.acknowledge(entry.endpoint, entry.eventId);
+          acknowledged += 1;
+        } else {
+          outbox.recordAttempt({
+            endpoint: entry.endpoint,
+            eventId: entry.eventId,
+            ok: false,
+            at: clock(),
+          });
+        }
+      }
+    };
+    const workerCount = Math.min(maxConcurrency, entries.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, () => runWorker()),
+    );
+    if (round + 1 < maxRounds) {
+      // Between-rounds backoff. A sleep that rejects while the
+      // signal is aborted ends the run at this boundary; any other
+      // sleep failure is a bug in the sleep implementation and
+      // propagates instead of being masked as an abort.
+      try {
+        await sleep(jitteredBackoffMs(round, backoffMs, jitterMs), signal);
+      } catch (err) {
+        if (signal?.aborted) {
+          aborted = true;
+          break;
+        }
+        throw err;
+      }
+    }
+  }
+
+  return {
+    attempted,
+    acknowledged,
+    stillPending: outbox.pending().length,
+    deadLettered: outbox.deadLetter().length,
+    aborted,
+  };
 }
 
 /* ------------------------------------------------------------------ */

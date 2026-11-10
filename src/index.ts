@@ -47,6 +47,7 @@ export {
   parsePayoutRetryAfter,
   PayoutEventDedupe,
   PayoutWebhookOutbox,
+  retryPayoutWebhookOutbox,
   verifyPayoutWebhook,
 } from "./settlementWebhook.js";
 export type {
@@ -62,11 +63,14 @@ export type {
   PayoutEventDedupeSnapshot,
   PayoutEventDedupeStats,
   PayoutWebhook,
+  PayoutWebhookOutboxDeliverOne,
   PayoutWebhookEndpoint,
   PayoutWebhookFetchImpl,
   PayoutWebhookOutboxAttempt,
   PayoutWebhookOutboxEntry,
   PayoutWebhookOutboxOptions,
+  PayoutWebhookOutboxRetryOptions,
+  PayoutWebhookOutboxRetrySummary,
   PayoutWebhookOutboxSignedSnapshotEnvelope,
   PayoutWebhookOutboxSnapshot,
   PayoutWebhookPayload,

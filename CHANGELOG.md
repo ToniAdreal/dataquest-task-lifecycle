@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in outbox retry runner `retryPayoutWebhookOutbox`
+  (2026-11-10, backlog #1035, mirrors escrow #1034):
+  `retryPayoutWebhookOutbox(outbox, deliverOne, opts?)`
+  re-delivers a `PayoutWebhookOutbox`'s pending pairs — a success
+  acknowledges (clears) the pair, a failure records one more
+  attempt toward the dead letter, and dead-lettered pairs are never
+  re-delivered. `opts` carries `maxRounds` (default 1), `backoffMs`
+  (default 1000, exponential between rounds, same schedule as the
+  delivery backoff), opt-in `jitterMs`, `maxConcurrency` (default 1,
+  serial; same bounded-pool semantics as the fan-out cap), `signal`
+  (abort stops at round boundaries with already-made attempts kept),
+  plus injectable `sleepImpl`/`now` for deterministic tests. The
+  runner is transport-agnostic: `deliverOne` wraps
+  `deliverPayoutWebhook` and returns `result.ok` (this module
+  reports delivery failure instead of throwing it). In-process
+  only — it persists nothing, and a deployment that needs retries
+  across restarts or processes must build them over shared storage.
+
 - Fan-out concurrency cap `maxConcurrency` for
   `deliverPayoutWebhookToMany` (2026-11-10, backlog #1033, mirrors
   escrow #1032): `DeliverPayoutWebhookToManyOptions.maxConcurrency`
