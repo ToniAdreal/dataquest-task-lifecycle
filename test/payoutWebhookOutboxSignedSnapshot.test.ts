@@ -292,6 +292,25 @@ test("envelope unknown field is rejected, including a smuggled secret", () => {
   );
 });
 
+test("non-object envelope is rejected", () => {
+  const { outbox } = seededOutbox();
+  for (const bad of [null, [], "envelope", 42]) {
+    assert.throws(
+      () =>
+        PayoutWebhookOutbox.restoreSignedSnapshot(bad, SECRET, {
+          now: () => 1_001_000,
+        }),
+      /invalid signed snapshot envelope: expected an object of the form \{ v: 1, snapshot, mac \}/,
+    );
+  }
+  // The valid envelope still restores after the rejections.
+  const envelope = outbox.exportSignedSnapshot(SECRET);
+  const restored = PayoutWebhookOutbox.restoreSignedSnapshot(envelope, SECRET, {
+    now: () => 1_001_000,
+  });
+  assert.equal(restored.size, 2);
+});
+
 test("envelope version other than 1 is rejected", () => {
   const { outbox } = seededOutbox();
   const v2 = { ...outbox.exportSignedSnapshot(SECRET), v: 2 };
