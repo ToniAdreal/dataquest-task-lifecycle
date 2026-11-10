@@ -1345,6 +1345,433 @@ export class PayoutEventDedupe {
   }
 }
 
+/** Options for {@link PayoutWebhookOutbox}. All fields optional. */
+export interface PayoutWebhookOutboxOptions {
+  /**
+   * Consecutive failures after which a `(endpoint, eventId)` pair is
+   * considered exhausted and moves from `pending()` to `deadLetter()`.
+   * Defaults to 3. Must be a positive integer (>= 1).
+   */
+  maxAttempts?: number;
+  /**
+   * Clock source (milliseconds since the epoch). Defaults to
+   * `Date.now`. Inject a fake clock for deterministic tests; it is
+   * also the default timestamp for attempts recorded without an
+   * explicit `at`.
+   */
+  now?: () => number;
+}
+
+/**
+ * One delivery attempt recorded in a {@link PayoutWebhookOutbox}.
+ * This is the input shape for `recordAttempt()` — it describes a
+ * single outcome, not the accumulated record (see
+ * {@link PayoutWebhookOutboxEntry}).
+ */
+export interface PayoutWebhookOutboxAttempt {
+  /** Destination URL the attempt was made against. */
+  endpoint: string;
+  /** `eventId` of the payout event the attempt carried. */
+  eventId: string;
+  /** Whether the attempt succeeded (2xx). */
+  ok: boolean;
+  /**
+   * HTTP status of the attempt, when known. A network failure has no
+   * status — pass `error` instead. Informational only; the outbox
+   * never retries on its own.
+   */
+  status?: number;
+  /** Human-readable failure reason (error message, status text). */
+  error?: string;
+  /**
+   * Attempt time in milliseconds since the epoch. Defaults to the
+   * outbox clock (`now`). Inject it for deterministic tests or to
+   * record an attempt that happened earlier.
+   */
+  at?: number;
+}
+
+/**
+ * One accumulated failure record in a {@link PayoutWebhookOutbox},
+ * as returned by `pending()` and `deadLetter()`.
+ *
+ * - `attempts`: consecutive failures recorded for this
+ *   `(endpoint, eventId)` pair since the last success. A pair is
+ *   pending while `attempts < maxAttempts` and dead-lettered once
+ *   `attempts >= maxAttempts`.
+ * - `lastError`: the `error` of the most recent failed attempt, when
+ *   the caller supplied one.
+ * - `lastAt`: timestamp (ms since the epoch) of the most recent
+ *   failed attempt.
+ */
+export interface PayoutWebhookOutboxEntry {
+  endpoint: string;
+  eventId: string;
+  attempts: number;
+  lastError?: string;
+  lastAt: number;
+}
+
+/**
+ * Serializable snapshot of a {@link PayoutWebhookOutbox}, produced
+ * by `exportSnapshot()` and consumed by
+ * `PayoutWebhookOutbox.restore()`.
+ *
+ * - `v`: snapshot format version. Only `1` exists; `restore` rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `entries`: one object per tracked `(endpoint, eventId)` pair, in
+ *   first-recorded order. `attempts` is the consecutive-failure count;
+ *   whether an entry reads as pending or dead-lettered after restore
+ *   is derived from `attempts` against the *restoring* outbox's
+ *   `maxAttempts`, so a snapshot restored under a different
+ *   `maxAttempts` re-derives the boundary honestly. `lastError` is
+ *   omitted when the last recorded failure carried none.
+ *
+ * The snapshot is plain JSON data (`JSON.stringify` it to persist
+ * it). It is an unsigned, trusted-configuration snapshot in the same
+ * posture as `PayoutEventDedupe.exportSnapshot()`: a process that
+ * restarts from its own snapshot keeps the failure counts it had, but
+ * anyone able to rewrite the persisted file can silently clear a
+ * dead letter (or invent failures) without detection. Persist it
+ * where the webhook configuration itself is trusted, and do not treat
+ * the snapshot as evidence about a third party.
+ */
+export interface PayoutWebhookOutboxSnapshot {
+  v: 1;
+  entries: PayoutWebhookOutboxEntry[];
+}
+
+/**
+ * In-memory ledger of failed payout-webhook deliveries, keyed by
+ * `(endpoint, eventId)`. `deliverPayoutWebhook` /
+ * `deliverPayoutWebhookToMany` only return the outcome of one call
+ * — they keep no memory — so a caller whose endpoint fails repeatedly
+ * had no ready answer to "which (endpoint, eventId) pairs are still
+ * undelivered, and which have exhausted their retries". This class is
+ * that answer: record each attempt, ask `pending()` what still needs a
+ * retry and `deadLetter()` what needs a human.
+ *
+ * The outbox records; it never retries. The retry loop stays the
+ * caller's job (it owns the backoff policy, the abort signal, and the
+ * decision to stop), exactly as the README Limitations section says:
+ * there is no durable queue and no cross-process retry here. It is
+ * also process-local: a process that dies loses the ledger unless it
+ * exported a snapshot first (see
+ * {@link PayoutWebhookOutboxSnapshot} for the trusted-configuration
+ * caveat), and two processes never see each other's records.
+ *
+ * Counting rules, mirroring the sibling `PayoutEventDedupe`
+ * posture (fail fast on caller bugs, deterministic under an injected
+ * clock):
+ * - a failed attempt increments the pair's consecutive-failure count
+ *   (capped at `maxAttempts` — a dead-lettered pair stays at the cap
+ *   while later failures still refresh `lastError`/`lastAt`, so the
+ *   record keeps describing the latest failure instead of growing
+ *   without bound);
+ * - a successful attempt (`ok: true`, or `acknowledge()`) removes the
+ *   pair entirely, so a later failure starts counting from 1 again;
+ * - `pending()` lists pairs with `attempts < maxAttempts`,
+ *   `deadLetter()` lists pairs with `attempts >= maxAttempts`; a pair
+ *   is in exactly one of the two lists.
+ */
+export class PayoutWebhookOutbox {
+  private readonly maxAttempts: number;
+  private readonly clock: () => number;
+  /**
+   * endpoint -> eventId -> accumulated record. Nested maps (not a
+   * joined string key) so no endpoint or eventId text can collide
+   * with a separator.
+   */
+  private readonly records = new Map<
+    string,
+    Map<string, PayoutWebhookOutboxEntry>
+  >();
+
+  constructor(opts: PayoutWebhookOutboxOptions = {}) {
+    const maxAttempts = opts.maxAttempts ?? 3;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new Error(
+        "PayoutWebhookOutbox: maxAttempts must be a positive integer",
+      );
+    }
+    if (opts.now !== undefined && typeof opts.now !== "function") {
+      throw new Error("PayoutWebhookOutbox: now must be a function");
+    }
+    this.maxAttempts = maxAttempts;
+    this.clock = opts.now ?? Date.now;
+  }
+
+  /**
+   * Record one delivery attempt. A failed attempt increments the
+   * pair's consecutive-failure count (capped at `maxAttempts`) and
+   * refreshes `lastError`/`lastAt`; a successful attempt removes the
+   * pair, exactly like `acknowledge()`.
+   *
+   * Caller bugs fail fast: an empty/non-string `endpoint` or
+   * `eventId`, a non-boolean `ok`, a non-finite `status`/`at`, or a
+   * non-string `error` throws before anything is recorded — silently
+   * accepting a malformed attempt would corrupt the ledger for
+   * exactly the deliveries that need it most.
+   */
+  recordAttempt(attempt: PayoutWebhookOutboxAttempt): void {
+    const { endpoint, eventId, ok } = attempt;
+    if (typeof endpoint !== "string" || endpoint.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: endpoint must be a non-empty string",
+      );
+    }
+    if (typeof eventId !== "string" || eventId.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: eventId must be a non-empty string",
+      );
+    }
+    if (typeof ok !== "boolean") {
+      throw new Error("PayoutWebhookOutbox: ok must be a boolean");
+    }
+    if (
+      attempt.status !== undefined &&
+      (!Number.isFinite(attempt.status) ||
+        !Number.isInteger(attempt.status))
+    ) {
+      throw new Error(
+        "PayoutWebhookOutbox: status must be a finite integer",
+      );
+    }
+    if (attempt.error !== undefined && typeof attempt.error !== "string") {
+      throw new Error("PayoutWebhookOutbox: error must be a string");
+    }
+    const at = attempt.at ?? this.clock();
+    if (!Number.isFinite(at)) {
+      throw new Error(
+        "PayoutWebhookOutbox: at must be a finite number (milliseconds)",
+      );
+    }
+    if (ok) {
+      this.records.get(endpoint)?.delete(eventId);
+      if (this.records.get(endpoint)?.size === 0) {
+        this.records.delete(endpoint);
+      }
+      return;
+    }
+    let byEvent = this.records.get(endpoint);
+    if (byEvent === undefined) {
+      byEvent = new Map<string, PayoutWebhookOutboxEntry>();
+      this.records.set(endpoint, byEvent);
+    }
+    const prev = byEvent.get(eventId);
+    const entry: PayoutWebhookOutboxEntry = {
+      endpoint,
+      eventId,
+      attempts: Math.min((prev?.attempts ?? 0) + 1, this.maxAttempts),
+      lastAt: at,
+    };
+    if (attempt.error !== undefined) entry.lastError = attempt.error;
+    byEvent.set(eventId, entry);
+  }
+
+  /**
+   * Mark a `(endpoint, eventId)` pair delivered: drop its failure
+   * record, so a later failure starts counting from 1 again.
+   * Acknowledging an untracked pair is a no-op (there is nothing to
+   * clear), never an error — a success for a pair the outbox never
+   * saw fail is not a caller bug.
+   */
+  acknowledge(endpoint: string, eventId: string): void {
+    if (typeof endpoint !== "string" || endpoint.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: endpoint must be a non-empty string",
+      );
+    }
+    if (typeof eventId !== "string" || eventId.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: eventId must be a non-empty string",
+      );
+    }
+    const byEvent = this.records.get(endpoint);
+    if (byEvent === undefined) return;
+    byEvent.delete(eventId);
+    if (byEvent.size === 0) this.records.delete(endpoint);
+  }
+
+  /**
+   * Pairs that have failed but not yet exhausted their retries
+   * (`attempts < maxAttempts`), in first-recorded order. Each entry
+   * is a fresh copy — mutating it does not affect the ledger.
+   */
+  pending(): PayoutWebhookOutboxEntry[] {
+    const out: PayoutWebhookOutboxEntry[] = [];
+    for (const byEvent of this.records.values()) {
+      for (const entry of byEvent.values()) {
+        if (entry.attempts < this.maxAttempts) out.push({ ...entry });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Pairs that have exhausted their retries
+   * (`attempts >= maxAttempts`), in first-recorded order — the ones
+   * that need a human (fix the endpoint, re-issue the event, or
+   * accept the loss). Each entry is a fresh copy — mutating it does
+   * not affect the ledger.
+   */
+  deadLetter(): PayoutWebhookOutboxEntry[] {
+    const out: PayoutWebhookOutboxEntry[] = [];
+    for (const byEvent of this.records.values()) {
+      for (const entry of byEvent.values()) {
+        if (entry.attempts >= this.maxAttempts) out.push({ ...entry });
+      }
+    }
+    return out;
+  }
+
+  /** Number of tracked `(endpoint, eventId)` pairs (pending + dead-lettered). */
+  get size(): number {
+    let n = 0;
+    for (const byEvent of this.records.values()) n += byEvent.size;
+    return n;
+  }
+
+  /** Drop every tracked pair. */
+  clear(): void {
+    this.records.clear();
+  }
+
+  /**
+   * Export the tracked pairs as a detached, JSON-serializable
+   * {@link PayoutWebhookOutboxSnapshot}: persist it before a
+   * restart and pass it to `PayoutWebhookOutbox.restore()` at
+   * startup so the restart does not forget which deliveries were
+   * already failing. The returned object (including every entry) is
+   * a fresh copy — mutating it does not affect the ledger.
+   */
+  exportSnapshot(): PayoutWebhookOutboxSnapshot {
+    const entries: PayoutWebhookOutboxEntry[] = [];
+    for (const byEvent of this.records.values()) {
+      for (const entry of byEvent.values()) entries.push({ ...entry });
+    }
+    return { v: 1, entries };
+  }
+
+  /**
+   * Rebuild an outbox from a snapshot produced by `exportSnapshot()`
+   * (typically after a `JSON.parse` of the persisted form). `opts`
+   * configures the *new* outbox (`maxAttempts`/`now`) and is
+   * validated exactly like the constructor's.
+   *
+   * The input is untrusted data and is validated strictly: a
+   * non-object snapshot, an unknown top-level field, a `v` other than
+   * `1`, a non-array `entries`, or a malformed entry (not an object
+   * with exactly `endpoint`/`eventId`/`attempts`/`lastAt` plus an
+   * optional `lastError`, an empty/non-string `endpoint`/`eventId`, a
+   * non-positive-integer `attempts`, a non-string `lastError`, a
+   * non-finite `lastAt`) throws — a corrupt snapshot fails loudly at
+   * startup rather than silently clearing a dead letter. Duplicate
+   * `(endpoint, eventId)` pairs collapse to their last occurrence.
+   *
+   * Whether a restored entry reads as pending or dead-lettered is
+   * derived from its `attempts` against the new outbox's
+   * `maxAttempts` (see {@link PayoutWebhookOutboxSnapshot}).
+   * This covers a single process across its own restart only; see
+   * {@link PayoutWebhookOutboxSnapshot} for the multi-instance
+   * and trust limits.
+   */
+  static restore(
+    snapshot: unknown,
+    opts: PayoutWebhookOutboxOptions = {},
+  ): PayoutWebhookOutbox {
+    const fail = (detail: string): never => {
+      throw new Error(`PayoutWebhookOutbox: invalid snapshot: ${detail}`);
+    };
+    if (
+      typeof snapshot !== "object" ||
+      snapshot === null ||
+      Array.isArray(snapshot)
+    )
+      fail("expected an object of the form { v: 1, entries: [...] }");
+    const record = snapshot as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "entries") fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported snapshot version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const rawEntries: unknown = record.entries;
+    if (!Array.isArray(rawEntries)) fail("entries must be an array");
+    const entriesList = rawEntries as unknown[];
+    const parsed: PayoutWebhookOutboxEntry[] = [];
+    for (let i = 0; i < entriesList.length; i++) {
+      const entry: unknown = entriesList[i];
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+        fail(`entries[${i}] must be an object`);
+      const rec = entry as Record<string, unknown>;
+      for (const key of Object.keys(rec)) {
+        if (
+          key !== "endpoint" &&
+          key !== "eventId" &&
+          key !== "attempts" &&
+          key !== "lastError" &&
+          key !== "lastAt"
+        )
+          fail(`entries[${i}]: unknown field "${key}"`);
+      }
+      const endpoint: unknown = rec.endpoint;
+      const eventId: unknown = rec.eventId;
+      const attempts: unknown = rec.attempts;
+      const lastError: unknown = rec.lastError;
+      const lastAt: unknown = rec.lastAt;
+      if (typeof endpoint !== "string" || endpoint === "")
+        fail(`entries[${i}]: endpoint must be a non-empty string`);
+      if (typeof eventId !== "string" || eventId === "")
+        fail(`entries[${i}]: eventId must be a non-empty string`);
+      if (
+        typeof attempts !== "number" ||
+        !Number.isInteger(attempts) ||
+        attempts < 1
+      )
+        fail(
+          `entries[${i}]: attempts must be a positive integer`,
+        );
+      if (lastError !== undefined && typeof lastError !== "string")
+        fail(`entries[${i}]: lastError must be a string`);
+      if (typeof lastAt !== "number" || !Number.isFinite(lastAt))
+        fail(`entries[${i}]: lastAt must be a finite number (milliseconds)`);
+      const parsedEntry: PayoutWebhookOutboxEntry = {
+        endpoint: endpoint as string,
+        eventId: eventId as string,
+        attempts: attempts as number,
+        lastAt: lastAt as number,
+      };
+      if (typeof lastError === "string") parsedEntry.lastError = lastError;
+      parsed.push(parsedEntry);
+    }
+
+    const outbox = new PayoutWebhookOutbox(opts);
+    for (const entry of parsed) {
+      let byEvent = outbox.records.get(entry.endpoint);
+      if (byEvent === undefined) {
+        byEvent = new Map<string, PayoutWebhookOutboxEntry>();
+        outbox.records.set(entry.endpoint, byEvent);
+      }
+      // Duplicate pairs collapse to their last occurrence (position
+      // and record), mirroring the recency rule in
+      // `PayoutEventDedupe.restore`.
+      byEvent.delete(entry.eventId);
+      byEvent.set(entry.eventId, { ...entry });
+    }
+    return outbox;
+  }
+
+  /** Alias of {@link PayoutWebhookOutbox.restore} (snapshot naming). */
+  static fromSnapshot(
+    snapshot: unknown,
+    opts: PayoutWebhookOutboxOptions = {},
+  ): PayoutWebhookOutbox {
+    return PayoutWebhookOutbox.restore(snapshot, opts);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Delivery                                                            */
 /* ------------------------------------------------------------------ */

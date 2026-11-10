@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook delivery-failure ledger `PayoutWebhookOutbox`
+  (backlog #1020): `recordAttempt({ endpoint, eventId, ok, status?,
+  error?, at? })` counts consecutive failures per `(endpoint,
+  eventId)` pair (default `maxAttempts: 3`, capped, later failures
+  still refresh `lastError`/`lastAt`); `pending()` lists pairs not
+  yet exhausted, `deadLetter()` lists pairs that have exhausted their
+  retries, and a success (`ok: true`) or `acknowledge()` clears the
+  pair so a later failure counts from 1 again. Pairs are keyed by
+  `(endpoint, eventId)`, so one event fanned out by
+  `deliverPayoutWebhookToMany` under a shared `eventId` still counts
+  each endpoint independently. Unsigned snapshot round-trip
+  (`exportSnapshot()` / `PayoutWebhookOutbox.restore()`, alias
+  `fromSnapshot`) with strict fail-closed validation, in the same
+  trusted-configuration posture as `PayoutEventDedupe`. Same counting
+  rules as the sibling escrow `SettlementWebhookOutbox` (#1019).
+  The outbox records only — it never retries, it is process-local,
+  and `deliverPayoutWebhook` / `deliverPayoutWebhookToMany` behaviour
+  is unchanged.
+
 - HMAC-signed snapshot envelope for `PayoutEventDedupe` (backlog
   #1011): `exportSignedSnapshot(secret)` returns `{ v: 1, snapshot,
   mac }` with `mac` = HMAC-SHA256 over the canonical JSON of the

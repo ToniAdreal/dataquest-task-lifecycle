@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1230 tests, all local
+npm test   # 1247 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1533,6 +1533,37 @@ to an untrusted endpoint is still accepted.
 `fetchImpl` and `sleepImpl` are injectable so delivery can be tested
 with no network and no real sleeps.
 
+On the sending side, delivery itself keeps no memory: a failed
+`deliverPayoutWebhook` call only tells you that one call failed.
+`PayoutWebhookOutbox` is the in-memory ledger that answers "which
+`(endpoint, eventId)` pairs are still undelivered, and which have
+exhausted their retries" (the dataquest-side peer of escrow's
+`SettlementWebhookOutbox`, same counting rules — a pair is keyed by
+`(endpoint, eventId)`, so one event fanned out by
+`deliverPayoutWebhookToMany` under a shared `eventId` still counts
+each endpoint independently):
+
+```ts
+import { PayoutWebhookOutbox } from "dataquest-task-lifecycle";
+
+const outbox = new PayoutWebhookOutbox({ maxAttempts: 3 });
+const result = await deliverPayoutWebhook(url, webhook);
+if (result.ok) outbox.acknowledge(url, webhook.payload.eventId);
+else outbox.recordAttempt({ endpoint: url, eventId: webhook.payload.eventId, ok: false, error: result.error });
+outbox.pending();    // failed but not yet exhausted — still worth a retry
+outbox.deadLetter(); // 3 consecutive failures — needs a human, not another retry
+```
+
+A failed attempt increments the pair's consecutive-failure count
+(capped at `maxAttempts`, while later failures still refresh
+`lastError`/`lastAt`); a success (`ok: true`, or `acknowledge()`)
+clears the pair, so a later failure counts from 1 again. The ledger
+is process-local and records only — it never retries, and its
+snapshot (`exportSnapshot()` / `PayoutWebhookOutbox.restore()`) is
+unsigned trusted configuration in the same posture as
+`PayoutEventDedupe.exportSnapshot()`: persist it where the webhook
+configuration itself is trusted.
+
 `npm run demo` includes a payout webhook timeout segment: the
 main task's signed webhook is delivered to a hanging injected
 fetch under a pinned `timeoutMs` of 50 with `maxAttempts: 1`, and
@@ -2045,7 +2076,11 @@ Security scope, the caller-trust model, and what this library does
   cross-process retry: delivery is in-process only, so if the process
   dies mid-fan-out some endpoints may have received the event and
   others not — the caller must reconcile and re-deliver, letting
-  receivers deduplicate on the shared `eventId`. Webhook-shaped
+  receivers deduplicate on the shared `eventId`. The
+  `PayoutWebhookOutbox` failure ledger is likewise in-process only: a
+  process that dies loses it unless it exported a snapshot first, and
+  the outbox records failures but never retries — the retry loop stays
+  the caller's job. Webhook-shaped
   payout *signing* does exist — `buildPayoutWebhook`/
   `verifyPayoutWebhook` derive and HMAC-sign a `PAYOUT_COMPLETE`
   notification from a PAID task's audit history — and single-endpoint
@@ -2080,7 +2115,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1230 tests covering the happy path, reject→resubmit
+`npm test` runs 1247 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
