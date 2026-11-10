@@ -129,6 +129,26 @@ webhook signatures (`src/settlementWebhook.ts`).
   still handed through to `fromJSON`, so a keyed chain re-verifies
   under its own key — and the unsigned snapshot stays accepted as
   trusted configuration, the two forms never accepting each other.
+
+  Outbox snapshots get the same treatment:
+  `PayoutWebhookOutbox.exportSignedSnapshot(secret)` wraps the
+  unsigned `{ v: 1, entries }` snapshot in an HMAC-SHA256 envelope
+  `{ v: 1, snapshot, mac }` (same shape and canonical form as the
+  dedupe envelope), and `restoreSignedSnapshot(envelope, secret,
+  opts)` (alias `fromSignedSnapshot`) verifies the MAC in constant
+  time before any snapshot parsing. A rewritten persisted file — a
+  lowered `attempts` count that resurrects a dead letter, an inflated
+  one that pushes a still-retryable pair into the dead letter, a
+  forged `lastError`/`lastAt` or `(endpoint, eventId)` key — then
+  fails closed at startup instead of silently rewriting the failure
+  ledger. The unsigned snapshot stays accepted as trusted
+  configuration, and the two forms never accept each other, so a
+  signed restore cannot silently downgrade. The MAC is integrity
+  protection only, not encryption: the endpoints and eventIds inside
+  are wire-visible values, and the secret is never written into the
+  envelope — a restored outbox must be handed the secret again, like
+  the audit key above, and key storage and distribution remain the
+  caller's responsibility.
 - **Strict snapshot and history validation.** `TaskLifecycle.fromJSON`
   runs `parseSnapshot` (`src/taskLifecycle.ts`) on untrusted input:
   the schema-version gate (`v`, when present, must be exactly

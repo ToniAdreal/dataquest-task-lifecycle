@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1247 tests, all local
+npm test   # 1265 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1562,7 +1562,33 @@ is process-local and records only — it never retries, and its
 snapshot (`exportSnapshot()` / `PayoutWebhookOutbox.restore()`) is
 unsigned trusted configuration in the same posture as
 `PayoutEventDedupe.exportSnapshot()`: persist it where the webhook
-configuration itself is trusted.
+configuration itself is trusted. When the persisted file is not fully
+trusted, use the signed envelope instead —
+`exportSignedSnapshot(secret)` returns `{ v: 1, snapshot, mac }`
+with `mac` = HMAC-SHA256 over the canonical JSON of the snapshot,
+and `PayoutWebhookOutbox.restoreSignedSnapshot(envelope, secret,
+opts)` (alias `fromSignedSnapshot`) verifies it before restoring:
+
+```ts
+// before shutdown:
+persist(JSON.stringify(outbox.exportSignedSnapshot(process.env.OUTBOX_SNAPSHOT_SECRET!)));
+// at startup:
+const outbox2 = PayoutWebhookOutbox.restoreSignedSnapshot(JSON.parse(saved), process.env.OUTBOX_SNAPSHOT_SECRET!, { maxAttempts: 3 });
+```
+
+The secret is never written into the envelope, and the two forms do
+not accept each other — a signed envelope is rejected by the unsigned
+`restore()`, and an unsigned snapshot is rejected by the signed
+restore, so a signed restore cannot silently downgrade to the
+trusted-configuration path. A tampered attempts count, a tampered
+`lastError`/`lastAt`, a tampered `(endpoint, eventId)` key, a tampered
+`mac`, or a wrong secret all fail closed with no outbox produced, and
+a MAC-valid envelope whose snapshot is itself malformed still fails
+the strict snapshot validation. The MAC is integrity protection only,
+not encryption: the endpoints and eventIds inside are wire-visible
+values, so keep the secret where the snapshot writer keeps its other
+signing-side secrets. Same envelope shape and canonical form as the
+`PayoutEventDedupe` signed envelope.
 
 `npm run demo` includes a payout webhook timeout segment: the
 main task's signed webhook is delivered to a hanging injected
@@ -2115,7 +2141,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1247 tests covering the happy path, reject→resubmit
+`npm test` runs 1265 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

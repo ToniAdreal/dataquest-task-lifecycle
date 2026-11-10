@@ -67,6 +67,7 @@ export type {
   PayoutWebhookOutboxAttempt,
   PayoutWebhookOutboxEntry,
   PayoutWebhookOutboxOptions,
+  PayoutWebhookOutboxSignedSnapshotEnvelope,
   PayoutWebhookOutboxSnapshot,
   PayoutWebhookPayload,
   VerifyPayoutWebhookOptions,

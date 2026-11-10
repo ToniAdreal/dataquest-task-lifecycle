@@ -1442,6 +1442,98 @@ export interface PayoutWebhookOutboxSnapshot {
 }
 
 /**
+ * Integrity-protected form of a {@link PayoutWebhookOutboxSnapshot},
+ * produced by `PayoutWebhookOutbox.exportSignedSnapshot(secret)` and
+ * consumed by `PayoutWebhookOutbox.restoreSignedSnapshot(envelope,
+ * secret, opts?)` (see those methods for the exact contract). Same
+ * envelope shape as this repo's `PayoutEventDedupe` signed snapshot
+ * (`PayoutEventDedupeSignedSnapshotEnvelope`, backlog #1011) and the
+ * sibling escrow `SettlementWebhookOutbox` signed snapshot
+ * (`SettlementWebhookOutboxSignedSnapshotEnvelope`, backlog #1030).
+ *
+ * - `v`: envelope format version. Only `1` exists; restore rejects
+ *   any other value (including a missing `v`) instead of guessing.
+ * - `snapshot`: the wrapped {@link PayoutWebhookOutboxSnapshot},
+ *   exactly as `exportSnapshot()` produces it.
+ * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
+ *   `snapshot` (object keys sorted recursively, array order
+ *   preserved) under the caller's secret.
+ *
+ * Why this exists: the unsigned snapshot is trusted configuration —
+ * anyone able to rewrite the persisted file can silently clear a
+ * dead letter (a failed delivery is then retried forever, or a
+ * dead-lettered pair is resurrected as pending) or inflate an
+ * `attempts` count (a pair that still deserves retries is pushed
+ * into the dead letter and never retried). The envelope MAC covers
+ * the whole snapshot, so any such rewrite fails closed at restore.
+ *
+ * The envelope carries no secret: the secret is caller configuration,
+ * never persisted in the envelope, and the same secret must be
+ * supplied at restore time. An envelope with any other field is
+ * rejected, so a caller cannot smuggle extra data (including a
+ * secret) past restore. The MAC is integrity protection only — it
+ * proves the snapshot was not rewritten by anyone without the
+ * secret — not confidentiality: the endpoints and eventIds inside
+ * are wire-visible values, and the envelope itself is plain JSON. A
+ * caller that needs the snapshot kept private must encrypt it
+ * separately; this envelope does not.
+ */
+export interface PayoutWebhookOutboxSignedSnapshotEnvelope {
+  v: 1;
+  snapshot: PayoutWebhookOutboxSnapshot;
+  mac: string;
+}
+
+/**
+ * Validate a signed-snapshot secret for the outbox and return its
+ * bytes. A secret is a non-empty string (UTF-8) or a non-empty
+ * `Buffer` — the same input shapes as the sibling
+ * `PayoutEventDedupe` helper, and deliberately without a length
+ * floor: this MAC is integrity protection for a persisted failure
+ * ledger, and the backlog contract for this helper rejects only an
+ * empty secret, so a shorter caller secret is the caller's risk to
+ * take (use a long random secret; the envelope never records how
+ * long it was). An empty or wrongly typed secret is a
+ * caller-configuration error, thrown before any outbox state is
+ * touched.
+ */
+function outboxSignedSnapshotSecretBytes(secret: unknown): Buffer {
+  if (typeof secret === "string") {
+    if (secret.length === 0)
+      throw new Error(
+        "PayoutWebhookOutbox: signed snapshot secret must not be empty",
+      );
+    return Buffer.from(secret, "utf8");
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0)
+      throw new Error(
+        "PayoutWebhookOutbox: signed snapshot secret must not be empty",
+      );
+    return secret;
+  }
+  throw new Error(
+    `PayoutWebhookOutbox: signed snapshot secret must be a non-empty string or Buffer, got ${typeof secret}`,
+  );
+}
+
+/**
+ * HMAC-SHA256 (hex) over the canonical JSON of an outbox snapshot,
+ * using the shared {@link canonicalJsonForSnapshot} form (object keys
+ * sorted recursively, array order preserved) — the same canonical
+ * form as the sibling `PayoutEventDedupe` envelope, so the two
+ * envelopes are verified by the same rule.
+ */
+function computeOutboxSnapshotMac(
+  snapshot: PayoutWebhookOutboxSnapshot,
+  secretBytes: Buffer,
+): string {
+  return createHmac("sha256", secretBytes)
+    .update(canonicalJsonForSnapshot(snapshot), "utf8")
+    .digest("hex");
+}
+
+/**
  * In-memory ledger of failed payout-webhook deliveries, keyed by
  * `(endpoint, eventId)`. `deliverPayoutWebhook` /
  * `deliverPayoutWebhookToMany` only return the outcome of one call
@@ -1458,7 +1550,18 @@ export interface PayoutWebhookOutboxSnapshot {
  * also process-local: a process that dies loses the ledger unless it
  * exported a snapshot first (see
  * {@link PayoutWebhookOutboxSnapshot} for the trusted-configuration
- * caveat), and two processes never see each other's records.
+ * caveat), and two processes never see each other's records. The
+ * unsigned snapshot is trusted configuration: prefer
+ * `exportSignedSnapshot(secret)` /
+ * `restoreSignedSnapshot(envelope, secret)` (see
+ * {@link PayoutWebhookOutboxSignedSnapshotEnvelope}) whenever the
+ * persisted file can be rewritten by anyone without the secret —
+ * a rewritten unsigned snapshot silently clears a dead letter or
+ * invents failures. A deployment with
+ * multiple processes must keep its failure ledger in shared storage
+ * (a database outbox table, a queue, …) instead. Within one
+ * process the ledger is exact: a pair is pending or dead-lettered
+ * exactly as its consecutive-failure count says.
  *
  * Counting rules, mirroring the sibling `PayoutEventDedupe`
  * posture (fail fast on caller bugs, deterministic under an injected
@@ -1654,6 +1757,39 @@ export class PayoutWebhookOutbox {
   }
 
   /**
+   * Export the current snapshot wrapped in an HMAC-signed envelope
+   * (see {@link PayoutWebhookOutboxSignedSnapshotEnvelope}):
+   * `{ v: 1, snapshot, mac }` where `mac` is HMAC-SHA256 over the
+   * canonical JSON of the snapshot under `secret`. Persist the
+   * envelope (plain JSON) before a restart and restore it with
+   * {@link PayoutWebhookOutbox.restoreSignedSnapshot} — a process
+   * that restarts keeps its pending counts and dead letters, and
+   * anyone who rewrites the persisted entries without the secret
+   * is caught at restore instead of silently clearing a dead letter
+   * (or inventing failures).
+   *
+   * The secret is never written into the envelope, and the envelope
+   * is integrity protection only, not encryption: the endpoints and
+   * eventIds inside are wire-visible values, so the envelope itself
+   * needs no secrecy, but the secret must be kept where the snapshot
+   * writer keeps its other signing-side secrets. An empty secret is a
+   * caller-configuration error. The unsigned `exportSnapshot()`
+   * path is unchanged: this envelope is opt-in, and a caller that
+   * never signs keeps the old trusted-configuration semantics.
+   */
+  exportSignedSnapshot(
+    secret: string | Buffer,
+  ): PayoutWebhookOutboxSignedSnapshotEnvelope {
+    const secretBytes = outboxSignedSnapshotSecretBytes(secret);
+    const snapshot = this.exportSnapshot();
+    return {
+      v: 1,
+      snapshot,
+      mac: computeOutboxSnapshotMac(snapshot, secretBytes),
+    };
+  }
+
+  /**
    * Rebuild an outbox from a snapshot produced by `exportSnapshot()`
    * (typically after a `JSON.parse` of the persisted form). `opts`
    * configures the *new* outbox (`maxAttempts`/`now`) and is
@@ -1769,6 +1905,108 @@ export class PayoutWebhookOutbox {
     opts: PayoutWebhookOutboxOptions = {},
   ): PayoutWebhookOutbox {
     return PayoutWebhookOutbox.restore(snapshot, opts);
+  }
+
+  /**
+   * Rebuild an outbox from a signed envelope produced by
+   * {@link PayoutWebhookOutbox.exportSignedSnapshot} (typically
+   * after a `JSON.parse` of the persisted form). `opts` configures
+   * the *new* outbox (`maxAttempts`/`now`) and is validated exactly
+   * like the constructor's. The returned outbox is a fresh object —
+   * nothing is installed into any existing outbox, so a failed
+   * restore leaves the caller's outboxes untouched.
+   *
+   * Restore is fail-closed in the same order as the unsigned path,
+   * with authenticity checked first: an envelope with an unknown
+   * field (including a smuggled `secret`), a version other than
+   * `1`, a malformed `mac`, or a MAC that does not match the
+   * snapshot under `secret` throws a descriptive configuration
+   * `Error` and no outbox is produced — a tampered `attempts`
+   * count, a tampered `lastError`/`lastAt`, a tampered
+   * `(endpoint, eventId)` key, or a wrong secret all fail here,
+   * before any snapshot parsing, so a tampered envelope can never
+   * partially install. A MAC-valid envelope whose snapshot is
+   * itself malformed then fails through the same strict snapshot
+   * validation as {@link PayoutWebhookOutbox.restore}, again
+   * with no outbox produced. The MAC comparison is constant-time
+   * over equal-length hex digests; a wrong-length `mac` is rejected
+   * as malformed before comparison.
+   *
+   * On success the semantics are exactly
+   * {@link PayoutWebhookOutbox.restore}'s: duplicate pairs
+   * collapse to their last occurrence, and whether a restored entry
+   * reads as pending or dead-lettered is derived from its
+   * `attempts` against the new outbox's `maxAttempts`.
+   *
+   * The unsigned `restore()` and this signed restore do not accept
+   * each other's input: an unsigned snapshot has no `mac` (and an
+   * `entries` field where the envelope expects `snapshot`), and a
+   * signed envelope has fields the unsigned path rejects — so a
+   * caller cannot silently downgrade a signed restore to the
+   * trusted-configuration path.
+   */
+  static restoreSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: PayoutWebhookOutboxOptions = {},
+  ): PayoutWebhookOutbox {
+    const secretBytes = outboxSignedSnapshotSecretBytes(secret);
+    const fail = (detail: string): never => {
+      throw new Error(
+        `PayoutWebhookOutbox: invalid signed snapshot envelope: ${detail}`,
+      );
+    };
+    if (
+      typeof envelope !== "object" ||
+      envelope === null ||
+      Array.isArray(envelope)
+    )
+      fail("expected an object of the form { v: 1, snapshot, mac }");
+    const record = envelope as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key !== "v" && key !== "snapshot" && key !== "mac")
+        fail(`unknown field "${key}"`);
+    }
+    if (record.v !== 1)
+      fail(
+        `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
+      );
+    const mac = record.mac;
+    if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
+      throw new Error(
+        "PayoutWebhookOutbox: invalid signed snapshot envelope: mac must be a 64-character lowercase hex HMAC-SHA256 digest",
+      );
+    const snapshot = record.snapshot;
+    if (
+      typeof snapshot !== "object" ||
+      snapshot === null ||
+      Array.isArray(snapshot)
+    )
+      fail('"snapshot" must be an object');
+    const expectedMac = computeOutboxSnapshotMac(
+      snapshot as PayoutWebhookOutboxSnapshot,
+      secretBytes,
+    );
+    const macBytes = Buffer.from(mac, "hex");
+    const expectedBytes = Buffer.from(expectedMac, "hex");
+    if (
+      macBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(macBytes, expectedBytes)
+    )
+      throw new Error(
+        "PayoutWebhookOutbox: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+      );
+    // MAC verified — now the same strict structural validation as restore().
+    return PayoutWebhookOutbox.restore(snapshot, opts);
+  }
+
+  /** Alias of {@link PayoutWebhookOutbox.restoreSignedSnapshot} (snapshot naming). */
+  static fromSignedSnapshot(
+    envelope: unknown,
+    secret: string | Buffer,
+    opts: PayoutWebhookOutboxOptions = {},
+  ): PayoutWebhookOutbox {
+    return PayoutWebhookOutbox.restoreSignedSnapshot(envelope, secret, opts);
   }
 }
 

@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- HMAC-signed snapshot envelopes for `PayoutWebhookOutbox`
+  (2026-11-10, backlog #1031): `exportSignedSnapshot(secret)` wraps
+  the unsigned snapshot in `{ v: 1, snapshot, mac }` (HMAC-SHA256
+  over the canonical JSON of the snapshot, same envelope shape and
+  canonical form as the #1011 dedupe envelope), and
+  `restoreSignedSnapshot(envelope, secret, opts)` (alias
+  `fromSignedSnapshot`) verifies the MAC in constant time before
+  any snapshot parsing — a rewritten persisted file (a lowered
+  `attempts` count resurrecting a dead letter, an inflated one
+  killing retries, a forged `lastError`/`lastAt` or
+  `(endpoint, eventId)` key) now fails closed at restore instead of
+  silently rewriting the failure ledger. The secret is never
+  written into the envelope, the two snapshot forms never accept
+  each other, and the unsigned path is unchanged.
+
 - Payout webhook delivery-failure ledger `PayoutWebhookOutbox`
   (backlog #1020): `recordAttempt({ endpoint, eventId, ok, status?,
   error?, at? })` counts consecutive failures per `(endpoint,
