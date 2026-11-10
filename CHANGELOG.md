@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Fan-out concurrency cap `maxConcurrency` for
+  `deliverPayoutWebhookToMany` (2026-11-10, backlog #1033, mirrors
+  escrow #1032): `DeliverPayoutWebhookToManyOptions.maxConcurrency`
+  is an opt-in positive integer bounding how many endpoint
+  deliveries run at once — the fan-out becomes a bounded pool (a
+  new endpoint starts only when one settles), so a 50-endpoint
+  fan-out never opens 50 simultaneous connections. Unset, every
+  endpoint starts at once, as before. Invalid values throw before
+  any request, the same way as `maxEndpoints`; `overallDeadlineMs`
+  keeps its meaning (the deadline still aborts every in-flight
+  delivery, and an endpoint that has not started when the deadline
+  fires is reported as a deadline failure with 0 attempts and no
+  request made). Results stay in endpoint order, and
+  `delivered`/`failed` count exactly what happened, either way.
+
 - HMAC-signed snapshot envelopes for `PayoutWebhookOutbox`
   (2026-11-10, backlog #1031): `exportSignedSnapshot(secret)` wraps
   the unsigned snapshot in `{ v: 1, snapshot, mac }` (HMAC-SHA256

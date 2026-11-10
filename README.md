@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1266 tests, all local
+npm test   # 1275 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1671,6 +1671,14 @@ reports `deadlineExceeded: true` while already-completed endpoints keep
 their results. A fetch implementation that ignores its signal cannot be
 force-stopped by the deadline, exactly as with an external abort.
 
+Pass `maxConcurrency` to cap how many deliveries run at once: the
+fan-out then runs as a bounded pool (a new endpoint starts only when
+one settles), so a 50-endpoint fan-out never opens 50 simultaneous
+connections. Unset, every endpoint starts at once, as before. A
+deadline that fires while endpoints are still queued reports those
+endpoints as deadline failures with 0 attempts and no request made;
+results stay in endpoint order either way.
+
 Honest limits: the payload carries only what the audit history records —
 `payoutRef`/`payoutAmount` are omitted when the entry lacks them (a `PAID`
 task with no ref still builds; a missing reference is unevidenced, not a
@@ -2141,7 +2149,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1266 tests covering the happy path, reject→resubmit
+`npm test` runs 1275 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
