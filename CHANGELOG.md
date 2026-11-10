@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark rows for `PayoutWebhookOutbox` (2026-11-10, backlog #1039,
+  mirrors escrow #1038): `npm run bench` now measures six outbox paths
+  over a fixed outbox (`maxAttempts: 3`, injected fixed clock) —
+  `recordAttempt` failure recording on a fresh pair, the 3-failure
+  dead-letter boundary, `pending()` / `deadLetter()` listing over a
+  fixed 1,000-pair ledger (700 pending, 300 dead-lettered),
+  `acknowledge` clearing, `exportSnapshot`, and `restore` from the
+  JSON-round-tripped snapshot — each with per-iteration self-checks
+  pinning the counts and dead-letter state to hand-written
+  expectations, and a mutation check proving a wrong pinned count
+  fails the bench. README Benchmarks table refreshed from the same
+  run (97 paths).
+
 - Opt-in outbox retry runner `retryPayoutWebhookOutbox`
   (2026-11-10, backlog #1035, mirrors escrow #1034):
   `retryPayoutWebhookOutbox(outbox, deliverOne, opts?)`
