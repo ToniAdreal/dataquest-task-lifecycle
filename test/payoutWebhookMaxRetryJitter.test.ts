@@ -84,7 +84,10 @@ function stubSleep(): {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 test("over-cap 429 hint + jitterMs: sleep is exactly the cap, jitter never pushes it over", async () => {
   const webhook = goldenWebhook();

@@ -3188,7 +3188,10 @@ await runRetryCapDelivery();
     const probeFetch: PayoutWebhookFetchImpl = async () => {
       probeCalls++;
       return probeCalls === 1
-        ? new Response("first", { status: firstStatus, headers: firstHeaders })
+        ? new Response("first", {
+            status: firstStatus,
+            ...(firstHeaders !== undefined ? { headers: firstHeaders } : {}),
+          })
         : new Response("{}", { status: 200 });
     };
     const probeResult = await deliverPayoutWebhook(SINGLE_DELIVERY_URL, webhook, {
@@ -3548,7 +3551,9 @@ async function runFanoutRetryCapVariant(billingFirst: {
         if (i === 0 && slot.calls === 1) {
           return new Response("rate limited", {
             status: billingFirst.status,
-            headers: billingFirst.headers,
+            ...(billingFirst.headers !== undefined
+              ? { headers: billingFirst.headers }
+              : {}),
           });
         }
         return new Response("{}", { status: 200 });

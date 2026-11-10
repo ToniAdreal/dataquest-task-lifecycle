@@ -1,1 +1,17 @@
-{"compilerOptions":{"declaration":true,"module":"NodeNext","moduleResolution":"NodeNext","outDir":"dist","skipLibCheck":true,"strict":true,"target":"ES2022"},"include":["src/**/*","test/**/*","bench/**/*"]}
+{
+  "compilerOptions": {
+    "declaration": true,
+    "exactOptionalPropertyTypes": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022"
+  },
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "bench/**/*"
+  ]
+}

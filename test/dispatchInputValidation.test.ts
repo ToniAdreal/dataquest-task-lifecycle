@@ -62,13 +62,15 @@ test("dispatch: valid actor/note still recorded, normal path unaffected", () => 
   assert.equal(entry.actor, "researcher");
   assert.equal(entry.note, "meets rubric");
   // empty actor is rejected (zero audit value), but an empty note is
-  // still legal; omitting options / passing undefined is legal
+  // still legal; omitting options is legal (an explicit `undefined`
+  // no longer compiles under `exactOptionalPropertyTypes` — see
+  // test/exactOptionalPropertyTypes.test.ts)
   assert.throws(() => t.dispatch("ACCEPT", { actor: "" }), /actor must be a non-empty string/);
   t.dispatch("ACCEPT", { actor: "contributor", note: "" });
   assert.equal(t.history[1].actor, "contributor");
   assert.equal(t.history[1].note, "");
   t.dispatch("START_CAPTURE");
-  t.dispatch("SUBMIT", { actor: undefined, note: undefined });
+  t.dispatch("SUBMIT", {});
   assert.equal(t.history[3].actor, undefined);
   assert.equal(t.history[3].note, undefined);
 });

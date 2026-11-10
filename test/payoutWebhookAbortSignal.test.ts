@@ -89,7 +89,10 @@ interface RecordedCall {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 /** A fetch stub that answers from a script (last entry repeats). */
 function stubFetch(script: Array<Response | Error>): {

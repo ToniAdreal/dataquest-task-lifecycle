@@ -94,7 +94,10 @@ function stubSleep(): {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 test("200 succeeds on the first attempt with the signed body and signature header", async () => {
   const webhook = goldenWebhook();

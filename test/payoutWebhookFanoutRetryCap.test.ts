@@ -81,7 +81,10 @@ function routerFetch(scripts: Record<string, Response[]>): {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 /** A sleep stub that records the requested delays instead of sleeping. */
 function recordingSleep(): {

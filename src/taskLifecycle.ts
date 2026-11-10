@@ -730,7 +730,10 @@ export function expireOverdueTasks(
       // human-driven EXPIRE dispatch in the append-only audit trail.
       // `at` pins the audit timestamp (deterministic replay); omitted,
       // the dispatch stamps the wall clock as before.
-      task.dispatch("EXPIRE", { actor: "system", at: atIso });
+      task.dispatch("EXPIRE", {
+        actor: "system",
+        ...(atIso !== undefined ? { at: atIso } : {}),
+      });
       // The history getter returns frozen detached copies, so the last
       // entry is already the immutable audit record of this dispatch.
       const history = task.history;
@@ -928,7 +931,11 @@ export function actOnStaleTasks(
   const atIso = resolveWatchdogAt(at);
   const run: StaleTaskAction =
     action ??
-    ((task) => task.dispatch("ABANDON", { actor: "system", at: atIso }));
+    ((task) =>
+      task.dispatch("ABANDON", {
+        actor: "system",
+        ...(atIso !== undefined ? { at: atIso } : {}),
+      }));
   // staleTasks() validates maxAgeByState and now fail-fast, before any
   // action runs.
   return staleTasks(tasks, maxAgeByState, now).map((task) => {
@@ -1904,16 +1911,19 @@ export interface TaskHistoryEntry {
    * Entries produced before this feature existed carry neither field —
    * they are legacy and still accepted everywhere (see
    * {@link parseHistory} and {@link verifyHistoryChain}); the two fields
-   * are all-or-nothing per entry and per history.
+   * are all-or-nothing per entry and per history. The `| undefined` is
+   * deliberate: adversarial shapes handed to {@link verifyHistoryChain}
+   * may set either field explicitly to `undefined` (a hash deleted on
+   * one entry), and verification must answer `false`, never throw.
    */
-  prevHash?: string;
+  prevHash?: string | undefined;
   /**
    * Content hash of this entry within the audit-history hash chain.
    * Recomputed by {@link verifyHistoryChain} (and enforced by
    * {@link parseHistory}); rewriting any field of a chained entry
    * invalidates it. See `prevHash` for the chaining rule.
    */
-  hash?: string;
+  hash?: string | undefined;
 }
 
 /**
@@ -3264,7 +3274,9 @@ export function parseHistory(
     );
   }
   if (chainedFlags.length > 0 && chainedFlags.every(Boolean)) {
-    if (!verifyHistoryChain(entries, { auditSecret: secret })) {
+    if (!verifyHistoryChain(entries, {
+      ...(secret !== undefined ? { auditSecret: secret } : {}),
+    })) {
       throw new Error(
         "invalid history: history hash chain is broken (an entry was tampered with, deleted, or reordered)",
       );
@@ -3445,7 +3457,9 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   }
   const state = snapshot.state as TaskState;
 
-  const history = parseHistory(snapshot.history, { auditSecret });
+  const history = parseHistory(snapshot.history, {
+    ...(auditSecret !== undefined ? { auditSecret } : {}),
+  });
 
   if (history.length > 0) {
     const last = history[history.length - 1];
@@ -4336,7 +4350,9 @@ export class TaskLifecycle {
     const task = new TaskLifecycle(parsed.id, {
       maxResubmits: parsed.maxResubmits,
       maxDisputes: parsed.maxDisputes,
-      auditSecret: opts?.auditSecret,
+      ...(opts?.auditSecret !== undefined
+        ? { auditSecret: opts.auditSecret }
+        : {}),
     });
     task._state = parsed.state;
     task._idempotencyKeys = parsed.idempotencyKeys;
@@ -4502,11 +4518,19 @@ export class TaskLifecycle {
       throw new Error("invalid history: id must be a non-empty string");
     }
     const task = new TaskLifecycle(id, opts);
-    task._state = replay(history, { auditSecret: opts?.auditSecret });
+    task._state = replay(history, {
+      ...(opts?.auditSecret !== undefined
+        ? { auditSecret: opts.auditSecret }
+        : {}),
+    });
     // See fromJSON(): a legacy hashless log is chained deterministically
     // on rehydration, so the live history is always fully chained.
     task._history = chainHistoryEntries(
-      parseHistory(history, { auditSecret: opts?.auditSecret }),
+      parseHistory(history, {
+        ...(opts?.auditSecret !== undefined
+          ? { auditSecret: opts.auditSecret }
+          : {}),
+      }),
       opts?.auditSecret,
     );
     return task;

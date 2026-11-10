@@ -252,9 +252,11 @@ test("tasksByFilters: an empty or non-string actor/payoutRef fails fast", () => 
       /invalid tasksByFilters: payoutRef must be a non-empty string/,
     );
   }
-  // Explicit undefined is the same as omitting the condition.
-  assert.equal(tasksByFilters(batch, { actor: undefined }).length, 6);
-  assert.equal(tasksByFilters(batch, { payoutRef: undefined }).length, 6);
+  // Omitting a condition is the same as not filtering on it (an
+  // explicit `actor: undefined` no longer compiles under
+  // `exactOptionalPropertyTypes` — see
+  // test/exactOptionalPropertyTypes.test.ts).
+  assert.equal(tasksByFilters(batch, {}).length, 6);
 });
 
 test("tasksByFilters: pure — input order, task states and histories are untouched", () => {
@@ -418,18 +420,11 @@ test("tasksByFilters: all four legal keys still combine after the guard (backlog
   );
 });
 
-test("tasksByFilters: an explicitly-undefined legal key is still not a condition", () => {
+test("tasksByFilters: an empty condition object selects every task", () => {
   const batch = mixedBatch();
-  // undefined values are the "condition absent" spelling, so they
-  // must survive the whitelist scan (the key itself is legal) and
-  // not throw.
-  assert.equal(
-    tasksByFilters(batch, {
-      state: undefined,
-      actor: undefined,
-      event: undefined,
-      payoutRef: undefined,
-    }).length,
-    6,
-  );
+  // An empty object is the "no condition" spelling: it must survive
+  // the whitelist scan and not throw. (An explicit `undefined` value
+  // no longer compiles under `exactOptionalPropertyTypes` — see
+  // test/exactOptionalPropertyTypes.test.ts.)
+  assert.equal(tasksByFilters(batch, {}).length, 6);
 });

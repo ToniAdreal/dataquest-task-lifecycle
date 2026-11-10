@@ -87,7 +87,10 @@ function stubSleep(): {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 test("default jitterMs=0 keeps the exact exponential backoff sequence (5xx path)", async () => {
   const webhook = goldenWebhook();

@@ -72,7 +72,10 @@ function goldenWebhook(): PayoutWebhook {
 }
 
 const res = (status: number, headers?: Record<string, string>) =>
-  new Response("{}", { status, headers });
+  new Response("{}", {
+    status,
+    ...(headers !== undefined ? { headers } : {}),
+  });
 
 /** A fetch stub driven by a script of responses/errors. */
 function stubFetch(script: Array<Response | Error>): {

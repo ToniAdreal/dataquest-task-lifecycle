@@ -18,7 +18,6 @@ function chainedTask(): TaskLifecycle {
   task.dispatch("START_CAPTURE", { actor: "contributor-7" });
   task.dispatch("SUBMIT", {
     actor: "contributor-7",
-    payoutRef: undefined,
     note: "batch-42",
   });
   return task;

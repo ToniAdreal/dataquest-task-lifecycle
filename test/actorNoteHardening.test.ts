@@ -24,11 +24,14 @@ test("dispatch: empty-string actor is rejected with no history residue", () => {
   assert.equal(t.history.length, 0);
 });
 
-test("dispatch: whitespace-only actor is legal (non-empty), undefined stays anonymous", () => {
+test("dispatch: whitespace-only actor is legal (non-empty), omitting actor stays anonymous", () => {
   const t = new TaskLifecycle("h2");
   t.dispatch("PUBLISH", { actor: " " });
   assert.equal(t.history[0].actor, " ");
-  t.dispatch("ACCEPT", { actor: undefined });
+  // Omitting the field stays anonymous (an explicit `actor: undefined`
+  // no longer compiles under `exactOptionalPropertyTypes` — see
+  // test/exactOptionalPropertyTypes.test.ts).
+  t.dispatch("ACCEPT", {});
   assert.equal(t.history[1].actor, undefined);
 });
 

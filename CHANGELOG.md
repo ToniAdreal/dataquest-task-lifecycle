@@ -330,6 +330,30 @@ change type; no entry describes a feature that is not in the history.
   pins the value, the library cross-check, the printed line, and
   its order after the finance-pass total row.
 
+### Changed
+
+- `exactOptionalPropertyTypes` enabled (2026-11-10, backlog #1037,
+  mirrors escrow #1036 and the rfc9421 #1021 pilot): optional config
+  properties (`TaskLifecycleOptions`, `DispatchOptions`,
+  `TasksByFiltersOptions`, `AuditChainOptions`, `SubscribeOptions`,
+  `BuildPayoutWebhookOptions`, `BuildPayoutWebhooksOptions`,
+  `VerifyPayoutWebhookOptions`, `PayoutEventDedupeOptions`,
+  `PayoutWebhookOutboxOptions`, `PayoutWebhookOutboxRetryOptions`,
+  `DeliverPayoutWebhookOptions`, `DeliverPayoutWebhookToManyOptions`,
+  `PayoutWebhookEndpoint`) no longer accept an explicit `undefined`
+  assignment — omitting the field is the only way to take the default.
+  Data shapes that genuinely carry `undefined` at runtime are
+  annotated `| undefined` instead (`TaskHistoryEntry` hash/prevHash,
+  `PayoutWebhookPayload` payoutRef/payoutAmount/quotedAmount,
+  `PayoutWebhookOutboxAttempt` at, `DeliverWebhookResult` status,
+  `ResolvedDeliverOptions` signal). Internal forwarding omits unset
+  values via conditional spread instead of passing `undefined`
+  through. Tests that documented the old "explicit undefined behaves
+  like unset" behavior now pin omission instead. New
+  `test/exactOptionalPropertyTypes.test.ts` pins both sides with
+  `@ts-expect-error` cases plus one runtime case. This is a small
+  type-level breaking change; there is no runtime behavior change.
+
 ### Fixed
 
 - `tasksByFilters` rejects unknown filter keys fail-closed (backlog

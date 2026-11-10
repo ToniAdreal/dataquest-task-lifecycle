@@ -110,8 +110,11 @@ describe("TaskLifecycleOptions unknown fields fail closed", () => {
     const b = new TaskLifecycle("t-opts-none");
     assert.equal(a.state, "DRAFT");
     assert.equal(b.state, "DRAFT");
-    // Explicitly passing undefined for a legal field is still legal.
-    const c = new TaskLifecycle("t-opts-undef", { maxResubmits: undefined });
+    // Omitting a legal field constructs normally (an explicit
+    // `maxResubmits: undefined` no longer compiles under
+    // `exactOptionalPropertyTypes` — see
+    // test/exactOptionalPropertyTypes.test.ts).
+    const c = new TaskLifecycle("t-opts-undef", {});
     assert.equal(c.state, "DRAFT");
   });
 

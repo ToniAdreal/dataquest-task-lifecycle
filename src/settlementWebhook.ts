@@ -79,9 +79,9 @@ export interface PayoutWebhookPayload {
   event: "PAYOUT_COMPLETE";
   taskId: string;
   /** External payment reference from the PAYOUT_COMPLETE entry; omitted when absent. */
-  payoutRef?: string;
+  payoutRef?: string | undefined;
   /** Settled payout amount from the PAYOUT_COMPLETE entry; omitted when absent. */
-  payoutAmount?: number;
+  payoutAmount?: number | undefined;
   /**
    * Quoted (owed) amount from the LAST `ACCEPT` entry — the same
    * derivation `payoutMismatch` uses in-repo — so a receiver can
@@ -90,9 +90,14 @@ export interface PayoutWebhookPayload {
    * quote (the advisory omission rule `payoutRef`/`payoutAmount` use).
    * The field only carries the data: whether a difference between
    * `quotedAmount` and `payoutAmount` is a problem, and what to do
-   * about it, remains the receiver's adjudication.
+   * about it, remains the receiver's adjudication. The `| undefined`
+   * is deliberate: a receiver-side caller may strip the field
+   * explicitly (`{ ...payload, quotedAmount: undefined }`, which drops
+   * the key on re-stringification), and that tampered body must verify
+   * as `false`, never throw — the same rule `payoutRef`/`payoutAmount`
+   * follow.
    */
-  quotedAmount?: number;
+  quotedAmount?: number | undefined;
   /** ISO-8601 timestamp of when the payload was built. */
   at: string;
   /**
@@ -451,9 +456,11 @@ export function buildPayoutWebhooks(
         };
       }
       const webhook = buildPayoutWebhook(task, secret, {
-        now: options.now,
+        ...(options.now !== undefined ? { now: options.now } : {}),
         eventId,
-        requirePayoutRef: options.requirePayoutRef,
+        ...(options.requirePayoutRef !== undefined
+          ? { requirePayoutRef: options.requirePayoutRef }
+          : {}),
       });
       issuedEventIds.add(eventId);
       return { taskId, webhook };
@@ -1386,9 +1393,12 @@ export interface PayoutWebhookOutboxAttempt {
   /**
    * Attempt time in milliseconds since the epoch. Defaults to the
    * outbox clock (`now`). Inject it for deterministic tests or to
-   * record an attempt that happened earlier.
+   * record an attempt that happened earlier. The `| undefined` mirrors
+   * the sibling escrow `SettlementWebhookOutboxAttempt.at`: a caller
+   * may pass the field explicitly as `undefined` to take the clock
+   * default, and the attempt is recorded exactly the same way.
    */
-  at?: number;
+  at?: number | undefined;
 }
 
 /**
@@ -2452,8 +2462,13 @@ export interface DeliverWebhookResult {
   ok: boolean;
   /** Total HTTP attempts made, including the initial one. */
   attempts: number;
-  /** HTTP status of the last attempt, when a response was received. */
-  status?: number;
+  /**
+   * HTTP status of the last attempt, when a response was received.
+   * The `| undefined` is honest: a network failure (or an abort
+   * before any response) has no status, so a failed result genuinely
+   * carries `status: undefined` at runtime.
+   */
+  status?: number | undefined;
   /** Human-readable last failure cause, present when `ok` is `false`. */
   error?: string;
 }
@@ -2593,7 +2608,10 @@ interface ResolvedDeliverOptions {
   allowInsecureHttp: boolean;
   fetchImpl: PayoutWebhookFetchImpl;
   sleepImpl: (ms: number) => Promise<void>;
-  signal?: AbortSignal;
+  // Present as `undefined` when the caller gave no signal: a resolved
+  // shape genuinely carries "no signal", so `| undefined` is honest
+  // here (unlike the config options, which take omission only).
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -3198,17 +3216,30 @@ export async function deliverPayoutWebhookToMany(
         deadlineSignal,
       ]);
       try {
+        // Per-endpoint overrides fall back to the call-level options;
+        // either side may be unset, so each field is spread in only
+        // when defined — DeliverPayoutWebhookOptions no longer accepts
+        // an explicit undefined (exactOptionalPropertyTypes).
+        const timeoutMs = endpoint.timeoutMs ?? opts.timeoutMs;
+        const maxAttempts = endpoint.maxAttempts ?? opts.maxAttempts;
+        const backoffMs = endpoint.backoffMs ?? opts.backoffMs;
+        const maxRetryDelayMs =
+          endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs;
+        const jitterMs = endpoint.jitterMs ?? opts.jitterMs;
+        const allowInsecureHttp =
+          endpoint.allowInsecureHttp ?? opts.allowInsecureHttp;
+        const fetchImpl = endpoint.fetchImpl ?? opts.fetchImpl;
+        const sleepImpl = endpoint.sleepImpl ?? opts.sleepImpl;
         return await deliverPayoutWebhook(endpoint.url, webhook, {
-          timeoutMs: endpoint.timeoutMs ?? opts.timeoutMs,
-          maxAttempts: endpoint.maxAttempts ?? opts.maxAttempts,
-          backoffMs: endpoint.backoffMs ?? opts.backoffMs,
-          maxRetryDelayMs: endpoint.maxRetryDelayMs ?? opts.maxRetryDelayMs,
-          jitterMs: endpoint.jitterMs ?? opts.jitterMs,
-          allowInsecureHttp:
-            endpoint.allowInsecureHttp ?? opts.allowInsecureHttp,
-          fetchImpl: endpoint.fetchImpl ?? opts.fetchImpl,
-          sleepImpl: endpoint.sleepImpl ?? opts.sleepImpl,
-          signal,
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+          ...(backoffMs !== undefined ? { backoffMs } : {}),
+          ...(maxRetryDelayMs !== undefined ? { maxRetryDelayMs } : {}),
+          ...(jitterMs !== undefined ? { jitterMs } : {}),
+          ...(allowInsecureHttp !== undefined ? { allowInsecureHttp } : {}),
+          ...(fetchImpl !== undefined ? { fetchImpl } : {}),
+          ...(sleepImpl !== undefined ? { sleepImpl } : {}),
+          ...(signal !== undefined ? { signal } : {}),
         });
       } finally {
         dispose();
