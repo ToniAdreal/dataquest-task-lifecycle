@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1348 tests, all local
+npm test   # 1358 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -948,10 +948,18 @@ task.dispatch("PAYOUT_COMPLETE", { actor: "system", payoutRef: "xfer-88f2" });
 task.history[7].payoutRef; // => "xfer-88f2"
 ```
 
-`payoutRef` must be a non-empty string; anything else throws
+`payoutRef` must be a non-empty string of at most 256 characters
+(`MAX_PAYOUT_REF_LENGTH`, exported); anything else throws
 `invalid dispatch options: …` before the entry is appended, like
-actor/note. The reference survives `toJSON()` / `fromJSON()` and
-`fromHistory()` round-trips (an empty or non-string `payoutRef` in an
+actor/note. The same cap is enforced when parsing an untrusted
+snapshot and when validating ledger rows in `reconcilePayouts()`,
+because a ref is written verbatim into the append-only history and
+fanned out in webhook payloads and NDJSON exports; the cap is a
+rejection, never a truncation, since truncating would change which
+transfer the ref names. Read-only lookups (`tasksByPayoutRef` /
+`tasksByFilters`) deliberately impose no cap: they only read a ref,
+never persist it. The reference survives `toJSON()` / `fromJSON()` and
+`fromHistory()` round-trips (an empty, non-string, or overlong `payoutRef` in an
 untrusted snapshot is rejected as `invalid history`), and it is
 preserved by the NDJSON export.
 
@@ -1104,7 +1112,8 @@ recorded none, the task pairs on the reference alone; when the task
 recorded none, it never pairs: it lands in `unreconciled` instead, the
 same population `unreconciledPayouts()` returns. A reference appearing
 twice in the ledger throws (`duplicate ledger payoutRef`), as does
-any malformed ledger row; pure, like the other screens.
+any malformed ledger row (including a `payoutRef` longer than 256
+characters); pure, like the other screens.
 
 ### Payout amounts
 
@@ -2251,7 +2260,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1348 tests covering the happy path, reject→resubmit
+`npm test` runs 1358 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

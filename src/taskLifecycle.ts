@@ -27,6 +27,23 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
  */
 export const MAX_NOTE_LENGTH = 32_768;
 
+/**
+ * Maximum payoutRef length accepted by dispatch(), parseHistory(), and
+ * reconcilePayouts().
+ *
+ * Rationale: a payoutRef is a short external identifier (a payout batch
+ * id, a bank/ledger transfer id — `xfer-88f2` is 8 characters, and real
+ * transfer ids rarely exceed a few dozen). 256 characters leaves an
+ * order of magnitude of headroom for any honest identifier, while the
+ * ref is written verbatim into the append-only audit history and fanned
+ * out in payout-webhook payloads and NDJSON exports — an unbounded ref
+ * would permanently inflate every export. The cap is a rejection, never
+ * a truncation: truncating a ref would change which transfer it names.
+ * Read-only lookups (tasksByPayoutRef/tasksByFilters) deliberately
+ * impose no cap — they only read a ref, never persist it.
+ */
+export const MAX_PAYOUT_REF_LENGTH = 256;
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -1942,7 +1959,8 @@ export interface ReconcilePayoutsResult {
  *    amount.
  *
  * Fail-fast, before any pairing: a ledger row that is not an object,
- * carries an empty or non-string `payoutRef`, or carries a
+ * carries an empty, non-string, or overlong (longer than
+ * {@link MAX_PAYOUT_REF_LENGTH} characters) `payoutRef`, or carries a
  * non-finite or negative `payoutAmount` throws, and a reference
  * appearing twice in the ledger throws `duplicate ledger payoutRef`
  * — a duplicated ledger row would otherwise make "matched" ambiguous
@@ -1968,6 +1986,11 @@ export function reconcilePayouts(
     if (typeof row.payoutRef !== "string" || row.payoutRef.length === 0) {
       throw new Error(
         `invalid reconcilePayouts: ledger payoutRef must be a non-empty string, got ${JSON.stringify(row.payoutRef)}`,
+      );
+    }
+    if (row.payoutRef.length > MAX_PAYOUT_REF_LENGTH) {
+      throw new Error(
+        `invalid reconcilePayouts: ledger payoutRef must be at most ${MAX_PAYOUT_REF_LENGTH} characters, got ${row.payoutRef.length}`,
       );
     }
     if (
@@ -2053,7 +2076,10 @@ export interface TaskHistoryEntry {
    * `dispatch(event, { payoutRef })`; unlike `note`, it is a typed,
    * queryable field instead of free text. A `PAYOUT_COMPLETE` entry
    * without one is allowed but discouraged (see dispatch) — the library
-   * cannot know whether an external payment really happened.
+   * cannot know whether an external payment really happened. At most
+   * {@link MAX_PAYOUT_REF_LENGTH} characters: dispatch() and
+   * parseHistory() both reject longer refs, so an unbounded ref can
+   * neither be written nor smuggled back in through an untrusted log.
    */
   payoutRef?: string;
   /**
@@ -3315,6 +3341,9 @@ function chainHistoryEntries(
  *    consumed so a typo is reported as itself
  *  - entry shape violations (seq, event, from, to, at, actor, note,
  *    payoutRef, prevHash, hash)
+ *  - `payoutRef` longer than {@link MAX_PAYOUT_REF_LENGTH} characters is
+ *    rejected (dispatch enforces the same cap, so a corrupted snapshot
+ *    cannot smuggle an unbounded ref back in)
  *  - seq must restart at 1 and increment by 1 with no gaps
  *  - the from/to chain must be continuous and start at DRAFT
  *  - every (from, event) -> to edge must be a legal transition edge
@@ -3425,10 +3454,18 @@ export function parseHistory(
     }
     if (raw.payoutRef !== undefined) {
       // dispatch() only ever writes non-empty strings, so an empty or
-      // non-string payoutRef in an untrusted log is malformed.
+      // non-string payoutRef in an untrusted log is malformed. An
+      // overlong ref is malformed the same way: dispatch() caps refs at
+      // MAX_PAYOUT_REF_LENGTH, so a longer one in a log never came from
+      // this library.
       if (typeof raw.payoutRef !== "string" || raw.payoutRef.length === 0) {
         throw new Error(
           `${tag}: payoutRef must be a non-empty string, got ${JSON.stringify(raw.payoutRef)}`,
+        );
+      }
+      if (raw.payoutRef.length > MAX_PAYOUT_REF_LENGTH) {
+        throw new Error(
+          `${tag}: payoutRef must be at most ${MAX_PAYOUT_REF_LENGTH} characters, got ${raw.payoutRef.length}`,
         );
       }
       entry.payoutRef = raw.payoutRef;
@@ -4000,7 +4037,8 @@ export class TaskLifecycle {
    * audit entry for settlement reconciliation. It is intended for
    * `REQUEST_PAYOUT` / `PAYOUT_COMPLETE` entries, but it is accepted on
    * any event — like actor/note, it is generic audit metadata. It must be
-   * a non-empty string; an empty or non-string value throws
+   * a non-empty string of at most {@link MAX_PAYOUT_REF_LENGTH}
+   * characters; an empty, non-string, or overlong value throws
    * `invalid dispatch options: …` up front, before anything mutates.
    *
    * Advisory (deliberately not enforced by default): a `PAYOUT_COMPLETE`
@@ -4160,6 +4198,16 @@ export class TaskLifecycle {
       if (typeof opts.payoutRef !== "string" || opts.payoutRef.length === 0) {
         throw new Error(
           `invalid dispatch options: payoutRef must be a non-empty string, got ${JSON.stringify(opts.payoutRef)}`,
+        );
+      }
+      // A ref is written verbatim into the append-only audit history and
+      // fanned out in webhook payloads and NDJSON exports, so an
+      // unbounded ref permanently inflates every export — cap it at
+      // MAX_PAYOUT_REF_LENGTH (rejected, never truncated: truncating
+      // would change which transfer the ref names).
+      if (opts.payoutRef.length > MAX_PAYOUT_REF_LENGTH) {
+        throw new Error(
+          `invalid dispatch options: payoutRef must be at most ${MAX_PAYOUT_REF_LENGTH} characters, got ${opts.payoutRef.length}`,
         );
       }
     }

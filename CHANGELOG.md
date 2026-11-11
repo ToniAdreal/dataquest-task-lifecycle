@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `payoutRef` length cap (2026-11-11, backlog #1053):
+  `MAX_PAYOUT_REF_LENGTH = 256`, exported from the index. `dispatch()`,
+  `parseHistory()` (hence `fromJSON()` / `fromHistory()` and the NDJSON
+  import), and `reconcilePayouts()` ledger validation all reject a ref
+  longer than 256 characters with an explicit error, never truncating
+  it — truncating would change which transfer the ref names. A ref of
+  exactly 256 characters passes verbatim everywhere, and short refs
+  such as `xfer-88f2` are unaffected. Read-only lookups
+  (`tasksByPayoutRef` / `tasksByFilters`) deliberately impose no cap:
+  they only read a ref, never persist it. 10 tests in
+  `test/payoutRefLength.test.ts`.
+
 - Opt-in `dryRun` rehearsal for the SLA watchdog executor
   (2026-11-11, backlog #1051, mirrors escrow #1050):
   `expireOverdueTasks(tasks, now, at, { dryRun: true })` screens the

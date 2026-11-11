@@ -11,6 +11,7 @@ export {
   isOverdue,
   isTerminal,
   MAX_NOTE_LENGTH,
+  MAX_PAYOUT_REF_LENGTH,
   mismatchedPayouts,
   nextSlaDeadline,
   parseHistory,
