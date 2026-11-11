@@ -44,6 +44,29 @@ export const MAX_NOTE_LENGTH = 32_768;
  */
 export const MAX_PAYOUT_REF_LENGTH = 256;
 
+/**
+ * Maximum actor length accepted by dispatch() and parseHistory().
+ *
+ * Rationale: an actor is a short person/service identifier (a role
+ * name, a username, `system` — the demo's longest is 16 characters).
+ * 256 characters leaves an order of magnitude of headroom for any
+ * honest identifier, while the actor is written verbatim into the
+ * append-only audit history and fanned out in snapshots, NDJSON
+ * exports, and payout-webhook payloads — an unbounded actor would
+ * permanently inflate every export. The cap is a rejection, never a
+ * truncation: truncating an actor would change who the audit trail
+ * says performed the dispatch.
+ *
+ * Deliberate asymmetry: rolePolicy actor names are NOT capped (see
+ * the {@link RolePolicy} docs). A policy is task configuration, never
+ * — so an overlong policy name carries no volume risk, and capping it
+ * would break restoring snapshots that already carry such a name.
+ * An overlong policy name is only dead configuration: dispatch()
+ * rejects any actor longer than this cap before the RBAC check, so
+ * the name can never match a legal dispatch.
+ */
+export const MAX_ACTOR_LENGTH = 256;
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -2177,6 +2200,14 @@ export interface TaskHistoryEntry {
   from: TaskState;
   to: TaskState;
   at: string; // ISO timestamp
+  /**
+   * Who performed the dispatch (a role name, a username, `system`).
+   * At most {@link MAX_ACTOR_LENGTH} characters: dispatch() and
+   * parseHistory() both reject longer actors, so an unbounded actor
+   * can neither be written nor smuggled back in through an untrusted
+   * log. A rolePolicy name is deliberately NOT capped — a policy is
+   * configuration, never audit data (see {@link RolePolicy}).
+   */
   actor?: string; // contributor | reviewer | moderator | system
   note?: string;
   /**
@@ -2271,6 +2302,14 @@ export interface TaskHistoryEntry {
  * violating the declared policy never happen. Like `maxResubmits`, the
  * policy is task configuration: it survives `toJSON()`/`fromJSON()`
  * round-trips and can be re-attached on `fromHistory()`.
+ *
+ * Policy names are deliberately NOT length-capped (see
+ * {@link MAX_ACTOR_LENGTH}): a policy name is never written into the
+ * audit history, so it carries no volume risk, and capping it would
+ * break restoring snapshots that already carry an overlong name. An
+ * overlong policy name is only dead configuration — dispatch() rejects
+ * any actor longer than the cap before the RBAC check, so the name can
+ * never match a legal dispatch.
  */
 export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
 
@@ -3451,6 +3490,9 @@ function chainHistoryEntries(
  *    consumed so a typo is reported as itself
  *  - entry shape violations (seq, event, from, to, at, actor, note,
  *    payoutRef, prevHash, hash)
+ *  - `actor` longer than {@link MAX_ACTOR_LENGTH} characters is
+ *    rejected (dispatch enforces the same cap, so a corrupted snapshot
+ *    cannot smuggle an unbounded actor back in)
  *  - `payoutRef` longer than {@link MAX_PAYOUT_REF_LENGTH} characters is
  *    rejected (dispatch enforces the same cap, so a corrupted snapshot
  *    cannot smuggle an unbounded ref back in)
@@ -3541,10 +3583,18 @@ export function parseHistory(
     };
     if (raw.actor !== undefined) {
       // Same bar as dispatch(): an empty actor in an untrusted log is
-      // malformed — audit entries must say WHO or omit the field.
+      // malformed — audit entries must say WHO or omit the field. An
+      // overlong actor is malformed the same way: dispatch() caps
+      // actors at MAX_ACTOR_LENGTH, so a longer one in a log never
+      // came from this library.
       if (typeof raw.actor !== "string" || raw.actor.length === 0) {
         throw new Error(
           `${tag}: actor must be a non-empty string, got ${JSON.stringify(raw.actor)}`,
+        );
+      }
+      if (raw.actor.length > MAX_ACTOR_LENGTH) {
+        throw new Error(
+          `${tag}: actor must be at most ${MAX_ACTOR_LENGTH} characters, got ${raw.actor.length}`,
         );
       }
       entry.actor = raw.actor;
@@ -4286,6 +4336,18 @@ export class TaskLifecycle {
       if (typeof opts.actor !== "string" || opts.actor.length === 0) {
         throw new Error(
           `invalid dispatch options: actor must be a non-empty string, got ${JSON.stringify(opts.actor)}`,
+        );
+      }
+      // An actor is written verbatim into the append-only audit
+      // history and serialized on every toJSON()/historyToNdjson()
+      // export, so an unbounded actor permanently inflates the
+      // persisted log — cap it. Checked here, beside the shape
+      // check and before the idempotency dedupe and the RBAC
+      // check, so an overlong actor reports the length error (and
+      // consumes no key) even on a policy-listed event.
+      if (opts.actor.length > MAX_ACTOR_LENGTH) {
+        throw new Error(
+          `invalid dispatch options: actor must be at most ${MAX_ACTOR_LENGTH} characters, got ${opts.actor.length}`,
         );
       }
     }

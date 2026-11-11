@@ -10,6 +10,7 @@ export {
   GENESIS_PREV_HASH,
   isOverdue,
   isTerminal,
+  MAX_ACTOR_LENGTH,
   MAX_NOTE_LENGTH,
   MAX_PAYOUT_REF_LENGTH,
   mismatchedPayouts,

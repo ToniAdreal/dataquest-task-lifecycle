@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1370 tests, all local
+npm test   # 1387 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2093,6 +2093,19 @@ library records the actor string it is given but cannot verify who
 "senior-moderator" really is. It guarantees policy violations never
 dispatch and every allowed dispatch is audited with its actor string.
 
+Actor length cap: an actor is at most 256 characters
+(`MAX_ACTOR_LENGTH`, exported). `dispatch()` and `parseHistory()`
+(hence `fromJSON()` / `fromHistory()` and the NDJSON import) reject a
+longer actor with an explicit error, never truncating it — truncating
+would change who the audit trail says performed the dispatch. The
+check runs beside the actor shape check, before the idempotency
+dedupe and the RBAC check, so an overlong actor reports the length
+error (and consumes no key) even on a policy-listed event. Policy
+names themselves are deliberately not capped: a policy is task
+configuration, never audit data, and an overlong policy name can never
+match a legal dispatch (dispatch rejects first), so it is only dead
+configuration.
+
 `npm run demo` includes this segment: a task under a pinned policy
 (PUBLISH by researcher, ACCEPT by contributor, arbitration by
 senior-moderator) rejects wrong and missing actors with no history
@@ -2270,7 +2283,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1370 tests covering the happy path, reject→resubmit
+`npm test` runs 1387 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

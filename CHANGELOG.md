@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `actor` length cap (2026-11-11, backlog #1057, mirrors escrow
+  #1056): `MAX_ACTOR_LENGTH = 256`, exported from the index.
+  `dispatch()` rejects an actor longer than 256 characters with an
+  explicit error, never truncating it — truncating would change who
+  the audit trail says performed the dispatch — checked beside the
+  actor shape check, before the idempotency dedupe and the RBAC
+  check, so an overlong actor reports the length error (and consumes
+  no key) even on a policy-listed event. `parseHistory()` (hence
+  `fromJSON()` / `fromHistory()` and the NDJSON import) enforces the
+  same cap, so a corrupted snapshot cannot smuggle an unbounded actor
+  back in. An actor of exactly 256 characters passes verbatim
+  everywhere. RolePolicy actor names are deliberately NOT capped: a
+  policy is task configuration, never audit data, and an overlong
+  policy name can never match a legal dispatch (dispatch rejects
+  first), so it is only dead configuration. 17 tests in
+  `test/maxActorLength.test.ts`.
+
 - `payoutRef` length cap (2026-11-11, backlog #1053):
   `MAX_PAYOUT_REF_LENGTH = 256`, exported from the index. `dispatch()`,
   `parseHistory()` (hence `fromJSON()` / `fromHistory()` and the NDJSON
