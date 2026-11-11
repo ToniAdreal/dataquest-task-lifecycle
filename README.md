@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1387 tests, all local
+npm test   # 1400 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1373,7 +1373,13 @@ with `deliverPayoutWebhookToMany`).
 
 `eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
 on it, because a retried delivery would otherwise look like a second
-payout. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
+payout. An injected `eventId` longer than `MAX_EVENT_ID_LENGTH` (256
+characters) is rejected at build, never truncated — truncation would
+change the deduplication key, so a retry and its original could no
+longer be recognised as the same event; the default UUID is 36
+characters, so the cap leaves orders of magnitude of headroom. A
+caller that needs a longer reference should store it out-of-band and
+deduplicate on a short id. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
 HMAC-SHA256 in constant time and returns a boolean; malformed signatures
 return `false` instead of throwing. Verify over the raw request body
 bytes — the object overload re-stringifies for in-process convenience,
@@ -1421,7 +1427,11 @@ entries are reclaimed before the least recently seen entry is
 evicted. Illegal configuration (`ttlMs` not a positive finite
 number, `maxEntries` not a positive integer) throws at construction,
 and an empty or non-string `eventId` throws instead of silently
-passing. `size` and `stats()` (`{ size, hits, misses, evictions }`)
+passing. An `eventId` longer than `MAX_EVENT_ID_LENGTH` (256
+characters) throws the same way, and a snapshot carrying one is
+rejected at restore — the dedupe key is never truncated, so a
+restored id still matches the deliveries it was recorded for.
+`size` and `stats()` (`{ size, hits, misses, evictions }`)
 expose observability, and `clear()` resets both. Honest limit: the
 store is single-process and in-memory only — two receiver processes
 cannot see each other's records, so a multi-process receiver must
@@ -1617,7 +1627,10 @@ at record time — a longer error keeps its prefix and ends with
 `…[truncated]`, so one oversized failure (a full HTML error page, a
 long stack trace) cannot bloat the ledger or the snapshot exported
 from it. The full error body belongs in the log where the delivery
-happened; the outbox keeps only the diagnostic hint.
+happened; the outbox keeps only the diagnostic hint. An `eventId`
+longer than `MAX_EVENT_ID_LENGTH` (256 characters) is rejected at
+`recordAttempt()` and at snapshot restore, never truncated —
+truncation would change the pair's key.
 
 `npm run demo` closes with an outbox segment: a signed payout
 webhook is delivered to the billing endpoint through a scripted
@@ -2283,7 +2296,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1387 tests covering the happy path, reject→resubmit
+`npm test` runs 1400 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

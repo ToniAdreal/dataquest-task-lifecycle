@@ -61,6 +61,22 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { TaskHistoryEntry, TaskLifecycle } from "./taskLifecycle.js";
 
 /**
+ * Maximum length of a payout webhook `eventId`, in characters
+ * (backlog #1060, mirrors escrow #1059 `MAX_EVENT_ID_LENGTH`).
+ *
+ * An `eventId` is a short deduplication key: the default is a UUID
+ * (36 characters), and the demo's fixed ids are shorter still, so
+ * 256 leaves orders of magnitude of headroom. An id longer than the
+ * cap is rejected wherever it can enter the system — the build, the
+ * receiver-side dedupe, and the outbox (record + snapshot restore) —
+ * never truncated: truncating would change the deduplication key, so
+ * a retry and its original could no longer be recognised as the same
+ * event. A caller that needs a longer reference should store it
+ * out-of-band and deduplicate on a short id.
+ */
+export const MAX_EVENT_ID_LENGTH = 256;
+
+/**
  * Compact machine-readable payout notification. Every figure is derived
  * from the task's audit history: the settled side from the
  * PAYOUT_COMPLETE entry that moved it to PAID, and `quotedAmount` from
@@ -130,7 +146,8 @@ export interface BuildPayoutWebhookOptions {
   /**
    * Payload `eventId`. Defaults to `crypto.randomUUID()`; inject a fixed
    * value in tests to make signatures deterministic. Must be a non-empty
-   * string when provided.
+   * string when provided, and at most {@link MAX_EVENT_ID_LENGTH}
+   * characters — a longer value throws instead of being truncated.
    */
   eventId?: string;
   /**
@@ -206,8 +223,9 @@ function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
  * Build the signed payout webhook for a PAID task.
  *
  * Throws when the task is not PAID, the secret is empty, `now` is not a
- * valid timestamp, an injected `eventId` is not a non-empty string, or
- * — with `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
+ * valid timestamp, an injected `eventId` is not a non-empty string (or
+ * is longer than {@link MAX_EVENT_ID_LENGTH} characters), or — with
+ * `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
  * entry carries no `payoutRef`.
  */
 export function buildPayoutWebhook(
@@ -236,6 +254,14 @@ export function buildPayoutWebhook(
   ) {
     throw new Error(
       `cannot build payout webhook: 'eventId' must be a non-empty string for task ${task.id}`,
+    );
+  }
+  if (
+    options.eventId !== undefined &&
+    options.eventId.length > MAX_EVENT_ID_LENGTH
+  ) {
+    throw new Error(
+      `cannot build payout webhook: 'eventId' must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${options.eventId.length} for task ${task.id}`,
     );
   }
   const eventId = options.eventId ?? randomUUID();
@@ -285,8 +311,11 @@ export interface BuildPayoutWebhooksOptions {
    * across tasks, or receivers deduplicating on `eventId` would drop
    * all but the first payout as apparent duplicates. A factory that
    * returns a non-string or empty value fails only that task (the
-   * single-build validation runs per task); a non-function value is a
-   * call-level configuration error and throws.
+   * single-build validation runs per task); a factory value longer
+   * than {@link MAX_EVENT_ID_LENGTH} characters fails the same way —
+   * the cap is enforced by the single build, so no code here needs to
+   * know it. A non-function value is a call-level configuration error
+   * and throws.
    */
   eventIdFactory?: () => string;
   /**
@@ -1007,12 +1036,21 @@ export class PayoutEventDedupe {
    *
    * An empty or non-string `eventId` is a caller bug and throws —
    * silently accepting it would disable deduplication for exactly the
-   * malformed deliveries that need it most.
+   * malformed deliveries that need it most. An `eventId` longer than
+   * {@link MAX_EVENT_ID_LENGTH} characters throws the same way: a
+   * caller-injected id that long would be written verbatim into the
+   * dedupe's memory keys and any persisted snapshot, and this
+   * library never mints one (the default is a 36-character UUID).
    */
   checkAndRecord(eventId: string): boolean {
     if (typeof eventId !== "string" || eventId.length === 0) {
       throw new Error(
         "PayoutEventDedupe: eventId must be a non-empty string",
+      );
+    }
+    if (eventId.length > MAX_EVENT_ID_LENGTH) {
+      throw new Error(
+        `PayoutEventDedupe: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
       );
     }
     const t = this.clock();
@@ -1130,7 +1168,8 @@ export class PayoutEventDedupe {
    * The input is untrusted data and is validated strictly: a
    * non-object snapshot, an unknown top-level field, a `v` other than
    * `1`, a non-array `entries`, or a malformed entry (not an
-   * `[eventId, seenAtMs]` pair, an empty/non-string `eventId`, a
+   * `[eventId, seenAtMs]` pair, an empty/non-string `eventId`, an
+   * `eventId` longer than {@link MAX_EVENT_ID_LENGTH} characters, a
    * non-finite or negative `seenAtMs`) throws — a corrupt snapshot
    * fails loudly at startup rather than silently disabling
    * deduplication.
@@ -1181,6 +1220,13 @@ export class PayoutEventDedupe {
       const seenAtMs: unknown = pair[1];
       if (typeof eventId !== "string" || eventId === "")
         fail(`entries[${i}]: eventId must be a non-empty string`);
+      if (
+        typeof eventId === "string" &&
+        eventId.length > MAX_EVENT_ID_LENGTH
+      )
+        fail(
+          `entries[${i}]: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
+        );
       if (
         typeof seenAtMs !== "number" ||
         !Number.isFinite(seenAtMs) ||
@@ -1680,7 +1726,8 @@ export class PayoutWebhookOutbox {
    * pair, exactly like `acknowledge()`.
    *
    * Caller bugs fail fast: an empty/non-string `endpoint` or
-   * `eventId`, a non-boolean `ok`, a non-finite `status`/`at`, or a
+   * `eventId`, an `eventId` longer than {@link MAX_EVENT_ID_LENGTH}
+   * characters, a non-boolean `ok`, a non-finite `status`/`at`, or a
    * non-string `error` throws before anything is recorded — silently
    * accepting a malformed attempt would corrupt the ledger for
    * exactly the deliveries that need it most.
@@ -1695,6 +1742,11 @@ export class PayoutWebhookOutbox {
     if (typeof eventId !== "string" || eventId.length === 0) {
       throw new Error(
         "PayoutWebhookOutbox: eventId must be a non-empty string",
+      );
+    }
+    if (eventId.length > MAX_EVENT_ID_LENGTH) {
+      throw new Error(
+        `PayoutWebhookOutbox: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
       );
     }
     if (typeof ok !== "boolean") {
@@ -1869,8 +1921,9 @@ export class PayoutWebhookOutbox {
    * non-object snapshot, an unknown top-level field, a `v` other than
    * `1`, a non-array `entries`, or a malformed entry (not an object
    * with exactly `endpoint`/`eventId`/`attempts`/`lastAt` plus an
-   * optional `lastError`, an empty/non-string `endpoint`/`eventId`, a
-   * non-positive-integer `attempts`, a non-string `lastError`, a
+   * optional `lastError`, an empty/non-string `endpoint`/`eventId`,
+   * an `eventId` longer than {@link MAX_EVENT_ID_LENGTH} characters,
+   * a non-positive-integer `attempts`, a non-string `lastError`, a
    * non-finite `lastAt`) throws — a corrupt snapshot fails loudly at
    * startup rather than silently clearing a dead letter. Duplicate
    * `(endpoint, eventId)` pairs collapse to their last occurrence.
@@ -1931,6 +1984,13 @@ export class PayoutWebhookOutbox {
         fail(`entries[${i}]: endpoint must be a non-empty string`);
       if (typeof eventId !== "string" || eventId === "")
         fail(`entries[${i}]: eventId must be a non-empty string`);
+      if (
+        typeof eventId === "string" &&
+        eventId.length > MAX_EVENT_ID_LENGTH
+      )
+        fail(
+          `entries[${i}]: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
+        );
       if (
         typeof attempts !== "number" ||
         !Number.isInteger(attempts) ||

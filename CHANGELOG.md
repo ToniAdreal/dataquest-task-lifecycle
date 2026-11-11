@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `eventId` length cap (2026-11-11, backlog #1060, mirrors escrow
+  #1059): `MAX_EVENT_ID_LENGTH = 256`, exported from the index.
+  `buildPayoutWebhook()`, `PayoutEventDedupe.checkAndRecord()`, and
+  `PayoutWebhookOutbox.recordAttempt()` all reject an `eventId`
+  longer than 256 characters with an explicit error, never
+  truncating it — truncating would change the deduplication key —
+  and both snapshot restores (`PayoutEventDedupe.restore()` /
+  `PayoutWebhookOutbox.restore()`, hence the signed restores too)
+  reject a snapshot carrying one. A batch `eventIdFactory`
+  returning an overlong id fails only that task (the per-task
+  isolation of the batch path, no code change there). An `eventId`
+  of exactly 256 characters passes verbatim everywhere, and short
+  ids such as the demo's `evt_demo_*` ids are unaffected. 13 tests
+  in `test/maxEventIdLength.test.ts`.
+
 - `actor` length cap (2026-11-11, backlog #1057, mirrors escrow
   #1056): `MAX_ACTOR_LENGTH = 256`, exported from the index.
   `dispatch()` rejects an actor longer than 256 characters with an
