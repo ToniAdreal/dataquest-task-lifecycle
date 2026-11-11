@@ -498,6 +498,15 @@ export interface TasksByFiltersOptions {
   event?: TaskEvent;
   /** Payout reference the `PAYOUT_COMPLETE` entry must carry (same rule as {@link tasksByPayoutRef}). */
   payoutRef?: string;
+  /**
+   * Overdue axis (same rule as {@link isOverdue}): `true` keeps only
+   * tasks past their SLA deadline, `false` keeps only tasks that are
+   * not overdue (no deadline, terminal, or deadline still ahead).
+   * Omitted means no overdue filtering. Judged against the `now`
+   * argument of {@link tasksByFilters}, boundary inclusive
+   * (`now >= deadline` counts as overdue).
+   */
+  overdue?: boolean;
 }
 
 /**
@@ -528,19 +537,26 @@ export interface TasksByFiltersOptions {
  * `event` rejects unknown events, and an empty or non-string
  * `actor`/`payoutRef` fails fast instead of silently returning an
  * empty list — a typo in any axis cannot masquerade as "no task
- * matches this combination". The same fail-closed rule covers the
- * filter keys themselves: only `state`, `actor`, `event`, and
- * `payoutRef` are accepted, so a misspelled axis name such as
+ * matches this combination". The `overdue` axis uses {@link isOverdue}'s rule
+ * (past SLA deadline, non-terminal, boundary `now >= deadline`
+ * inclusive); `false` selects the complement (no deadline,
+ * terminal, or deadline still ahead). The `now` argument pins the
+ * screening instant for that axis and defaults to the real clock,
+ * so unit tests pin it to a fixed date; an invalid `now` throws
+ * fail-fast when the `overdue` axis is present. The same fail-closed
+ * rule covers the filter keys themselves: only `state`, `actor`,
+ * `event`, `payoutRef`, and `overdue` are accepted, so a misspelled axis name such as
  * `states` throws `invalid tasksByFilters: unknown filter
  * "states"` instead of being silently ignored and returning the
  * unfiltered batch — and a non-object `filters` argument throws
  * instead of surfacing a `TypeError` from the first property read.
  * Mirrors the escrow state machine's `escrowsByFilters`, which has
- * three axes and no `payoutRef` counterpart.
+ * the same `state`/`actor`/`event`/`overdue` axes and no `payoutRef` counterpart.
  */
 export function tasksByFilters(
   tasks: readonly TaskLifecycle[],
   filters: TasksByFiltersOptions,
+  now: Date = new Date(),
 ): TaskLifecycle[] {
   if (
     typeof filters !== "object" ||
@@ -556,7 +572,8 @@ export function tasksByFilters(
       key !== "state" &&
       key !== "actor" &&
       key !== "event" &&
-      key !== "payoutRef"
+      key !== "payoutRef" &&
+      key !== "overdue"
     ) {
       throw new Error(
         `invalid tasksByFilters: unknown filter "${key}"`,
@@ -590,6 +607,14 @@ export function tasksByFilters(
       `invalid tasksByFilters: payoutRef must be a non-empty string, got ${JSON.stringify(filters.payoutRef)}`,
     );
   }
+  if (filters.overdue !== undefined && typeof filters.overdue !== "boolean") {
+    throw new Error(
+      `invalid tasksByFilters: overdue must be a boolean, got ${JSON.stringify(filters.overdue)}`,
+    );
+  }
+  if (filters.overdue !== undefined && !Number.isFinite(now.getTime())) {
+    throw new Error("invalid now: expected a valid Date");
+  }
   return tasks.filter((task) => {
     if (filters.state !== undefined && task.state !== filters.state) {
       return false;
@@ -613,6 +638,12 @@ export function tasksByFilters(
           entry.event === "PAYOUT_COMPLETE" &&
           entry.payoutRef === filters.payoutRef,
       )
+    ) {
+      return false;
+    }
+    if (
+      filters.overdue !== undefined &&
+      isOverdue(task, now) !== filters.overdue
     ) {
       return false;
     }

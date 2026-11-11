@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1323 tests, all local
+npm test   # 1335 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1032,11 +1032,16 @@ const disputed = tasksByEvent(allTasks, "DISPUTE");
 ```
 
 The four selectors above each filter on one axis. `tasksByFilters()`
-combines them: give any subset of `state`, `actor`, `event`, and
-`payoutRef`, and it returns the tasks matching every condition given,
+combines them: give any subset of `state`, `actor`, `event`,
+`payoutRef`, and `overdue`, and it returns the tasks matching every condition given,
 in input order, in a single pass over the batch — the board query
 "tasks the moderator disputed while IN_REVIEW" without chaining
-filters and intersecting the results:
+filters and intersecting the results. The `overdue` axis follows
+`isOverdue`'s rule (past SLA deadline, non-terminal, boundary
+`now >= deadline` inclusive); `false` selects the complement, and
+omitting it leaves the deadline out of the match. Its screening
+instant is the optional third argument `now` (default: the real
+clock).
 
 ```ts
 import { tasksByFilters } from "dataquest-task-lifecycle";
@@ -2230,7 +2235,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1323 tests covering the happy path, reject→resubmit
+`npm test` runs 1335 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

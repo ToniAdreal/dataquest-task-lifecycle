@@ -11,6 +11,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `tasksByFilters` overdue axis (2026-11-11, backlog #1049, mirrors
+  escrow #1048): `TasksByFiltersOptions.overdue` (`true` keeps only
+  past-deadline non-terminal tasks, `false` keeps the complement,
+  omitted means no overdue filtering), reusing `isOverdue()`'s rule
+  exactly (boundary `now >= deadline` inclusive, no-deadline and
+  terminal tasks never overdue); the screening instant is the new
+  optional third argument `now` (default: the real clock), validated
+  fail-fast when the axis is present, and a non-boolean `overdue`
+  value throws. 12 tests in `test/tasksByFiltersOverdue.test.ts`.
+
 - Opt-in `requirePayoutAmount` gate for `PAYOUT_COMPLETE`
   (2026-11-11, backlog #1045, mirrors `requirePayoutRef`):
   constructing a task with `new TaskLifecycle(id,
