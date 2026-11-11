@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1358 tests, all local
+npm test   # 1370 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1098,17 +1098,27 @@ const { matched, taskOnly, ledgerOnly, amountMismatch, unreconciled } =
 // matched: reference agrees, and the amount agrees where both sides recorded one
 // taskOnly: PAID with a reference no ledger row carries
 // ledgerOnly: ledger row no PAID task carries
-// amountMismatch: [{ task, ledger, taskAmount, ledgerAmount }] — same reference, different amounts
+// amountMismatch: [{ task, ledger, taskAmount, ledgerAmount, groupAmount? }] — same reference, different amounts
 // unreconciled: PAID with no reference or no settled amount (the unreconciledPayouts() population)
 ```
 
 Pairing reads only the `PAYOUT_COMPLETE` entry of `PAID` tasks, so
 a request-only reference never pairs and a non-PAID task never
 enters a group. Several tasks may share one reference (one
-transfer settling a batch); each pairs against the same ledger row
-independently. An amount disagreement is reported only when both
-sides recorded an amount and they differ exactly — when the ledger row
-recorded none, the task pairs on the reference alone; when the task
+transfer settling a batch); the group is then compared as a batch
+total, not task by task: the ledger row's amount is checked
+against the sum of the sharing tasks' settled amounts, summed in
+integer minor units (the `totalPaidOut()` cents convention, so
+`0.1 + 0.2` compares as `0.30`). Equal sums match the whole
+group; a difference puts every task in the group into
+`amountMismatch`, each entry carrying its own `taskAmount` and
+the group's sum as `groupAmount`. A reference carried by exactly
+one task keeps the per-task comparison. A group member that
+recorded no amount never pairs (it lands in `unreconciled`) and
+contributes nothing to the sum. An amount disagreement is
+reported only when both sides recorded an amount and they
+differ — when the ledger row recorded none, the task (or the
+whole group) pairs on the reference alone; when the task
 recorded none, it never pairs: it lands in `unreconciled` instead, the
 same population `unreconciledPayouts()` returns. A reference appearing
 twice in the ledger throws (`duplicate ledger payoutRef`), as does
@@ -2260,7 +2270,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1358 tests covering the happy path, reject→resubmit
+`npm test` runs 1370 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -34,7 +34,10 @@ import type { LedgerPayout } from "../src/index.js";
  *  - a ref carried only by the ledger (or only by a `REQUEST_PAYOUT`
  *    entry, or only by a non-PAID task) selects no tasks
  *  - two tasks sharing one ref (one transfer settling a batch) are
- *    both selected, in input order, and both land in `matched`
+ *    both selected, in input order, and both land in `matched` —
+ *    the ledger row for their ref records the batch total (60 for
+ *    two 30 tasks), because a shared reference is compared as a
+ *    group total, not per task (backlog #1054)
  */
 
 const COMPLETE_AT = "2026-03-20T00:00:00.000Z";
@@ -116,7 +119,8 @@ function mixedBatch(): TaskLifecycle[] {
     toPaid("t-a", { completionRef: "xfer-taskonly", completionAmount: 25 }),
     // Amount mismatch: ref pairs, amounts disagree.
     toPaid("mm-a", { completionRef: "xfer-mismatch", completionAmount: 90 }),
-    // Shared ref: one transfer settling two tasks, both matched.
+    // Shared ref: one transfer settling two tasks, both matched —
+    // the ledger row records the batch total (30 + 30 = 60).
     toPaid("s-1", { completionRef: "xfer-shared", completionAmount: 30 }),
     toPaid("s-2", { completionRef: "xfer-shared", completionAmount: 30 }),
     // Unreconciled: no ref on the completion entry.
@@ -133,7 +137,8 @@ const LEDGER: LedgerPayout[] = [
   { payoutRef: "xfer-a", payoutAmount: 100 },
   { payoutRef: "xfer-b", payoutAmount: 50 },
   { payoutRef: "xfer-mismatch", payoutAmount: 100 },
-  { payoutRef: "xfer-shared", payoutAmount: 30 },
+  // Batch total for the shared ref: two tasks at 30 each.
+  { payoutRef: "xfer-shared", payoutAmount: 60 },
   // Carried only by the ledger: ledger-only, selects no task.
   { payoutRef: "xfer-ledger-only", payoutAmount: 7 },
   // Matches only a REQUEST_PAYOUT ref (non-PAID task): ledger-only.

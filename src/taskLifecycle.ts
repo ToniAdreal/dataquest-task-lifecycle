@@ -1888,6 +1888,18 @@ export interface ReconcileAmountMismatch {
   taskAmount: number;
   /** Amount recorded on the ledger row. */
   ledgerAmount: number;
+  /**
+   * Summed settled amount of every task sharing this reference that
+   * reached pairing, in major units — present only when the reference
+   * was shared by more than one such task. The comparison that
+   * produced this mismatch was `groupAmount` against
+   * `ledgerAmount`, not `taskAmount` against `ledgerAmount`: a
+   * ledger row records one transfer, so a shared transfer is
+   * checked as a batch total (see {@link reconcilePayouts}).
+   * Absent on a single-task mismatch, where the compared amount is
+   * the task's own.
+   */
+  groupAmount?: number;
 }
 
 /**
@@ -1903,7 +1915,11 @@ export interface ReconcilePayoutsResult {
   taskOnly: TaskLifecycle[];
   /** Ledger rows whose reference no PAID task carries. */
   ledgerOnly: LedgerPayout[];
-  /** PAID tasks paired by reference but disagreeing on amount. */
+  /** PAID tasks paired by reference but disagreeing on amount. On a
+   * reference shared by several tasks the disagreement is a group
+   * one: every task in the group gets an entry, each carrying the
+   * group's summed amount as `groupAmount` (see
+   * {@link ReconcileAmountMismatch}). */
   amountMismatch: ReconcileAmountMismatch[];
   /**
    * PAID tasks with no reference or no settled amount on their
@@ -1943,16 +1959,37 @@ export interface ReconcilePayoutsResult {
  *    through the validated paths, and lands in `unreconciled`, as in
  *    {@link unreconciledPayouts});
  *  - several tasks may share one reference (one transfer settling a
- *    batch): each pairs against the same ledger row independently,
- *    and the row is consumed, never `ledgerOnly`;
+ *    batch): the group is compared as a batch, not task by task. A
+ *    ledger row records one transfer, so the row's amount is checked
+ *    against the SUM of the sharing tasks' settled amounts, summed
+ *    in integer minor units ({@link toMinorUnits}, the same cents
+ *    convention {@link totalPaidOut} uses — so `0.1 + 0.2` compares
+ *    as `0.30`, never as binary-float `0.30000000000000004`). A
+ *    task in the group that recorded no amount never reaches
+ *    pairing at all (it lands in `unreconciled`, as above) and
+ *    contributes nothing to the sum. When the sum equals the row,
+ *    every task in the group lands in `matched`; when it differs,
+ *    every task in the group lands in `amountMismatch`, each entry
+ *    carrying its own `taskAmount` and the group's sum as
+ *    `groupAmount`. A reference carried by exactly one pairing task
+ *    keeps the old per-task comparison, exactly — a single-task
+ *    batch total is the task's own amount, so no caller-visible
+ *    behaviour changes there, and no `groupAmount` is attached.
+ *    Comparing per task under a shared reference would be wrong in
+ *    both directions: a row recording the batch total would flag
+ *    every task as mismatched (a false positive), while a row
+ *    recording one task's amount would match every task and hide
+ *    the money the ledger never recorded (a double payment the
+ *    library failed to catch);
  *  - an amount disagreement is reported only when both sides recorded
- *    an amount and they differ exactly. When the ledger row recorded
- *    no amount, the library cannot compare what it cannot observe
- *    (the same rule {@link payoutMismatch} uses), so the task lands
- *    in `matched` on the reference alone — the missing amount is
- *    still visible to the caller, because `matched` holds the task
- *    itself, not a claim that amounts were verified. When the task
- *    side recorded no amount, the task never reaches pairing at all:
+ *    an amount and they differ. When the ledger row recorded no
+ *    amount, the library cannot compare what it cannot observe
+ *    (the same rule {@link payoutMismatch} uses), so the task — or
+ *    the whole sharing group — lands in `matched` on the reference
+ *    alone — the missing amount is still visible to the caller,
+ *    because `matched` holds the task itself, not a claim that
+ *    amounts were verified. When the task side recorded no amount,
+ *    the task never reaches pairing at all:
  *    it lands in `unreconciled`, the same population
  *    {@link unreconciledPayouts} returns, because a settlement with
  *    no recorded amount cannot be checked against a ledger by
@@ -1966,7 +2003,12 @@ export interface ReconcilePayoutsResult {
  * — a duplicated ledger row would otherwise make "matched" ambiguous
  * (which row did the task pair with?). The task side needs no such
  * check: duplicate references across tasks are legitimate batch
- * settlements, as above.
+ * settlements, as above. One more fail-fast lives in the pairing
+ * itself: summing a shared reference's amounts in minor units can
+ * overflow on legacy giant amounts (the same {@link totalPaidOut}
+ * overflow contract), and that throws instead of silently wrapping
+ * the sum — a single-task reference never sums, so it never throws
+ * here.
  *
  * Pure: reads the tasks and the ledger rows, never mutates,
  * dispatches, or copies them. An empty task batch and an empty ledger
@@ -2019,6 +2061,20 @@ export function reconcilePayouts(
     unreconciled: [],
   };
   const seenRefs = new Set<string>();
+  // First pass: collect the tasks that reach pairing (PAID, with a
+  // PAYOUT_COMPLETE entry carrying both a reference and an amount),
+  // grouped by reference — a shared reference is compared as a batch
+  // total, so the group and its sum must be known before any task is
+  // placed. Tasks that cannot pair land in `unreconciled` here, in
+  // input order, exactly as before; their reference is not marked
+  // seen, so a ledger row for it stays `ledgerOnly`.
+  interface PairingCandidate {
+    task: TaskLifecycle;
+    ref: string;
+    amount: number;
+  }
+  const candidates: PairingCandidate[] = [];
+  const groupsByRef = new Map<string, PairingCandidate[]>();
   for (const task of tasks) {
     if (task.state !== "PAID") continue;
     let complete: TaskHistoryEntry | undefined;
@@ -2033,27 +2089,81 @@ export function reconcilePayouts(
       result.unreconciled.push(task);
       continue;
     }
-    const ref = complete.payoutRef;
-    seenRefs.add(ref);
-    const row = ledgerByRef.get(ref);
+    const candidate: PairingCandidate = {
+      task,
+      ref: complete.payoutRef,
+      amount: complete.payoutAmount,
+    };
+    candidates.push(candidate);
+    seenRefs.add(candidate.ref);
+    const group = groupsByRef.get(candidate.ref);
+    if (group === undefined) {
+      groupsByRef.set(candidate.ref, [candidate]);
+    } else {
+      group.push(candidate);
+    }
+  }
+  // Shared references are summed in integer minor units (the
+  // totalPaidOut cents convention), so the batch total is exact to
+  // the cent and a legacy giant overflows fail-fast instead of
+  // wrapping. Single-task groups are never summed — they keep the
+  // exact per-task comparison below.
+  const groupMinorUnitsByRef = new Map<string, number>();
+  for (const [ref, group] of groupsByRef) {
+    if (group.length < 2) continue;
+    let sumMinorUnits = 0;
+    for (const candidate of group) {
+      sumMinorUnits += toMinorUnits(candidate.amount);
+      if (!Number.isFinite(sumMinorUnits)) {
+        throw new Error(
+          `invalid reconcilePayouts: shared payoutRef ${JSON.stringify(ref)} amounts overflow minor-unit representation`,
+        );
+      }
+    }
+    groupMinorUnitsByRef.set(ref, sumMinorUnits);
+  }
+  // Second pass: place each candidate in input order, so every
+  // group keeps input order even when references interleave.
+  for (const candidate of candidates) {
+    const row = ledgerByRef.get(candidate.ref);
     if (row === undefined) {
-      result.taskOnly.push(task);
+      result.taskOnly.push(candidate.task);
       continue;
     }
-    if (
-      complete.payoutAmount !== undefined &&
-      row.payoutAmount !== undefined &&
-      complete.payoutAmount !== row.payoutAmount
-    ) {
+    if (row.payoutAmount === undefined) {
+      // No ledger amount to compare against: pair on the reference
+      // alone, whether the reference is shared or not.
+      result.matched.push(candidate.task);
+      continue;
+    }
+    const group = groupsByRef.get(candidate.ref)!;
+    if (group.length === 1) {
+      if (candidate.amount !== row.payoutAmount) {
+        result.amountMismatch.push({
+          task: candidate.task,
+          ledger: row,
+          taskAmount: candidate.amount,
+          ledgerAmount: row.payoutAmount,
+        });
+        continue;
+      }
+      result.matched.push(candidate.task);
+      continue;
+    }
+    // Shared reference: compare the batch total against the row.
+    const groupMinorUnits = groupMinorUnitsByRef.get(candidate.ref)!;
+    const groupAmount = groupMinorUnits / 100;
+    if (groupMinorUnits !== toMinorUnits(row.payoutAmount)) {
       result.amountMismatch.push({
-        task,
+        task: candidate.task,
         ledger: row,
-        taskAmount: complete.payoutAmount,
+        taskAmount: candidate.amount,
         ledgerAmount: row.payoutAmount,
+        groupAmount,
       });
       continue;
     }
-    result.matched.push(task);
+    result.matched.push(candidate.task);
   }
   for (const row of ledger) {
     if (!seenRefs.has(row.payoutRef)) result.ledgerOnly.push(row);

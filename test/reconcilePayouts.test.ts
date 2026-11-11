@@ -116,31 +116,44 @@ test("reconcilePayouts: a request-only reference pairs with nothing", () => {
 test("reconcilePayouts: one transfer settling several tasks pairs each of them", () => {
   const a = toPaid("t-a", { payoutRef: "xfer-batch", payoutAmount: 30 });
   const b = toPaid("t-b", { payoutRef: "xfer-batch", payoutAmount: 30 });
+  // The ledger row records one transfer, so it records the batch
+  // total (60), not one task's amount — the group is compared as a
+  // batch (backlog #1054).
   const result = reconcilePayouts([a, b], [
-    { payoutRef: "xfer-batch", payoutAmount: 30 },
+    { payoutRef: "xfer-batch", payoutAmount: 60 },
   ]);
   assert.deepEqual(
     result.matched.map((t) => t.id),
     ["t-a", "t-b"],
   );
+  assert.deepEqual(result.amountMismatch, []);
   assert.deepEqual(result.ledgerOnly, []);
 });
 
-test("reconcilePayouts: a shared reference with one task mismatched still consumes the row", () => {
+test("reconcilePayouts: a shared reference is compared as a group, not per task", () => {
   const ok = toPaid("t-ok", { payoutRef: "xfer-batch", payoutAmount: 30 });
   const bad = toPaid("t-bad", {
     payoutRef: "xfer-batch",
     payoutAmount: 31,
   });
+  // The batch total is 61; the ledger row records 30 — one task's
+  // amount, not the transfer's. Under the old per-task comparison
+  // the first task matched and the shortfall hid; under the group
+  // comparison both tasks mismatch, each entry carrying the group
+  // total that was actually compared (backlog #1054).
   const result = reconcilePayouts([ok, bad], [
     { payoutRef: "xfer-batch", payoutAmount: 30 },
   ]);
-  assert.deepEqual(
-    result.matched.map((t) => t.id),
-    ["t-ok"],
-  );
-  assert.equal(result.amountMismatch.length, 1);
-  assert.equal(result.amountMismatch[0].task, bad);
+  assert.deepEqual(result.matched, []);
+  assert.equal(result.amountMismatch.length, 2);
+  assert.equal(result.amountMismatch[0].task, ok);
+  assert.equal(result.amountMismatch[0].taskAmount, 30);
+  assert.equal(result.amountMismatch[0].ledgerAmount, 30);
+  assert.equal(result.amountMismatch[0].groupAmount, 61);
+  assert.equal(result.amountMismatch[1].task, bad);
+  assert.equal(result.amountMismatch[1].taskAmount, 31);
+  assert.equal(result.amountMismatch[1].ledgerAmount, 30);
+  assert.equal(result.amountMismatch[1].groupAmount, 61);
   assert.deepEqual(result.ledgerOnly, []);
 });
 

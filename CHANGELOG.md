@@ -506,6 +506,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `reconcilePayouts()` compares a shared `payoutRef` as a batch
+  total (2026-11-11, backlog #1054): several PAID tasks sharing
+  one reference are one transfer, so the ledger row's amount is
+  now checked against the SUM of the sharing tasks' settled
+  amounts (integer minor units, the `totalPaidOut()` cents
+  convention), not against each task's amount in turn. The old
+  per-task comparison was wrong in both directions: a row
+  recording the batch total flagged every task as mismatched (a
+  false positive), while a row recording one task's amount
+  matched every task and hid the money the ledger never recorded
+  (a double payment the library failed to catch). Equal sums
+  match the whole group; a difference puts every task in the
+  group into `amountMismatch`, each entry carrying its own
+  `taskAmount` and the group's sum as the new optional
+  `groupAmount` field on `ReconcileAmountMismatch`. A reference
+  carried by exactly one task keeps the per-task comparison and
+  carries no `groupAmount`. A group member with no recorded
+  amount stays `unreconciled` and contributes nothing to the sum;
+  a ledger row with no amount still pairs the whole group on the
+  reference alone. 12 tests in
+  `test/reconcilePayoutsSharedRef.test.ts`, plus the two
+  `test/reconcilePayouts.test.ts` cases and the shared-ref
+  `test/tasksByPayoutRefReconcileConsistency.test.ts` fixture that
+  pinned the old semantics (their ledger rows now record the
+  batch total, 60 for two tasks at 30).
+
 - `tasksByFilters` rejects unknown filter keys fail-closed (backlog
   #1013): the combined filter previously read only the four known
   axes (`state`, `actor`, `event`, `payoutRef`), so a typo'd key
