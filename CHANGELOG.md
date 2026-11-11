@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `idempotencyKey` length cap (2026-11-11, backlog #1065, mirrors
+  escrow #1064): `MAX_IDEMPOTENCY_KEY_LENGTH = 256`, exported from
+  the index. `dispatch()` rejects an `idempotencyKey` longer than 256
+  characters up front, before the dedupe lookup, so the key consumes
+  nothing; the constructor seed, the snapshot parser (`fromJSON()`
+  and, through it, every restore path), and
+  `TaskLifecycle.fromHistory()` (via the constructor) reject an
+  overlong key with the same ceiling and an explicit error, never
+  truncating it — truncating would change which deliveries the key
+  dedupes. A key of exactly 256 characters passes verbatim everywhere
+  and still dedupes, and short keys such as the demo's
+  `webhook-dlv-9f3a` are unaffected. 10 tests in
+  `test/idempotencyKeyLength.test.ts`.
+
 - `task` id length cap (2026-11-11, backlog #1062, mirrors escrow
   #1061): `MAX_TASK_ID_LENGTH = 256`, exported from the index.
   The constructor, the snapshot parser (`fromJSON()` and, through

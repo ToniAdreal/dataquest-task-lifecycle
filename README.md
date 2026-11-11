@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1410 tests, all local
+npm test   # 1420 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1829,7 +1829,11 @@ task.history.length; // => 1
 
 Keys are global to the task, not per-event: reusing the same key for a
 different event still dedupes. The key itself must be a non-empty string
-(else `invalid dispatch options: …` up front). Failed dispatches consume
+of at most 256 characters (`MAX_IDEMPOTENCY_KEY_LENGTH`, exported from
+the index — the same ceiling the sibling escrow repo uses): an overlong
+key is rejected up front (`invalid dispatch options: …`), never
+truncated, at dispatch, at the constructor seed, at snapshot parse,
+and at `fromHistory()`. Failed dispatches consume
 nothing — fix the bad call and retry with the same key and it executes.
 Omitting the key preserves the exact pre-idempotency behavior.
 
@@ -1837,7 +1841,8 @@ Snapshot persistence: the consumed-key set is written into the
 `toJSON()` snapshot whenever it is non-empty (an empty set is omitted,
 so keyless tasks keep the legacy snapshot shape), and `fromJSON()`
 restores it through strict validation — a snapshot whose key list is
-not an array of non-empty strings is rejected, and duplicates are
+not an array of non-empty strings, or carries an entry longer than 256
+characters, is rejected, and duplicates are
 deduped. A retry with a consumed key after a snapshot restore is
 therefore still a no-op. `fromHistory()` cannot recover keys from the
 audit log (they are not audit data), so re-attach them explicitly:

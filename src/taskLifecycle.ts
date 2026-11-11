@@ -83,6 +83,26 @@ export const MAX_ACTOR_LENGTH = 256;
  */
 export const MAX_TASK_ID_LENGTH = 256;
 
+/**
+ * Maximum dispatch idempotency-key length accepted by dispatch(),
+ * the constructor seed, the snapshot parser, and
+ * {@link TaskLifecycle.fromHistory} (via the constructor).
+ *
+ * Rationale: an idempotency key is a short caller-supplied identifier
+ * (the demo's longest is `webhook-dlv-9f3a`, 16 characters; a UUID is
+ * 36). 256 characters leaves an order of magnitude of headroom for any
+ * honest key, while the key is written verbatim into every snapshot
+ * that carries it and into diff output — an unbounded key would
+ * permanently inflate every export. The cap is a rejection, never a
+ * truncation: truncating a key would change which deliveries the key
+ * dedupes. The same ceiling is used by the sibling
+ * escrow-state-machine-ts repo (`MAX_IDEMPOTENCY_KEY_LENGTH`), and it
+ * matches {@link MAX_TASK_ID_LENGTH} and the webhook
+ * `MAX_EVENT_ID_LENGTH`: all three guard short caller-supplied
+ * identifiers that land in persisted artifacts.
+ */
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 256;
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -2378,7 +2398,8 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * idempotency keys to seed the task with — the re-attachment path for
  * `fromHistory()`, whose audit log cannot carry the key set (keys are
  * dispatch configuration, not audit data). Each key must be a non-empty
- * string; duplicates are deduped. Keys restored this way (or via
+ * string of at most {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters;
+ * duplicates are deduped. Keys restored this way (or via
  * `fromJSON()`, which reads them from the snapshot envelope) keep their
  * exactly-once effect: dispatching with one is a no-op. Invalid values
  * throw `invalid option: …` at construction.
@@ -2535,10 +2556,12 @@ function assertRequireActor(value: unknown, tag: string): boolean {
  * Validate a list of idempotency keys into a deduped set.
  *
  * `undefined` means "no keys" (the default). Otherwise the value must be
- * an array of non-empty strings — the same bar dispatch() applies to a
- * single key. Duplicates are harmless and deduped (first occurrence
- * wins, preserving insertion order for snapshot round-trips). Anything
- * else throws `<tag>: idempotencyKeys …`.
+ * an array of non-empty strings, each at most
+ * {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters — the same bar
+ * dispatch() applies to a single key. Duplicates are harmless and
+ * deduped (first occurrence wins, preserving insertion order for
+ * snapshot round-trips). Anything else throws
+ * `<tag>: idempotencyKeys …`.
  */
 function assertIdempotencyKeys(
   value: unknown,
@@ -2555,6 +2578,11 @@ function assertIdempotencyKeys(
     if (typeof key !== "string" || key.length === 0) {
       throw new Error(
         `${tag}: idempotencyKeys entries must be non-empty strings, got ${JSON.stringify(key)}`,
+      );
+    }
+    if (key.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+      throw new Error(
+        `${tag}: idempotencyKeys entries must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters, got ${key.length}`,
       );
     }
     keys.add(key);
@@ -2730,8 +2758,9 @@ function assertRolePolicy(
  * `invalid transition`). Keys are global to the task, not per-event:
  * reusing the same key for a different event still dedupes.
  *
- * Fail-fast ordering: the key's own shape (non-empty string) is
- * validated up front, like actor/note/at/payoutRef. The dedupe check
+ * Fail-fast ordering: the key's own shape (a non-empty string of at
+ * most {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters) is validated up
+ * front, like actor/note/at/payoutRef. The dedupe check
  * runs after option validation but BEFORE the transition, RBAC, and
  * budget checks. A dispatch that fails any check consumes nothing — the
  * key is recorded only when the dispatch actually succeeds, so fixing a
@@ -4475,6 +4504,14 @@ export class TaskLifecycle {
           `invalid dispatch options: idempotencyKey must be a non-empty string, got ${JSON.stringify(opts.idempotencyKey)}`,
         );
       }
+      // Same ceiling as the seed/snapshot paths: an overlong key is
+      // rejected up front, before the dedupe lookup, so it consumes
+      // nothing and leaves no residue.
+      if (opts.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+        throw new Error(
+          `invalid dispatch options: idempotencyKey must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters, got ${opts.idempotencyKey.length}`,
+        );
+      }
       // Retry: a known key is a complete no-op — no transition validation
       // (the task may already have moved on), no history append, no
       // listener notification. Failed dispatches consume nothing, so this
@@ -5023,9 +5060,12 @@ export class TaskLifecycle {
    * advisory default (the switch is not part of the audit log, so it
    * cannot be restored on its own).
    * `opts.idempotencyKeys` re-attaches the consumed dispatch idempotency
-   * keys the same way; omit it and the rehydrated task starts with an
-   * empty key set, so a retried key would re-execute (the keys are not
-   * part of the audit log, so they cannot be restored on their own).
+   * keys the same way; each key must be a non-empty string of at most
+   * {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters, and an overlong key
+   * throws `invalid option: …` at construction. Omit it and the
+   * rehydrated task starts with an empty key set, so a retried key would
+   * re-execute (the keys are not part of the audit log, so they cannot
+   * be restored on their own).
    * `opts.auditSecret` re-attaches the keyed hash-chain secret the same
    * way; a keyed log restored without it (or with the wrong secret) is
    * rejected as a broken hash chain, and a legacy hashless log restored
