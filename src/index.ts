@@ -13,6 +13,7 @@ export {
   MAX_ACTOR_LENGTH,
   MAX_NOTE_LENGTH,
   MAX_PAYOUT_REF_LENGTH,
+  MAX_TASK_ID_LENGTH,
   mismatchedPayouts,
   nextSlaDeadline,
   parseHistory,

@@ -67,6 +67,22 @@ export const MAX_PAYOUT_REF_LENGTH = 256;
  */
 export const MAX_ACTOR_LENGTH = 256;
 
+/**
+ * Maximum task id length accepted by the constructor, the snapshot
+ * parser, and {@link TaskLifecycle.fromHistory}.
+ *
+ * Rationale: a task id is a short identifier (the demo's longest is
+ * `DEMO-001`, 8 characters; a UUID is 36). 256 characters leaves an
+ * order of magnitude of headroom for any honest identifier, while the
+ * id is written verbatim into every history entry, snapshot, NDJSON
+ * export, and payout-webhook payload (`taskId`) — an unbounded id
+ * would permanently inflate every export. The cap is a rejection,
+ * never a truncation: truncating an id would change which task a log
+ * belongs to. The same ceiling is used by the sibling
+ * escrow-state-machine-ts repo (`MAX_ESCROW_ID_LENGTH`).
+ */
+export const MAX_TASK_ID_LENGTH = 256;
+
 export type TaskState =
   | "DRAFT"
   | "OPEN"
@@ -2889,6 +2905,13 @@ export interface TaskSnapshot {
    * a future format evolution stays distinguishable from corruption.
    */
   v?: number;
+  /**
+   * Task identifier. At most {@link MAX_TASK_ID_LENGTH} characters —
+   * the constructor, the snapshot parser, and
+   * `TaskLifecycle.fromHistory` all reject longer ids outright, never
+   * truncating them (truncation would change which task a log belongs
+   * to).
+   */
   id: string;
   state: TaskState;
   history: TaskHistoryEntry[];
@@ -3872,6 +3895,11 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
     throw new Error("invalid snapshot: id must be a non-empty string");
   }
+  if (snapshot.id.length > MAX_TASK_ID_LENGTH) {
+    throw new Error(
+      `invalid snapshot: id must be at most ${MAX_TASK_ID_LENGTH} characters, got ${snapshot.id.length}`,
+    );
+  }
   if (!STATES.has(snapshot.state as TaskState)) {
     throw new Error(`invalid snapshot: unknown state ${String(snapshot.state)}`);
   }
@@ -3997,8 +4025,15 @@ export class TaskLifecycle {
   private readonly _auditSecret: AuditSecret | undefined;
 
   constructor(id: string, opts?: TaskLifecycleOptions) {
+    // fromJSON validates the same rule; a live task must never hold an
+    // id its own snapshot validation would reject.
     if (typeof id !== "string" || id.length === 0) {
       throw new Error("invalid task: id must be a non-empty string");
+    }
+    if (id.length > MAX_TASK_ID_LENGTH) {
+      throw new Error(
+        `invalid task: id must be at most ${MAX_TASK_ID_LENGTH} characters, got ${id.length}`,
+      );
     }
     if (opts !== undefined) {
       if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
@@ -4946,7 +4981,14 @@ export class TaskLifecycle {
    * replaying the entries, not read from a state field.
    *
    * The task id is not recoverable from the log (history entries carry
-   * no id), so it is passed explicitly rather than invented. Advisory
+   * no id), so it is passed explicitly rather than invented; an empty
+   * or non-string id throws
+   * `invalid history: id must be a non-empty string`, and an id
+   * longer than {@link MAX_TASK_ID_LENGTH} characters throws
+   * `invalid history: id must be at most 256 characters, got N` —
+   * the same ceiling the constructor and the snapshot parser enforce,
+   * so a bare log can never rebuild a task its own snapshot
+   * validation would reject. Advisory
    * SLA deadlines are not part of the audit log and are therefore not
    * restored from the log — re-attach them with
    * `opts.slaDeadlines` (see `TaskLifecycleOptions`), or use
@@ -5000,6 +5042,13 @@ export class TaskLifecycle {
     if (typeof id !== "string" || id.length === 0) {
       throw new Error("invalid history: id must be a non-empty string");
     }
+    if (id.length > MAX_TASK_ID_LENGTH) {
+      throw new Error(
+        `invalid history: id must be at most ${MAX_TASK_ID_LENGTH} characters, got ${id.length}`,
+      );
+    }
+    // Constructing first validates opts (auditSecret/rolePolicy/…) before
+    // any history is consumed, mirroring fromJSON.
     const task = new TaskLifecycle(id, opts);
     task._state = replay(history, {
       ...(opts?.auditSecret !== undefined

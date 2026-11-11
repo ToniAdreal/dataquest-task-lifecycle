@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1400 tests, all local
+npm test   # 1410 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2119,6 +2119,15 @@ configuration, never audit data, and an overlong policy name can never
 match a legal dispatch (dispatch rejects first), so it is only dead
 configuration.
 
+Task id length cap: a task id is at most 256 characters
+(`MAX_TASK_ID_LENGTH`, exported). The constructor and the snapshot
+parser (hence `fromJSON()` and, through it, every restore path) and
+`TaskLifecycle.fromHistory()` (hence the NDJSON import) all reject a
+longer id with an explicit error, never truncating it — truncating
+would change which task a log belongs to — so an oversized id can
+never inflate the log, a snapshot, an NDJSON export, or a payout
+webhook payload (`taskId`).
+
 `npm run demo` includes this segment: a task under a pinned policy
 (PUBLISH by researcher, ACCEPT by contributor, arbitration by
 senior-moderator) rejects wrong and missing actors with no history
@@ -2296,7 +2305,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1400 tests covering the happy path, reject→resubmit
+`npm test` runs 1410 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

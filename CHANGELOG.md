@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `task` id length cap (2026-11-11, backlog #1062, mirrors escrow
+  #1061): `MAX_TASK_ID_LENGTH = 256`, exported from the index.
+  The constructor, the snapshot parser (`fromJSON()` and, through
+  it, every restore path), and `TaskLifecycle.fromHistory()` (hence
+  the NDJSON import) all reject an id longer than 256 characters
+  with an explicit error, never truncating it — truncating would
+  change which task a log belongs to — so an oversized id can
+  neither be created live nor smuggled in through a rehydrated
+  snapshot or a bare history log. The demo's ids (`DEMO-001` …)
+  are far below the cap and unaffected. 10 tests in
+  `test/maxTaskIdLength.test.ts`.
+
 - `eventId` length cap (2026-11-11, backlog #1060, mirrors escrow
   #1059): `MAX_EVENT_ID_LENGTH = 256`, exported from the index.
   `buildPayoutWebhook()`, `PayoutEventDedupe.checkAndRecord()`, and
