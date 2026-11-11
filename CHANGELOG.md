@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Benchmark rows for the three signed-snapshot envelopes (2026-11-11,
+  backlog #1041, mirrors escrow #1040): `bench/bench.ts` measures
+  `exportSignedSnapshot` / `restoreSignedSnapshot` on
+  `PayoutEventDedupe`, `TaskLifecycle`, and `PayoutWebhookOutbox`
+  over the fixtures the unsigned snapshot rows already pin — the
+  dedupe's fixed 1,000-entry snapshot, the task's fixed BENCH-001
+  DRAFT -> PAID 8-entry chain, the outbox's fixed 1,000-pair ledger
+  (700 pending, 300 dead-lettered) — with the restore rows running
+  through the JSON round-tripped envelope on every iteration and
+  per-iteration self-checks pinning the restored state exactly; each
+  signed envelope's snapshot is pinned byte-identical to its unsigned
+  snapshot, and a tampered envelope and a wrong secret are pinned to
+  be rejected with the MAC-mismatch error outside the timed loop.
+  Real run (2026-11-11, Node v24.22.1, AMD EPYC 9D25): dedupe export
+  ~1,569 ops/sec, dedupe restore ~818.8, task export ~22,651, task
+  restore ~4,102, outbox export ~323.0, outbox restore ~233.1.
+  README Benchmarks table refreshed from the same run (103 paths).
+
 - Benchmark rows for `PayoutWebhookOutbox` (2026-11-10, backlog #1039,
   mirrors escrow #1038): `npm run bench` now measures six outbox paths
   over a fixed outbox (`maxAttempts: 3`, injected fixed clock) —

@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the fifty hot-path
+ * Measures real, locally-observed throughput for the sixty-nine hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -1426,6 +1426,33 @@
  *      validation and in `benchPayoutWebhookOutboxRecord` below.
  *      Mirrors the sibling escrow `SettlementWebhookOutbox` rows
  *      (backlog #1038) row for row, same fixture composition.
+ *  69. signed-snapshot envelopes — `exportSignedSnapshot` /
+ *      `restoreSignedSnapshot` on all three HMAC-SHA256 signed
+ *      snapshot envelopes (`PayoutEventDedupe` #1011,
+ *      `TaskLifecycle` #1018, `PayoutWebhookOutbox` #1031), six rows
+ *      over the fixtures the unsigned snapshot rows already pin:
+ *      the dedupe exports / restores its fixed 1,000-entry
+ *      snapshot (ids `bench-restore-0000` ..
+ *      `bench-restore-0999` under the fixed restore clock), the
+ *      task exports / restores the fixed BENCH-001 DRAFT -> PAID
+ *      8-entry chain, and the outbox exports / restores its fixed
+ *      1,000-pair ledger (700 pending, 300 dead-lettered). The
+ *      restore rows run through the JSON round-tripped envelope on
+ *      every iteration — the persisted form a process reloads at
+ *      startup — and every per-iteration self-check pins the
+ *      restored state against the hand-written composition (dedupe
+ *      size 1,000 with the first / middle / last ids still
+ *      duplicates, task id / state / 8-entry history entry for
+ *      entry through the canonical NDJSON serializer, outbox size /
+ *      pending / dead-letter counts with their pinned attempts /
+ *      error / timestamp). Outside the timed loop, a tampered
+ *      envelope and a wrong secret are pinned to be rejected by
+ *      each `restoreSignedSnapshot` with the MAC-mismatch error
+ *      while a previously restored instance keeps its state. This
+ *      is the restart cost a gateway pays for tamper-evident
+ *      persistence — the canonical-JSON + HMAC overhead over the
+ *      unsigned snapshot rows — and it previously had unit tests
+ *      only, no throughput baseline.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -1489,14 +1516,17 @@ import {
   verifyPayoutWebhook,
   type LedgerPayout,
   type ListenerErrorContext,
+  type PayoutEventDedupeSignedSnapshotEnvelope,
   type PayoutMismatch,
   type PayoutWebhookEndpoint,
   type PayoutWebhookFetchImpl,
+  type PayoutWebhookOutboxSignedSnapshotEnvelope,
   type PayoutWebhookOutboxSnapshot,
   type RolePolicy,
   type SubscribeOptions,
   type TaskEvent,
   type TaskHistoryEntry,
+  type TaskLifecycleSignedSnapshotEnvelope,
   type TaskSettlementsSummary,
   type TaskSnapshot,
   type TaskState,
@@ -5956,6 +5986,386 @@ checkOutboxExportSnapshot(outboxListSource.exportSnapshot(), "fixture export");
         `benchmark fixture failed: malformed outbox snapshot (${label}) was accepted`,
       );
     }
+  }
+}
+
+// Signed-snapshot envelope fixture (backlog #1041): one shared
+// secret for all three envelopes — a bench-only literal, never a
+// production secret — and the fixtures the unsigned snapshot rows
+// already pin, so the signed rows measure exactly the envelope
+// overhead (canonical JSON + HMAC-SHA256) over the unsigned rows:
+//   - dedupe: `dedupeRestoreSource`, the fixed 1,000-entry store
+//     (ids `bench-restore-0000` .. `bench-restore-0999` under the
+//     fixed restore clock);
+//   - task: `paidTask`, the fixed BENCH-001 DRAFT -> PAID 8-entry
+//     chain;
+//   - outbox: `outboxListSource`, the fixed 1,000-pair ledger
+//     (700 pending, 300 dead-lettered).
+// The three signed envelopes are built once here; the restore rows
+// JSON round-trip them on every iteration — the persisted form a
+// process reloads at startup — while the export rows re-export
+// from the same live sources on every iteration (both exports are
+// pure). The export self-checks pin the envelope shape (v, 64-hex
+// MAC, snapshot composition) on every iteration; the full
+// byte-equality of each signed envelope's snapshot with its
+// unsigned snapshot, and the tampered-envelope / wrong-secret
+// rejections, run once, outside the timed loop, below. Mirrors the
+// sibling escrow signed-snapshot rows (backlog #1040) row for row.
+const SIGNED_SNAPSHOT_SECRET = "bench-signed-snapshot-secret";
+const SIGNED_SNAPSHOT_WRONG_SECRET =
+  "bench-signed-snapshot-wrong-secret";
+const SIGNED_SNAPSHOT_MAC_RE = /^[0-9a-f]{64}$/;
+const dedupeSignedSnapshotEnvelope =
+  dedupeRestoreSource.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET);
+const taskSignedSnapshotEnvelope =
+  paidTask.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET);
+const outboxSignedSnapshotEnvelope =
+  outboxListSource.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET);
+function checkDedupeSignedSnapshotExport(
+  envelope: PayoutEventDedupeSignedSnapshotEnvelope,
+  where: string,
+): void {
+  if (
+    envelope.v !== 1 ||
+    !SIGNED_SNAPSHOT_MAC_RE.test(envelope.mac) ||
+    !Array.isArray(envelope.snapshot.entries) ||
+    envelope.snapshot.entries.length !== DEDUPE_RESTORE_PREFILL ||
+    envelope.snapshot.entries[0][0] !== dedupeRestoreIds[0] ||
+    envelope.snapshot.entries[0][1] !== DEDUPE_RESTORE_NOW_MS ||
+    envelope.snapshot.entries[DEDUPE_RESTORE_PREFILL - 1][0] !==
+      dedupeRestoreIds[DEDUPE_RESTORE_PREFILL - 1] ||
+    envelope.snapshot.entries[DEDUPE_RESTORE_PREFILL - 1][1] !==
+      DEDUPE_RESTORE_NOW_MS
+  ) {
+    throw new Error(
+      `benchmark self-check failed: PayoutEventDedupe exportSignedSnapshot ${where}`,
+    );
+  }
+}
+function checkTaskSignedSnapshotExport(
+  envelope: TaskLifecycleSignedSnapshotEnvelope,
+  where: string,
+): void {
+  if (
+    envelope.v !== 1 ||
+    !SIGNED_SNAPSHOT_MAC_RE.test(envelope.mac) ||
+    envelope.snapshot.v !== 1 ||
+    envelope.snapshot.id !== "BENCH-001" ||
+    envelope.snapshot.state !== "PAID" ||
+    envelope.snapshot.history.length !== 8 ||
+    envelope.snapshot.history[0].seq !== 1 ||
+    envelope.snapshot.history[7].seq !== 8
+  ) {
+    throw new Error(
+      `benchmark self-check failed: TaskLifecycle exportSignedSnapshot ${where}`,
+    );
+  }
+}
+function checkOutboxSignedSnapshotExport(
+  envelope: PayoutWebhookOutboxSignedSnapshotEnvelope,
+  where: string,
+): void {
+  if (
+    envelope.v !== 1 ||
+    !SIGNED_SNAPSHOT_MAC_RE.test(envelope.mac)
+  ) {
+    throw new Error(
+      `benchmark self-check failed: PayoutWebhookOutbox exportSignedSnapshot ${where}`,
+    );
+  }
+  checkOutboxExportSnapshot(envelope.snapshot, where);
+}
+function checkDedupeSignedSnapshotRestore(where: string): void {
+  const restored = PayoutEventDedupe.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(dedupeSignedSnapshotEnvelope)),
+    SIGNED_SNAPSHOT_SECRET,
+    { now: () => DEDUPE_RESTORE_NOW_MS },
+  );
+  // Per-iteration self-check against the hand-written expectations
+  // above: the restore kept all 1,000 entries, the observability
+  // counters restarted at zero, and the first / middle / last
+  // snapshot ids are all duplicates (3 hits). The exhaustive
+  // all-ids check runs once, outside the timed loop, in the
+  // fixture validation.
+  const fresh = restored.stats();
+  if (
+    fresh.size !== DEDUPE_RESTORE_PREFILL ||
+    fresh.hits !== 0 ||
+    fresh.misses !== 0 ||
+    fresh.evictions !== 0 ||
+    !restored.checkAndRecord(dedupeRestoreIds[0]) ||
+    !restored.checkAndRecord(
+      dedupeRestoreIds[DEDUPE_RESTORE_PREFILL / 2],
+    ) ||
+    !restored.checkAndRecord(
+      dedupeRestoreIds[DEDUPE_RESTORE_PREFILL - 1],
+    ) ||
+    restored.stats().hits !== 3
+  ) {
+    throw new Error(
+      `benchmark self-check failed: PayoutEventDedupe restoreSignedSnapshot ${where}`,
+    );
+  }
+}
+function checkTaskSignedSnapshotRestore(where: string): void {
+  const restored = TaskLifecycle.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(taskSignedSnapshotEnvelope)),
+    SIGNED_SNAPSHOT_SECRET,
+  );
+  if (
+    restored.id !== "BENCH-001" ||
+    restored.state !== "PAID" ||
+    restored.history.length !== 8 ||
+    historyToNdjson(restored.history) !== historyToNdjson(historyFixture)
+  ) {
+    throw new Error(
+      `benchmark self-check failed: TaskLifecycle restoreSignedSnapshot ${where}`,
+    );
+  }
+}
+function checkOutboxSignedSnapshotRestore(where: string): void {
+  const restored = PayoutWebhookOutbox.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(outboxSignedSnapshotEnvelope)),
+    SIGNED_SNAPSHOT_SECRET,
+    {
+      maxAttempts: OUTBOX_MAX_ATTEMPTS,
+      now: () => OUTBOX_NOW_MS,
+    },
+  );
+  const pending = restored.pending();
+  const dead = restored.deadLetter();
+  if (
+    restored.size !== OUTBOX_LIST_PREFILL ||
+    pending.length !== OUTBOX_LIST_PENDING ||
+    dead.length !== OUTBOX_LIST_PREFILL - OUTBOX_LIST_PENDING ||
+    pending[0].eventId !== outboxListIds[0] ||
+    pending[0].attempts !== 1 ||
+    pending[0].lastError !== OUTBOX_ERROR ||
+    pending[699].eventId !== outboxListIds[699] ||
+    pending[699].attempts !== 2 ||
+    dead[0].eventId !== outboxListIds[700] ||
+    dead[0].attempts !== 3 ||
+    dead[0].lastError !== OUTBOX_ERROR ||
+    dead[0].lastAt !== OUTBOX_NOW_MS ||
+    dead[299].eventId !== outboxListIds[999] ||
+    dead[299].attempts !== 3
+  ) {
+    throw new Error(
+      `benchmark self-check failed: PayoutWebhookOutbox restoreSignedSnapshot ${where}`,
+    );
+  }
+}
+// One-time validation (outside the timed loop): each signed
+// envelope's snapshot is byte-identical to its unsigned snapshot
+// (the envelope wraps, never rewrites); the export / restore
+// self-checks pass on the pinned envelopes; a tampered envelope
+// (one field rewritten under the original MAC) and a wrong secret
+// are rejected by each `restoreSignedSnapshot` with the
+// MAC-mismatch error, while a previously restored instance keeps
+// its state after the rejected restores.
+if (
+  JSON.stringify(dedupeSignedSnapshotEnvelope.snapshot) !==
+  JSON.stringify(dedupeRestoreSnapshot)
+) {
+  throw new Error(
+    "benchmark fixture failed: dedupe signed envelope snapshot differs from the unsigned snapshot",
+  );
+}
+if (
+  JSON.stringify(taskSignedSnapshotEnvelope.snapshot) !==
+  JSON.stringify(paidTask.toJSON())
+) {
+  throw new Error(
+    "benchmark fixture failed: task signed envelope snapshot differs from the unsigned snapshot",
+  );
+}
+if (
+  JSON.stringify(outboxSignedSnapshotEnvelope.snapshot) !==
+  JSON.stringify(outboxRestoreSnapshot)
+) {
+  throw new Error(
+    "benchmark fixture failed: outbox signed envelope snapshot differs from the unsigned snapshot",
+  );
+}
+checkDedupeSignedSnapshotExport(
+  dedupeSignedSnapshotEnvelope,
+  "fixture export",
+);
+checkTaskSignedSnapshotExport(
+  taskSignedSnapshotEnvelope,
+  "fixture export",
+);
+checkOutboxSignedSnapshotExport(
+  outboxSignedSnapshotEnvelope,
+  "fixture export",
+);
+checkDedupeSignedSnapshotRestore("fixture restore");
+checkTaskSignedSnapshotRestore("fixture restore");
+checkOutboxSignedSnapshotRestore("fixture restore");
+{
+  const dedupeSignedGood =
+    PayoutEventDedupe.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(dedupeSignedSnapshotEnvelope)),
+      SIGNED_SNAPSHOT_SECRET,
+      { now: () => DEDUPE_RESTORE_NOW_MS },
+    );
+  const tamperedDedupe = JSON.parse(
+    JSON.stringify(dedupeSignedSnapshotEnvelope),
+  );
+  tamperedDedupe.snapshot.entries[0][1] = DEDUPE_RESTORE_NOW_MS + 1;
+  let dedupeTamperedThrew = false;
+  try {
+    PayoutEventDedupe.restoreSignedSnapshot(
+      tamperedDedupe,
+      SIGNED_SNAPSHOT_SECRET,
+      { now: () => DEDUPE_RESTORE_NOW_MS },
+    );
+  } catch (error) {
+    dedupeTamperedThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!dedupeTamperedThrew) {
+    throw new Error(
+      "benchmark fixture failed: tampered dedupe signed snapshot was accepted",
+    );
+  }
+  let dedupeWrongSecretThrew = false;
+  try {
+    PayoutEventDedupe.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(dedupeSignedSnapshotEnvelope)),
+      SIGNED_SNAPSHOT_WRONG_SECRET,
+      { now: () => DEDUPE_RESTORE_NOW_MS },
+    );
+  } catch (error) {
+    dedupeWrongSecretThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!dedupeWrongSecretThrew) {
+    throw new Error(
+      "benchmark fixture failed: dedupe signed snapshot under a wrong secret was accepted",
+    );
+  }
+  if (
+    dedupeSignedGood.stats().size !== DEDUPE_RESTORE_PREFILL ||
+    !dedupeSignedGood.checkAndRecord(dedupeRestoreIds[0])
+  ) {
+    throw new Error(
+      "benchmark fixture failed: restored dedupe changed after rejected signed restores",
+    );
+  }
+}
+{
+  const taskSignedGood = TaskLifecycle.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(taskSignedSnapshotEnvelope)),
+    SIGNED_SNAPSHOT_SECRET,
+  );
+  const tamperedTask = JSON.parse(
+    JSON.stringify(taskSignedSnapshotEnvelope),
+  );
+  tamperedTask.snapshot.state = "DRAFT";
+  let taskTamperedThrew = false;
+  try {
+    TaskLifecycle.restoreSignedSnapshot(
+      tamperedTask,
+      SIGNED_SNAPSHOT_SECRET,
+    );
+  } catch (error) {
+    taskTamperedThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!taskTamperedThrew) {
+    throw new Error(
+      "benchmark fixture failed: tampered task signed snapshot was accepted",
+    );
+  }
+  let taskWrongSecretThrew = false;
+  try {
+    TaskLifecycle.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(taskSignedSnapshotEnvelope)),
+      SIGNED_SNAPSHOT_WRONG_SECRET,
+    );
+  } catch (error) {
+    taskWrongSecretThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!taskWrongSecretThrew) {
+    throw new Error(
+      "benchmark fixture failed: task signed snapshot under a wrong secret was accepted",
+    );
+  }
+  if (
+    taskSignedGood.id !== "BENCH-001" ||
+    taskSignedGood.state !== "PAID" ||
+    historyToNdjson(taskSignedGood.history) !==
+      historyToNdjson(historyFixture)
+  ) {
+    throw new Error(
+      "benchmark fixture failed: restored task changed after rejected signed restores",
+    );
+  }
+}
+{
+  const outboxSignedGood =
+    PayoutWebhookOutbox.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(outboxSignedSnapshotEnvelope)),
+      SIGNED_SNAPSHOT_SECRET,
+      {
+        maxAttempts: OUTBOX_MAX_ATTEMPTS,
+        now: () => OUTBOX_NOW_MS,
+      },
+    );
+  const tamperedOutbox = JSON.parse(
+    JSON.stringify(outboxSignedSnapshotEnvelope),
+  );
+  tamperedOutbox.snapshot.entries[0].attempts =
+    OUTBOX_MAX_ATTEMPTS + 1;
+  let outboxTamperedThrew = false;
+  try {
+    PayoutWebhookOutbox.restoreSignedSnapshot(
+      tamperedOutbox,
+      SIGNED_SNAPSHOT_SECRET,
+      {
+        maxAttempts: OUTBOX_MAX_ATTEMPTS,
+        now: () => OUTBOX_NOW_MS,
+      },
+    );
+  } catch (error) {
+    outboxTamperedThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!outboxTamperedThrew) {
+    throw new Error(
+      "benchmark fixture failed: tampered outbox signed snapshot was accepted",
+    );
+  }
+  let outboxWrongSecretThrew = false;
+  try {
+    PayoutWebhookOutbox.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(outboxSignedSnapshotEnvelope)),
+      SIGNED_SNAPSHOT_WRONG_SECRET,
+      {
+        maxAttempts: OUTBOX_MAX_ATTEMPTS,
+        now: () => OUTBOX_NOW_MS,
+      },
+    );
+  } catch (error) {
+    outboxWrongSecretThrew =
+      error instanceof Error && error.message.includes("MAC mismatch");
+  }
+  if (!outboxWrongSecretThrew) {
+    throw new Error(
+      "benchmark fixture failed: outbox signed snapshot under a wrong secret was accepted",
+    );
+  }
+  if (
+    outboxSignedGood.size !== OUTBOX_LIST_PREFILL ||
+    outboxSignedGood.pending().length !== OUTBOX_LIST_PENDING ||
+    outboxSignedGood.deadLetter().length !==
+      OUTBOX_LIST_PREFILL - OUTBOX_LIST_PENDING
+  ) {
+    throw new Error(
+      "benchmark fixture failed: restored outbox changed after rejected signed restores",
+    );
   }
 }
 
@@ -10871,6 +11281,72 @@ function benchPayoutWebhookOutboxRestore(): number {
   }, ITERATIONS);
 }
 
+function benchPayoutEventDedupeExportSignedSnapshot(): number {
+  return measure(() => {
+    // Per-iteration self-check against the hand-written
+    // expectations above: the export kept exactly the 1,000
+    // snapshot entries with their pinned first-seen timestamps
+    // and a well-formed 64-hex MAC. The full byte-equality with
+    // the unsigned snapshot runs once, outside the timed loop,
+    // in the fixture validation. `exportSignedSnapshot` is pure,
+    // so the same source store is re-exported on every iteration.
+    checkDedupeSignedSnapshotExport(
+      dedupeRestoreSource.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET),
+      "exportSignedSnapshot",
+    );
+  }, ITERATIONS);
+}
+
+function benchPayoutEventDedupeRestoreSignedSnapshot(): number {
+  return measure(() => {
+    checkDedupeSignedSnapshotRestore("self-check");
+  }, ITERATIONS);
+}
+
+function benchTaskLifecycleExportSignedSnapshot(): number {
+  return measure(() => {
+    // Per-iteration self-check: the export kept the BENCH-001
+    // PAID snapshot — 8 chained entries, seq 1..8 — under a
+    // well-formed 64-hex MAC. The full byte-equality with the
+    // unsigned snapshot runs once, outside the timed loop, in the
+    // fixture validation. `exportSignedSnapshot` is pure, so the
+    // same source task is re-exported on every iteration.
+    checkTaskSignedSnapshotExport(
+      paidTask.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET),
+      "exportSignedSnapshot",
+    );
+  }, ITERATIONS);
+}
+
+function benchTaskLifecycleRestoreSignedSnapshot(): number {
+  return measure(() => {
+    checkTaskSignedSnapshotRestore("self-check");
+  }, ITERATIONS);
+}
+
+function benchPayoutWebhookOutboxExportSignedSnapshot(): number {
+  return measure(() => {
+    // Per-iteration self-check against the hand-written
+    // expectations above: the export kept exactly the 1,000
+    // ledger pairs in record order with their pinned attempt
+    // counts, error, and timestamps, under a well-formed 64-hex
+    // MAC. The full byte-equality with the unsigned snapshot
+    // runs once, outside the timed loop, in the fixture
+    // validation. `exportSignedSnapshot` is pure, so the same
+    // source ledger is re-exported on every iteration.
+    checkOutboxSignedSnapshotExport(
+      outboxListSource.exportSignedSnapshot(SIGNED_SNAPSHOT_SECRET),
+      "exportSignedSnapshot",
+    );
+  }, ITERATIONS);
+}
+
+function benchPayoutWebhookOutboxRestoreSignedSnapshot(): number {
+  return measure(() => {
+    checkOutboxSignedSnapshotRestore("self-check");
+  }, ITERATIONS);
+}
+
 function benchBuildPayoutWebhooks(): number {
   return measure(() => {
     runBatchBuild();
@@ -12607,6 +13083,12 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "PayoutWebhookOutbox acknowledge (pending pair, 2 failures)", ops: benchPayoutWebhookOutboxAcknowledge() },
   { path: "PayoutWebhookOutbox exportSnapshot (1,000-pair ledger)", ops: benchPayoutWebhookOutboxExportSnapshot() },
   { path: "PayoutWebhookOutbox restore (1,000-pair snapshot, JSON round-trip)", ops: benchPayoutWebhookOutboxRestore() },
+  { path: "PayoutEventDedupe exportSignedSnapshot (1,000-entry snapshot)", ops: benchPayoutEventDedupeExportSignedSnapshot() },
+  { path: "PayoutEventDedupe restoreSignedSnapshot (1,000-entry snapshot, JSON round-trip)", ops: benchPayoutEventDedupeRestoreSignedSnapshot() },
+  { path: "TaskLifecycle exportSignedSnapshot (8-entry history)", ops: benchTaskLifecycleExportSignedSnapshot() },
+  { path: "TaskLifecycle restoreSignedSnapshot (8-entry history, JSON round-trip)", ops: benchTaskLifecycleRestoreSignedSnapshot() },
+  { path: "PayoutWebhookOutbox exportSignedSnapshot (1,000-pair ledger)", ops: benchPayoutWebhookOutboxExportSignedSnapshot() },
+  { path: "PayoutWebhookOutbox restoreSignedSnapshot (1,000-pair snapshot, JSON round-trip)", ops: benchPayoutWebhookOutboxRestoreSignedSnapshot() },
   { path: "buildPayoutWebhooks (batch of 12 PAID tasks)", ops: benchBuildPayoutWebhooks() },
   { path: "expiredTasks (12 mixed-state tasks)", ops: benchExpiredTasks() },
   { path: "staleTasks (12 mixed-state tasks)", ops: benchStaleTasks() },
