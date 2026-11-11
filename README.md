@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1315 tests, all local
+npm test   # 1323 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -65,10 +65,11 @@ a future HTTP-date → 5000 ms, a past HTTP-date → 0 ms, and
 exponential backoff — the hint a 429 response, unlike the risk
 endpoint's 500, would have used to set the next retry delay) —
 and a final reconciliation
-screening branch that drives two more tasks to PAID under
+screening branch that drives three more tasks to PAID under
 fixed-literal timestamps — one settled with no `payoutRef` on its
 `PAYOUT_COMPLETE` entry, one settled for less than its `ACCEPT`
-quote — and screens all five demo tasks with
+quote, one settled under a `payoutRef` but with no `payoutAmount`
+recorded — and screens all six demo tasks with
 `unreconciledPayouts()` / `mismatchedPayouts()` / `totalPaidOut()`:
 each flawed task is flagged by exactly one screen and the paid-out
 total is the hand-computed 16349 — then a quoted-total branch sums
@@ -963,16 +964,22 @@ half of the loop, the
 ```ts
 import { unreconciledPayouts } from "dataquest-task-lifecycle";
 
-// PAID tasks whose PAYOUT_COMPLETE entry has no payoutRef — settlements
-// that still need chasing. Pure: reads the tasks, never mutates them.
+// PAID tasks whose PAYOUT_COMPLETE entry has no payoutRef or no
+// payoutAmount — settlements that still need chasing. Pure: reads
+// the tasks, never mutates them.
 for (const task of unreconciledPayouts(allTasks)) {
-  alertFinance(task.id, "paid without a recorded payout reference");
+  alertFinance(task.id, "paid without complete settlement evidence");
 }
 ```
 
 A reference on `REQUEST_PAYOUT` alone does not reconcile the task: the
 check reads the `PAYOUT_COMPLETE` entry (the one that moved the task to
 `PAID`), because that is the entry that evidences the settlement itself.
+The same holds for the amount: a reference without a recorded settled
+amount cannot be checked against a ledger by amount, so it stays
+unreconciled too — an amount of 0 still counts as recorded (a
+zero-value settlement is still a settlement, the same rule the
+`requirePayoutAmount` gate uses); only a missing amount is flagged.
 
 The same population can be aged instead of just listed.
 `payoutAging()` buckets the unreconciled tasks by whole days since
@@ -1063,7 +1070,7 @@ const { matched, taskOnly, ledgerOnly, amountMismatch, unreconciled } =
 // taskOnly: PAID with a reference no ledger row carries
 // ledgerOnly: ledger row no PAID task carries
 // amountMismatch: [{ task, ledger, taskAmount, ledgerAmount }] — same reference, different amounts
-// unreconciled: PAID with no reference at all (the unreconciledPayouts() population)
+// unreconciled: PAID with no reference or no settled amount (the unreconciledPayouts() population)
 ```
 
 Pairing reads only the `PAYOUT_COMPLETE` entry of `PAID` tasks, so
@@ -1071,9 +1078,10 @@ a request-only reference never pairs and a non-PAID task never
 enters a group. Several tasks may share one reference (one
 transfer settling a batch); each pairs against the same ledger row
 independently. An amount disagreement is reported only when both
-sides recorded an amount and they differ exactly — when either side
-recorded none, the library cannot compare what it cannot observe,
-so the task pairs on the reference alone. A reference appearing
+sides recorded an amount and they differ exactly — when the ledger row
+recorded none, the task pairs on the reference alone; when the task
+recorded none, it never pairs: it lands in `unreconciled` instead, the
+same population `unreconciledPayouts()` returns. A reference appearing
 twice in the ledger throws (`duplicate ledger payoutRef`), as does
 any malformed ledger row; pure, like the other screens.
 
@@ -2118,7 +2126,8 @@ webhooks, retries). That remains the caller's infrastructure.
   `payoutAmount`) verbatim in the audit history, but it cannot verify
   whether an external payment actually happened — see "Settlement
   payout references". `unreconciledPayouts()` exists precisely to flag
-  `PAID` tasks whose `PAYOUT_COMPLETE` entry carries no `payoutRef`.
+  `PAID` tasks whose `PAYOUT_COMPLETE` entry carries no `payoutRef` or
+  no `payoutAmount`.
 
 - **If an SLA deadline passes, does the task expire on its own?**
   No. SLA deadlines are advisory only: there is no timer and no
@@ -2221,7 +2230,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1315 tests covering the happy path, reject→resubmit
+`npm test` runs 1323 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2276,7 +2285,8 @@ switch semantics with `fromHistory` re-attachment), and the
 `requirePayoutAmount` opt-in enforcement (same gate shape, plus a
 0-amount pass and invalid-amount shape errors ahead of the gate), and settlement reconciliation screening
 (`unreconciledPayouts`: mixed PAID batches, request-only refs not
-reconciling, empty-input and purity, snapshot-rehydrated tasks), and
+reconciling, ref-without-amount now unreconciled with a 0-amount pass,
+empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,
 per-task global keys, failed-dispatch key non-consumption, shape
 validation, snapshot persistence: non-empty-only envelope field,

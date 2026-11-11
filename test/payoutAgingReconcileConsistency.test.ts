@@ -14,14 +14,14 @@ import type { LedgerPayout } from "../src/index.js";
  *
  * The three helpers are three hand-written spellings of one rule — a
  * PAID task counts as unreconciled when its `PAYOUT_COMPLETE` entry
- * carries no `payoutRef` (or when it has no completion entry at all) —
- * but nothing pinned that they cannot drift apart: `reconcilePayouts`
- * documents its `unreconciled` group as "the same population
- * `unreconciledPayouts` returns", and `payoutAging` documents that it
- * ages exactly that population. If any one of the three quietly
- * changed its screen, a task could sit in the aging buckets while
- * missing from the reconciliation group (or vice versa) with no test
- * catching the split.
+ * carries no `payoutRef` or no `payoutAmount` (or when it has no
+ * completion entry at all) — but nothing pinned that they cannot
+ * drift apart: `reconcilePayouts` documents its `unreconciled` group
+ * as "the same population `unreconciledPayouts` returns", and
+ * `payoutAging` documents that it ages exactly that population. If
+ * any one of the three quietly changed its screen, a task could sit
+ * in the aging buckets while missing from the reconciliation group
+ * (or vice versa) with no test catching the split.
  *
  * Rules under test, over one shared mixed batch:
  *  - `reconcilePayouts(...).unreconciled` ids equal
@@ -31,6 +31,10 @@ import type { LedgerPayout } from "../src/index.js";
  *  - a reference on `REQUEST_PAYOUT` but none on `PAYOUT_COMPLETE`
  *    still counts as unreconciled: only the completion entry is
  *    settlement evidence
+ *  - a PAID task with a reference but no settled amount is
+ *    unreconciled too (backlog #1046), and its ledger row stays
+ *    `ledgerOnly`: without a recorded amount there is nothing to
+ *    pair it against by amount
  *  - a ledger row carrying that request-only reference (or any other
  *    unmatched reference) does not pull a no-ref task out of the
  *    unreconciled group: without a completion reference there is
@@ -134,6 +138,12 @@ function mixedBatch(): TaskLifecycle[] {
       completionRef: "xfer-mismatch",
       completionAmount: 90,
     }),
+    // Unreconciled: reference recorded, but no settled amount —
+    // the reference alone cannot be checked against a ledger by
+    // amount (backlog #1046). 4 days old.
+    toPaid("unrec-ref-no-amount", "2026-03-28T00:00:00.000Z", {
+      completionRef: "xfer-ref-no-amount",
+    }),
     // Unreconciled: no ref, 59 days old.
     toPaid("unrec-59", "2026-02-01T00:00:00.000Z"),
     // Non-PAID: in payout flight, request carries a ref, but no
@@ -162,11 +172,16 @@ const LEDGER: LedgerPayout[] = [
   // Matches only a REQUEST_PAYOUT ref on a PAID task whose completion
   // carries no ref: still ledger-only, and the task stays unreconciled.
   { payoutRef: "xfer-reqref", payoutAmount: 40 },
+  // Matches only a completion ref on a PAID task whose completion
+  // carries no amount: still ledger-only, and the task stays
+  // unreconciled — without a recorded amount there is no pairing.
+  { payoutRef: "xfer-ref-no-amount", payoutAmount: 40 },
 ];
 
 const EXPECTED_UNRECONCILED = [
   "unrec-fresh",
   "unrec-22",
+  "unrec-ref-no-amount",
   "unrec-59",
   "unrec-unknown",
   "unrec-reqref",
@@ -196,7 +211,7 @@ test("reconcile unreconciled group equals the unreconciled screen", () => {
   assert.equal(reconciled.amountMismatch[0].task.id, "rec-mismatch");
   assert.deepEqual(
     reconciled.ledgerOnly.map((row) => row.payoutRef),
-    ["xfer-ledger-only", "xfer-request", "xfer-reqref"],
+    ["xfer-ledger-only", "xfer-request", "xfer-reqref", "xfer-ref-no-amount"],
   );
   // The non-PAID task enters no group at all.
   const allGrouped = [
@@ -211,7 +226,10 @@ test("reconcile unreconciled group equals the unreconciled screen", () => {
 test("payoutAging buckets union equals the same unreconciled set", () => {
   const tasks = mixedBatch();
   const aging = payoutAging(tasks, NOW);
-  assert.deepEqual(aging.under7Days, [{ id: "unrec-fresh", ageDays: 2 }]);
+  assert.deepEqual(aging.under7Days, [
+    { id: "unrec-fresh", ageDays: 2 },
+    { id: "unrec-ref-no-amount", ageDays: 4 },
+  ]);
   assert.deepEqual(aging.days7To30, [
     { id: "unrec-22", ageDays: 22 },
     { id: "unrec-reqref", ageDays: 7 },

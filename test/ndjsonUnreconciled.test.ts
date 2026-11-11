@@ -19,9 +19,10 @@ import {
  * (or stopped being) a screening candidate.
  *
  * Rules under test:
- *  - mixed batch (ref PAID, no-ref PAID, request-only-ref PAID,
- *    PAYOUT_PENDING, EXPIRED) screens identically before and after
- *    the per-task NDJSON -> fromHistory round-trip, in input order
+ *  - mixed batch (ref+amount PAID, no-ref PAID, request-only-ref PAID,
+ *    ref-without-amount PAID, PAYOUT_PENDING, EXPIRED) screens
+ *    identically before and after the per-task NDJSON -> fromHistory
+ *    round-trip, in input order
  *  - rebuilt tasks keep their state and full history deep-equal
  *    (entry key order may differ after re-chaining, values may not)
  *  - a ref on REQUEST_PAYOUT alone still leaves the task
@@ -102,19 +103,28 @@ function mixedBatch(): TaskLifecycle[] {
     requestRef: "batch-mix-9",
     payoutAmount: 900,
   });
+  // Reference recorded, but no settled amount: unreconciled under
+  // the #1046 rule, and the NDJSON hop must not lose that verdict.
+  const refNoAmount = toPaid("mix-ref-no-amount", {
+    completionRef: "xfer-mix-2",
+  });
   const payoutPending = toApproved("mix-pending");
   payoutPending.dispatch("REQUEST_PAYOUT", { actor: "contributor" });
   const expired = new TaskLifecycle("mix-expired");
   expired.dispatch("PUBLISH", { actor: "researcher" });
   expired.dispatch("EXPIRE", { actor: "system" });
-  return [paidWithRef, paidNoRef, requestOnlyRef, payoutPending, expired];
+  return [paidWithRef, paidNoRef, requestOnlyRef, refNoAmount, payoutPending, expired];
 }
 
 describe("NDJSON x unreconciled payouts", () => {
   it("mixed batch screens identically before and after the NDJSON hop", () => {
     const tasks = mixedBatch();
     const before = unreconciledPayouts(tasks).map((t) => t.id);
-    assert.deepEqual(before, ["mix-no-ref", "mix-request-only-ref"]);
+    assert.deepEqual(before, [
+      "mix-no-ref",
+      "mix-request-only-ref",
+      "mix-ref-no-amount",
+    ]);
 
     const rebuilt = roundTrip(tasks);
     assert.deepEqual(

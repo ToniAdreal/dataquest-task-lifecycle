@@ -964,22 +964,29 @@ export function actOnStaleTasks(
 /**
  * Reconciliation helper: from a batch of tasks, return the ones whose
  * settlement lacks external payment evidence — currently PAID, but the
- * `PAYOUT_COMPLETE` audit entry carries no `payoutRef`.
+ * `PAYOUT_COMPLETE` audit entry carries no `payoutRef` or no
+ * `payoutAmount`.
  *
  * This is the reconciliation tooling the `dispatch()` docs point at: a
- * `PAYOUT_COMPLETE` without a `payoutRef` is legal (advisory only — the
- * library cannot verify whether an external payment really happened),
- * so finance ops need a one-liner to find the tasks that still need
- * chasing:
+ * `PAYOUT_COMPLETE` without a `payoutRef` or without a `payoutAmount`
+ * is legal (advisory only — the library cannot verify whether an
+ * external payment really happened), so finance ops need a one-liner
+ * to find the tasks that still need chasing:
  *
  *   for (const task of unreconciledPayouts(allTasks)) {
- *     alertFinance(task.id, "paid but no payout reference recorded");
+ *     alertFinance(task.id, "paid but settlement evidence incomplete");
  *   }
  *
  * The check looks at the `PAYOUT_COMPLETE` entry (the one that moved the
  * task to PAID), not the `REQUEST_PAYOUT` entry: a reference on the
  * request but none on the completion still means the settlement itself
- * is unevidenced. Defensive: a PAID task with no `PAYOUT_COMPLETE` entry
+ * is unevidenced. It checks both fields: a reference without a settled
+ * amount cannot be checked against a ledger by amount, and an amount
+ * without a reference cannot be paired to a transfer at all — either
+ * gap leaves the settlement unreconciled. An amount of 0 still counts
+ * as recorded (a zero-value settlement is still a settlement, the same
+ * rule the `requirePayoutAmount` gate uses); only `undefined` is
+ * missing. Defensive: a PAID task with no `PAYOUT_COMPLETE` entry
  * at all is also returned — it cannot arise through the validated
  * construction paths (dispatch/fromJSON/fromHistory all guarantee the
  * entry), but if it ever did, missing completion evidence is exactly
@@ -1000,7 +1007,7 @@ export function unreconciledPayouts(
     // Defensive: unreachable through dispatch/fromJSON/fromHistory, but
     // a PAID task with no completion entry is reconciliation-worthy too.
     if (complete === undefined) return true;
-    return complete.payoutRef === undefined;
+    return complete.payoutRef === undefined || complete.payoutAmount === undefined;
   });
 }
 
@@ -1051,9 +1058,9 @@ export interface PayoutAgingResult {
  * but exactly what the screen's defensive branch flags — goes to
  * `unknown` rather than being silently dropped, as does a completion
  * entry whose timestamp does not parse. Reconciled tasks (a reference
- * on the completion entry) and non-PAID tasks never appear in any
- * bucket: this ages the unreconciled population only, it does not
- * re-screen the batch.
+ * and a settled amount on the completion entry) and non-PAID tasks
+ * never appear in any bucket: this ages the unreconciled population
+ * only, it does not re-screen the batch.
  *
  * Pure: reads the tasks, never mutates or dispatches. An invalid
  * `now` fails fast instead of returning an empty result. The `now`
@@ -1706,11 +1713,13 @@ export interface ReconcilePayoutsResult {
   /** PAID tasks paired by reference but disagreeing on amount. */
   amountMismatch: ReconcileAmountMismatch[];
   /**
-   * PAID tasks with no reference on their `PAYOUT_COMPLETE` entry —
-   * the same population {@link unreconciledPayouts} returns. They
-   * enter no pairing at all: without a reference there is nothing to
-   * pair them against, and silently matching them to a ledger row
-   * would invent evidence the audit log does not contain.
+   * PAID tasks with no reference or no settled amount on their
+   * `PAYOUT_COMPLETE` entry — the same population
+   * {@link unreconciledPayouts} returns. They enter no pairing at
+   * all: without a reference there is nothing to pair them against,
+   * and without an amount the pairing could not check the money at
+   * all — silently matching them to a ledger row would invent
+   * evidence the audit log does not contain.
    */
   unreconciled: TaskLifecycle[];
 }
@@ -1720,12 +1729,12 @@ export interface ReconcilePayoutsResult {
  * payout ledger, by `payoutRef`.
  *
  * This is the half of reconciliation the task-side screens cannot do:
- * {@link unreconciledPayouts} finds PAID tasks with no reference at
- * all, and {@link mismatchedPayouts} compares a task against its own
- * quote, but neither can see whether the money actually left the
- * external account. Pairing against the ledger closes that gap in
- * both directions — a task the ledger never paid, and a ledger
- * payment no task accounts for:
+ * {@link unreconciledPayouts} finds PAID tasks with no reference or
+ * no settled amount, and {@link mismatchedPayouts} compares a task
+ * against its own quote, but neither can see whether the money
+ * actually left the external account. Pairing against the ledger
+ * closes that gap in both directions — a task the ledger never paid,
+ * and a ledger payment no task accounts for:
  *
  *   const { matched, taskOnly, ledgerOnly, amountMismatch, unreconciled } =
  *     reconcilePayouts(allTasks, ledgerRows);
@@ -1744,12 +1753,17 @@ export interface ReconcilePayoutsResult {
  *    batch): each pairs against the same ledger row independently,
  *    and the row is consumed, never `ledgerOnly`;
  *  - an amount disagreement is reported only when both sides recorded
- *    an amount and they differ exactly. When either side recorded no
- *    amount, the library cannot compare what it cannot observe
+ *    an amount and they differ exactly. When the ledger row recorded
+ *    no amount, the library cannot compare what it cannot observe
  *    (the same rule {@link payoutMismatch} uses), so the task lands
  *    in `matched` on the reference alone — the missing amount is
  *    still visible to the caller, because `matched` holds the task
- *    itself, not a claim that amounts were verified.
+ *    itself, not a claim that amounts were verified. When the task
+ *    side recorded no amount, the task never reaches pairing at all:
+ *    it lands in `unreconciled`, the same population
+ *    {@link unreconciledPayouts} returns, because a settlement with
+ *    no recorded amount cannot be checked against a ledger by
+ *    amount.
  *
  * Fail-fast, before any pairing: a ledger row that is not an object,
  * carries an empty or non-string `payoutRef`, or carries a
@@ -1812,7 +1826,11 @@ export function reconcilePayouts(
     for (const entry of task.history) {
       if (entry.event === "PAYOUT_COMPLETE") complete = entry;
     }
-    if (complete === undefined || complete.payoutRef === undefined) {
+    if (
+      complete === undefined ||
+      complete.payoutRef === undefined ||
+      complete.payoutAmount === undefined
+    ) {
       result.unreconciled.push(task);
       continue;
     }
@@ -3828,7 +3846,10 @@ export class TaskLifecycle {
    * anything mutates. The {@link totalPaidOut} reconciliation helper sums
    * it across `PAID` tasks; a task without one contributes 0 (sums only
    * what was recorded, not what was owed). Like `payoutRef`, it is accepted
-   * on any event but intended for `PAYOUT_COMPLETE`.
+   * on any event but intended for `PAYOUT_COMPLETE`. The
+   * {@link unreconciledPayouts} reconciliation helper flags a `PAID`
+   * task whose completion entry lacks either field, so a reference
+   * without a recorded amount is still unreconciled.
    *
    * `opts.quotedAmount` is the quoted (owed) counterpart: the amount the
    * task was agreed to pay, recorded verbatim into the audit entry. It

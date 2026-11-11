@@ -419,6 +419,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Changed
 
+- `unreconciledPayouts()` now also flags a PAID task whose
+  `PAYOUT_COMPLETE` entry carries a `payoutRef` but no `payoutAmount`
+  (2026-11-11, backlog #1046, post-hoc counterpart to the #1045
+  `requirePayoutAmount` up-front gate): a reference without a settled
+  amount cannot be checked against a ledger by amount, so it stays
+  unreconciled. An amount of 0 still counts as recorded (a zero-value
+  settlement is still a settlement); only a missing amount is flagged.
+  `reconcilePayouts()` follows the same population — a task-side
+  amount missing lands in `unreconciled` and its ledger row stays
+  `ledgerOnly`, while a ledger-side amount missing still pairs on the
+  reference alone. Behavior change: a "ref without amount" settlement
+  previously counted as reconciled. The demo's reconciliation branch
+  gains a third PAID task (DEMO-096, ref `xfer-91c8`, no amount, no
+  quote) that is flagged by `unreconciledPayouts()` only, and
+  `totalPaidOut` is unchanged at 16349. Eight new tests pin the new
+  screen rule, the 0-amount pass, the unchanged no-ref rule, the
+  non-PAID exclusion, the request-only-ref case, the fromJSON
+  verdict, and purity; the aging, NDJSON, and reconcile-consistency
+  tests were extended to the same population.
+
 - `exactOptionalPropertyTypes` enabled (2026-11-10, backlog #1037,
   mirrors escrow #1036 and the rfc9421 #1021 pilot): optional config
   properties (`TaskLifecycleOptions`, `DispatchOptions`,

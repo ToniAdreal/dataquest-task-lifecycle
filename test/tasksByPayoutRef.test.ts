@@ -154,7 +154,13 @@ test("tasksByPayoutRef: illegal reference values fail fast", () => {
 });
 
 test("tasksByPayoutRef: agrees with unreconciledPayouts on the completion-entry rule", () => {
-  const settled = toPaid("t-settled", { payoutRef: "xfer-88f2" });
+  // The settled task records both evidence fields: under the #1046
+  // rule a reference without a settled amount is unreconciled, so
+  // the "settled" side of this fixture must carry an amount too.
+  const settled = toPaid("t-settled", {
+    payoutRef: "xfer-88f2",
+    payoutAmount: 1000,
+  });
   const reqOnly = toApproved("t-reqonly");
   reqOnly.dispatch("REQUEST_PAYOUT", {
     actor: "contributor",

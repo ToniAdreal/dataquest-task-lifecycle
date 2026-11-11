@@ -144,7 +144,7 @@ test("reconcilePayouts: a shared reference with one task mismatched still consum
   assert.deepEqual(result.ledgerOnly, []);
 });
 
-test("reconcilePayouts: an amount recorded on only one side is not a mismatch", () => {
+test("reconcilePayouts: a task-side amount missing lands in unreconciled, a ledger-side amount missing still pairs on the reference alone", () => {
   const taskNoAmount = toPaid("t-task-no-amount", {
     payoutRef: "xfer-1",
   });
@@ -156,13 +156,25 @@ test("reconcilePayouts: an amount recorded on only one side is not a mismatch", 
     { payoutRef: "xfer-1", payoutAmount: 40 },
     { payoutRef: "xfer-2" },
   ]);
-  // Neither side can be compared against an unrecorded amount, so
-  // both pair on the reference alone.
+  // The task side recorded no amount, so it never reaches pairing:
+  // it is unreconciled (backlog #1046), and its ledger row stays
+  // ledgerOnly — pairing on the reference alone would claim the
+  // money was checked when it never was.
+  assert.deepEqual(
+    result.unreconciled.map((t) => t.id),
+    ["t-task-no-amount"],
+  );
+  // The ledger side recorded no amount, so there is nothing to
+  // compare against — the task pairs on the reference alone.
   assert.deepEqual(
     result.matched.map((t) => t.id),
-    ["t-task-no-amount", "t-ledger-no-amount"],
+    ["t-ledger-no-amount"],
   );
   assert.deepEqual(result.amountMismatch, []);
+  assert.deepEqual(
+    result.ledgerOnly.map((row) => row.payoutRef),
+    ["xfer-1"],
+  );
 });
 
 test("reconcilePayouts: duplicate ledger references fail fast", () => {

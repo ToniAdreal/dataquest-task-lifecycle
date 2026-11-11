@@ -5,16 +5,17 @@ import { TaskLifecycle, payoutAging } from "../src/index.js";
 /**
  * `payoutAging(tasks, now)` — unreconciled-payout aging (backlog #870).
  *
- * `unreconciledPayouts()` flags PAID tasks with no payoutRef on their
- * PAYOUT_COMPLETE entry, but says nothing about how long each
- * settlement has sat unevidenced. This helper buckets exactly that
- * population by whole days since the completion entry, so finance ops
- * can chase the oldest first instead of hand-computing a time
- * difference per task with an ad-hoc origin.
+ * `unreconciledPayouts()` flags PAID tasks with no payoutRef or no
+ * payoutAmount on their PAYOUT_COMPLETE entry, but says nothing about
+ * how long each settlement has sat unevidenced. This helper buckets
+ * exactly that population by whole days since the completion entry,
+ * so finance ops can chase the oldest first instead of hand-computing
+ * a time difference per task with an ad-hoc origin.
  *
  * Rules under test:
  *  - only the unreconciledPayouts population is aged: a PAID task WITH
- *    a payoutRef and a non-PAID task appear in no bucket
+ *    a payoutRef AND a payoutAmount and a non-PAID task appear in no
+ *    bucket
  *  - age origin is the PAYOUT_COMPLETE entry's `at`, buckets are on
  *    whole days (floor): exactly 7 days lands in days7To30, exactly 30
  *    days lands in over30Days, 6 days stays under7Days, 29 days stays
@@ -39,6 +40,7 @@ function toPaid(
   id: string,
   completeAt: string,
   completionRef?: string,
+  completionAmount?: number,
 ): TaskLifecycle {
   const t = new TaskLifecycle(id);
   const completeMs = Date.parse(completeAt);
@@ -61,6 +63,9 @@ function toPaid(
       actor: "system",
       at: completeAt,
       payoutRef: completionRef,
+      ...(completionAmount !== undefined
+        ? { payoutAmount: completionAmount }
+        : {}),
     });
   }
   assert.equal(t.state, "PAID");
@@ -76,7 +81,9 @@ test("buckets, endpoints, and exclusions over a mixed batch", () => {
     toPaid("age-29", "2026-03-03T00:00:00.000Z"),
     toPaid("age-30", "2026-03-02T00:00:00.000Z"),
     toPaid("age-59", "2026-02-01T00:00:00.000Z"),
-    toPaid("age-reconciled", "2026-01-01T00:00:00.000Z", "xfer-aged-1"),
+    // The one reconciled task: ref AND amount recorded, so it appears
+    // in no bucket even though it is the oldest completion here.
+    toPaid("age-reconciled", "2026-01-01T00:00:00.000Z", "xfer-aged-1", 1000),
     // Non-PAID: in payout flight, never aged even though old.
     (() => {
       const t = new TaskLifecycle("age-pending");

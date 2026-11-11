@@ -244,7 +244,7 @@ Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):
   parsePayoutRetryAfter(null) -> undefined
   retry context: the fan-out risk endpoint answered 500, so its retries used exponential backoff; had it answered 429 with a Retry-After header, the parsed wait above (clamped to maxRetryDelayMs) would have set the next attempt's delay — an absent or unparsable header (undefined) falls back to that backoff
 
-Reconciliation screening branch (two more PAID tasks, then the finance pass):
+Reconciliation screening branch (three more PAID tasks, then the finance pass):
 Task DEMO-004: DRAFT
   PUBLISH         DRAFT        -> OPEN  (researcher)
   ACCEPT          OPEN         -> ACCEPTED  (contributor)
@@ -265,10 +265,20 @@ Task DEMO-005: DRAFT
   REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
   PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
   note: ACCEPT quoted 4000 but PAYOUT_COMPLETE settled 3750.5 under payoutRef xfer-91c7 (the amount, not the evidence, is the problem)
-  screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005 (all five demo tasks)
-  unreconciledPayouts: DEMO-004 (1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry)
+Task DEMO-096: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  APPROVE         IN_REVIEW    -> APPROVED  (reviewer)
+  REQUEST_PAYOUT  APPROVED     -> PAYOUT_PENDING  (contributor)
+  PAYOUT_COMPLETE PAYOUT_PENDING -> PAID  (system)
+  note: PAYOUT_COMPLETE records payoutRef xfer-91c8 but no payoutAmount and no ACCEPT quote (a reference with no recorded amount cannot be checked against a ledger by amount)
+  screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005, DEMO-096 (all six demo tasks)
+  unreconciledPayouts: DEMO-004, DEMO-096 (2 hits: PAID but the PAYOUT_COMPLETE entry lacks a payoutRef or a payoutAmount)
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
-  totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the 3 PAID tasks; the EXPIRED and REJECTED tasks contribute nothing)
+  totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the PAID tasks; DEMO-096 settled with no recorded amount and contributes 0, the EXPIRED and REJECTED tasks contribute nothing)
 
 Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):
   DEMO-085: ACCEPT quoted 9999, then REJECTED in review (a quote on a non-PAID task must not enter the owed total)
@@ -1070,7 +1080,7 @@ Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 939);
+  assert.equal(lines.length, 949);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1444,15 +1454,23 @@ test("demo batch segment is deterministic: two runs print byte-identical batch l
 });
 
 test("demo shows the reconciliation screening branch in-process: unreconciled, mismatched, and total match the hand-computed expectations", async () => {
-  const { unreconciledTask, mismatchedTask, unreconciledFound, mismatchedFound, totalPaid, lines } =
-    await runDemo();
+  const {
+    unreconciledTask,
+    mismatchedTask,
+    refNoAmountTask,
+    unreconciledFound,
+    mismatchedFound,
+    totalPaid,
+    lines,
+  } = await runDemo();
   const text = lines.join("\n");
 
-  // Both branch tasks are driven to PAID under fixed-literal
-  // timestamps — no wall clock anywhere in either history.
+  // All three branch tasks are driven to PAID under fixed-literal
+  // timestamps — no wall clock anywhere in any history.
   for (const [task, firstDay, secondDay] of [
     [unreconciledTask, "2026-03-14", "2026-03-15"],
     [mismatchedTask, "2026-03-16", "2026-03-17"],
+    [refNoAmountTask, "2026-03-18", "2026-03-19"],
   ] as const) {
     assert.equal(task.state, "PAID");
     assert.equal(task.isTerminal, true);
@@ -1481,13 +1499,25 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
     mismatchedTask.history.find((h) => h.event === "ACCEPT")!.quotedAmount,
     4000,
   );
-  // The three screens over all five demo tasks hit exactly the
+  // DEMO-096's deliberate flaw is the amount: it settles under a
+  // payoutRef but records no payoutAmount and no ACCEPT quote, so
+  // the reference alone cannot evidence the money.
+  const refNoAmountComplete = refNoAmountTask.history.at(-1)!;
+  assert.equal(refNoAmountComplete.event, "PAYOUT_COMPLETE");
+  assert.equal(refNoAmountComplete.payoutRef, "xfer-91c8");
+  assert.equal(refNoAmountComplete.payoutAmount, undefined);
+  assert.equal(
+    refNoAmountTask.history.find((h) => h.event === "ACCEPT")!.quotedAmount,
+    undefined,
+  );
+  // The three screens over all six demo tasks hit exactly the
   // hand-computed expectations written in the demo source: the main
   // task (ref recorded, no quote) is flagged by neither screen, and
-  // the EXPIRED / REJECTED tasks contribute nothing to the total.
+  // the EXPIRED / REJECTED tasks contribute nothing to the total —
+  // DEMO-096 contributes 0 to it, not a missing amount.
   assert.deepEqual(
     unreconciledFound.map((t) => t.id),
-    ["DEMO-004"],
+    ["DEMO-004", "DEMO-096"],
   );
   assert.deepEqual(
     mismatchedFound.map((t) => t.id),
@@ -1497,27 +1527,29 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   // The screening is pure: every screened task is untouched.
   assert.equal(unreconciledTask.state, "PAID");
   assert.equal(mismatchedTask.state, "PAID");
+  assert.equal(refNoAmountTask.state, "PAID");
   assert.equal(unreconciledTask.history.length, 8);
   assert.equal(mismatchedTask.history.length, 8);
+  assert.equal(refNoAmountTask.history.length, 8);
   // The branch is printed after the batch section and the fan-out
   // delivery segment (the subscription branch follows it, then the
   // event-sourcing replay segment closes the demo), with the three
   // screening lines verbatim.
-  const reconAt = text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):");
+  const reconAt = text.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):");
   assert.ok(
     reconAt > text.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):"),
     "reconciliation branch must follow the batch section",
   );
-  assert.match(text, /screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005 \(all five demo tasks\)/);
+  assert.match(text, /screened: DEMO-001, DEMO-002, DEMO-003, DEMO-004, DEMO-005, DEMO-096 \(all six demo tasks\)/);
   assert.match(
     text,
-    /unreconciledPayouts: DEMO-004 \(1 hit: PAID but no payoutRef on the PAYOUT_COMPLETE entry\)/,
+    /unreconciledPayouts: DEMO-004, DEMO-096 \(2 hits: PAID but the PAYOUT_COMPLETE entry lacks a payoutRef or a payoutAmount\)/,
   );
   assert.match(
     text,
     /mismatchedPayouts: DEMO-005 \(quoted 4000, paid 3750\.5, delta -249\.5\) \(1 hit: settled amount differs from the ACCEPT quote\)/,
   );
-  assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the 3 PAID tasks/);
+  assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the PAID tasks; DEMO-096 settled with no recorded amount and contributes 0/);
 });
 
 test("demo quotes the owed half of the finance pass: totalQuoted pins 6500 and the gap -9849", async () => {
@@ -1526,6 +1558,7 @@ test("demo quotes the owed half of the finance pass: totalQuoted pins 6500 and t
 
   // The owed half sums only PAID tasks' last ACCEPT quotes: 2500
   // (DEMO-004) + 4000 (DEMO-005). DEMO-001 is PAID but quoteless,
+  // DEMO-096 is PAID with a reference but no quote and no amount,
   // DEMO-002/DEMO-003 are not PAID.
   assert.equal(totalQuoted, 6500);
   // The exclusion probe: DEMO-085 was ACCEPTed with a quote of 9999
@@ -1582,17 +1615,17 @@ test("demo quotes the owed half of the finance pass: totalQuoted pins 6500 and t
 test("demo reconciliation segment is deterministic: two runs print byte-identical reconciliation lines", async () => {
   const reconLines = (ls: string[]) =>
     ls.slice(
-      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+      ls.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):"),
       ls.indexOf("Minor-unit display branch (formatMinorUnits over the settlement amounts):") - 1,
     );
   const a = reconLines((await runDemo()).lines);
   const b = reconLines((await runDemo()).lines);
-  // Header + (task header + 8 transitions + note) x2 + 4 screening
+  // Header + (task header + 8 transitions + note) x3 + 4 screening
   // lines + 5 quoted-total lines (blank, header, DEMO-085 note,
   // totalQuoted, gap); every timestamp in the segment is a fixed
   // literal that never reaches the printed lines, so no
   // normalization is needed.
-  assert.equal(a.length, 30);
+  assert.equal(a.length, 40);
   assert.deepEqual(a, b);
 });
 
@@ -1900,7 +1933,7 @@ test("demo shows the dispatch subscription branch in-process: ordered notificati
   // lines verbatim.
   const subAt = text.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):");
   assert.ok(
-    subAt > text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+    subAt > text.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):"),
     "subscription branch must follow the reconciliation branch",
   );
   assert.ok(
@@ -3026,7 +3059,7 @@ test("demo shows the event-sourcing replay segment in-process: NDJSON export par
   // the replay lines verbatim.
   const replayAt = text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):");
   assert.ok(
-    replayAt > text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):"),
+    replayAt > text.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):"),
     "event-sourcing segment must follow the reconciliation branch",
   );
   assert.match(
@@ -3170,7 +3203,7 @@ test("demo shows the fan-out delivery segment in-process: per-endpoint results i
     "fan-out segment must follow the batch section",
   );
   assert.ok(
-    text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") > fanAt,
+    text.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):") > fanAt,
     "reconciliation branch must follow the fan-out segment",
   );
   assert.match(
@@ -3203,7 +3236,7 @@ test("demo fan-out segment is deterministic: two runs print byte-identical fan-o
   const fanLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook fan-out delivery (deliverPayoutWebhookToMany to 3 endpoints, fake fetch — no real network):"),
-      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+      ls.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3256,7 +3289,7 @@ test("demo shows the Retry-After parsing segment in-process: delay-seconds and H
     "Retry-After segment must follow the fan-out segment",
   );
   assert.ok(
-    text.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") > retryAt,
+    text.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):") > retryAt,
     "reconciliation branch must follow the Retry-After segment",
   );
   assert.match(
@@ -3285,7 +3318,7 @@ test("demo Retry-After segment is deterministic: two runs print byte-identical p
   const retryLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout Retry-After parsing (parsePayoutRetryAfter under a fixed now):"),
-      ls.indexOf("Reconciliation screening branch (two more PAID tasks, then the finance pass):") - 1,
+      ls.indexOf("Reconciliation screening branch (three more PAID tasks, then the finance pass):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3769,7 +3802,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 939);
+  assert.equal(out.trimEnd().split("\n").length, 949);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
