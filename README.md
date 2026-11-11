@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1296 tests, all local
+npm test   # 1304 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1557,7 +1557,13 @@ outbox.deadLetter(); // 3 consecutive failures — needs a human, not another re
 A failed attempt increments the pair's consecutive-failure count
 (capped at `maxAttempts`, while later failures still refresh
 `lastError`/`lastAt`); a success (`ok: true`, or `acknowledge()`)
-clears the pair, so a later failure counts from 1 again.
+clears the pair, so a later failure counts from 1 again. The stored
+`lastError` is capped at `MAX_OUTBOX_ERROR_LENGTH` (1024 characters)
+at record time — a longer error keeps its prefix and ends with
+`…[truncated]`, so one oversized failure (a full HTML error page, a
+long stack trace) cannot bloat the ledger or the snapshot exported
+from it. The full error body belongs in the log where the delivery
+happened; the outbox keeps only the diagnostic hint.
 
 `npm run demo` closes with an outbox segment: a signed payout
 webhook is delivered to the billing endpoint through a scripted
@@ -2209,7 +2215,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1296 tests covering the happy path, reject→resubmit
+`npm test` runs 1304 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

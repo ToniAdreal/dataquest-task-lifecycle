@@ -48,7 +48,9 @@ export {
   PayoutEventDedupe,
   PayoutWebhookOutbox,
   retryPayoutWebhookOutbox,
+  truncateOutboxError,
   verifyPayoutWebhook,
+  MAX_OUTBOX_ERROR_LENGTH,
 } from "./settlementWebhook.js";
 export type {
   BuildPayoutWebhookOptions,

@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook outbox `lastError` length cap (2026-11-11,
+  backlog #1044, mirrors escrow #1043): `MAX_OUTBOX_ERROR_LENGTH`
+  (1024) and `truncateOutboxError` are exported from
+  `src/settlementWebhook.ts`; `PayoutWebhookOutbox.recordAttempt()`
+  truncates an overlong `error` to exactly 1024 characters at
+  record time, keeping its prefix and ending with `…[truncated]`,
+  while errors at or under the cap are stored verbatim — so one
+  oversized failure (a full HTML error page, a long stack trace)
+  cannot bloat the failure ledger or the snapshot (unsigned or
+  signed) exported from it. Truncation is purely a storage cap: it
+  does not touch the attempts count or the dead-letter boundary, and
+  a later failure still refreshes `lastError` with its own text.
+  Eight new tests pin the cap, the boundary, the verbatim path, the
+  helper identity, both snapshot round-trips, the counting boundary,
+  and the refresh without marker residue.
+
 - Payout webhook outbox closing segment in the demo (2026-11-11,
   backlog #1042, mirrors escrow #1024): `npm run demo` now ends by
   delivering a signed payout webhook to the billing endpoint through
