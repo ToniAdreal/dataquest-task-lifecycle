@@ -488,7 +488,26 @@
  * equal to the payload `eventId`, with the
  * `Idempotency-Key` header on the same requests
  * carrying the same value as the coexistence
- * contrast (one event, two header names for it).
+ * contrast (one event, two header names for it) —
+ * and finally a payout webhook outbox segment:
+ * the main task's payout event is delivered to
+ * the billing endpoint through a scripted fetch
+ * that answers 500 three times — each failure
+ * recorded in a `PayoutWebhookOutbox` on a fixed
+ * clock — so after two failures the pair is still
+ * pending (attempts 2) and after the third it
+ * dead-letters at the maxAttempts cap of 3, the
+ * one that needs a human; a second event fails
+ * once and then delivers 200, so its success
+ * clears its own pair and the ledger ends
+ * pending 0, dead letter 1. The one deliberate
+ * difference from the sibling escrow demo's
+ * outbox segment: this repo's delivery reports
+ * failures as a result instead of throwing, so
+ * the segment records each attempt from the
+ * result's `ok` branch, never a try/catch.
+ * All sides are asserted outside the printing
+ * against hand-pinned expectations.
  *
  * Usage: `npm run demo` (builds with tsc, then runs node on the compiled
  * output). Zero runtime dependencies: this file only imports the state
@@ -585,7 +604,14 @@
  * count, its notified event list, its post-fresh-key
  * snapshot key list, its empty-seed construction
  * error, and its seed-free default task with its
- * (absent) snapshot key list,
+ * (absent) snapshot key list, the payout webhook
+ * outbox segment's ledger with its pending and
+ * dead-letter snapshots after two and after three
+ * failures, its dead-lettered and recovered
+ * webhooks, the recovered delivery result, the
+ * scripted-fetch call counts for both pairs, and
+ * the ledger's final pending and dead-letter
+ * snapshots,
  * plus the exact `lines` the CLI prints — so tests assert on structured values
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
@@ -601,6 +627,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   PayoutEventDedupe,
+  PayoutWebhookOutbox,
   TaskLifecycle,
   actOnStaleTasks,
   allowedEvents,
@@ -657,6 +684,7 @@ import {
   type PayoutMismatch,
   type PayoutWebhook,
   type PayoutWebhookFetchImpl,
+  type PayoutWebhookOutboxEntry,
   type ReconcileAmountMismatch,
   type RolePolicy,
   type StaleActionResult,
@@ -869,6 +897,53 @@ export const DEMO_HISTORY_TASK_ID = "DEMO-045";
  * and double runs are byte-identical.
  */
 export const DEMO_HISTORY_BASE_AT = "2026-03-23T10:00:00.000Z";
+
+/**
+ * Webhook-outbox fixtures (backlog #1042): the delivery-failure
+ * ledger story the earlier delivery segments never show — a
+ * receiver that answers 500 three times in a row, and a second
+ * event that fails once and then recovers. Both webhooks are
+ * built fresh from the main task with pinned `eventId`s and
+ * pinned `at` instants (the main task's own webhook carries a
+ * random `eventId`, so it cannot be printed byte-identically);
+ * the dead-letter pair is delivered to the billing endpoint —
+ * the same receiver that answered 200 in the fan-out segment,
+ * now down — with `maxAttempts: 1` so each scripted 500 is
+ * exactly one recorded attempt, and the outbox runs on a fixed
+ * clock (its `lastAt` values are never printed, but no wall
+ * clock enters the segment either way). The one deliberate
+ * difference from the sibling escrow demo's outbox segment
+ * (backlog #1024): this repo's `deliverPayoutWebhook` reports
+ * a failed delivery as `{ ok: false, ... }` instead of
+ * throwing, so the segment records each attempt from the
+ * result's `ok` branch — no try/catch anywhere. Hand-pinned
+ * expectations — written from `PayoutWebhookOutbox`'s
+ * documented counting rules (default `maxAttempts: 3`,
+ * attempts capped at the cap, a success clears the pair)
+ * and cross-checked against
+ * test/payoutWebhookOutbox.test.ts:
+ * - after 2 failures the pair is pending (attempts 2) and the
+ *   dead letter is empty — still retryable;
+ * - after the 3rd failure the pair leaves pending and lands in
+ *   `deadLetter()` at attempts 3 (capped at maxAttempts 3),
+ *   its `lastError` the exact delivery error below — the one
+ *   that needs a human (fix the endpoint, re-issue the event);
+ * - the recovered event (its own fixed eventId, built over the
+ *   same task with the demo secret) fails once (pending,
+ *   attempts 1) and then delivers 200, so the success record
+ *   clears the pair — the ledger ends pending 0, dead letter 1.
+ * All timestamps fixed; the printed lines carry the endpoint,
+ * eventIds, and counts only, so no wall clock enters the output.
+ */
+export const DEMO_OUTBOX_NOW = "2026-03-27T10:00:00.000Z";
+export const DEMO_OUTBOX_ENDPOINT =
+  "https://billing.example.com/hooks/payout";
+export const DEMO_OUTBOX_MAX_ATTEMPTS = 3;
+export const DEMO_OUTBOX_DEAD_EVENT_ID = "evt_demo_outbox_001";
+export const DEMO_OUTBOX_DEAD_LAST_ERROR =
+  "server responded with status 500";
+export const DEMO_OUTBOX_RECOVERED_EVENT_ID = "evt_demo_outbox_002";
+export const DEMO_OUTBOX_RECOVERED_AT = "2026-03-27T10:00:00.000Z";
 
 const steps: Array<{
   event: TaskEvent;
@@ -1563,6 +1638,78 @@ export interface DemoResult {
   payoutAgingTasks: TaskLifecycle[];
   /** `payoutAging` result over the segment batch at the fixed now (DEMO-073/074/075/076, one per bucket). */
   payoutAging: PayoutAgingResult;
+  /**
+   * The payout webhook outbox ledger after the demo's dead-letter run:
+   * the billing endpoint's failure record for the dead-lettered
+   * eventId, after three scripted 500s. Exposed so tests can assert
+   * on the ledger itself, not just on the printed counts.
+   */
+  outbox: PayoutWebhookOutbox;
+  /**
+   * `outbox.pending()` after the first two recorded failures of
+   * the dead-letter pair: exactly one entry — the billing
+   * endpoint, the dead event's eventId, attempts 2 — while
+   * `deadLetter()` is still empty.
+   */
+  outboxPendingAfterTwo: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` after the first two recorded failures:
+   * empty — the pair is still retryable at attempts 2.
+   */
+  outboxDeadAfterTwo: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.pending()` after the third recorded failure: empty — the
+   * pair has left the retryable set.
+   */
+  outboxPendingAfterThree: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` after the third recorded failure: exactly
+   * one entry — attempts 3, capped at
+   * {@link DEMO_OUTBOX_MAX_ATTEMPTS}, `lastError` the exact
+   * delivery error {@link DEMO_OUTBOX_DEAD_LAST_ERROR}.
+   */
+  outboxDeadAfterThree: PayoutWebhookOutboxEntry[];
+  /**
+   * The dead-lettered event's own signed webhook (built from the
+   * main task with the demo secret, fixed `at`
+   * {@link DEMO_OUTBOX_NOW} and eventId
+   * {@link DEMO_OUTBOX_DEAD_EVENT_ID}): it fails three times.
+   */
+  outboxDeadWebhook: PayoutWebhook;
+  /**
+   * The recovered event's own signed webhook (built from the main
+   * task with the demo secret, fixed `at`
+   * {@link DEMO_OUTBOX_RECOVERED_AT} and eventId
+   * {@link DEMO_OUTBOX_RECOVERED_EVENT_ID}): it fails once, then
+   * delivers 200.
+   */
+  outboxRecoveredWebhook: PayoutWebhook;
+  /**
+   * `deliverPayoutWebhook` result for the recovered event's
+   * successful attempt: `{ ok: true, attempts: 1, status: 200 }` —
+   * the success the outbox records to clear the pair.
+   */
+  outboxRecoveredDelivery: DeliverWebhookResult;
+  /**
+   * Scripted-fetch call counts for the outbox segment: 3 calls
+   * against the dead-letter pair (one per recorded failure, no
+   * retries) and 2 against the recovered pair (one failed, one
+   * successful).
+   */
+  outboxDeadFetchCalls: number;
+  outboxRecoveredFetchCalls: number;
+  /**
+   * `outbox.pending()` at the end of the segment: empty — the
+   * dead-lettered pair is not pending, and the recovered pair
+   * was cleared by its success.
+   */
+  outboxPendingFinal: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` at the end of the segment: still exactly
+   * the one dead-lettered pair — the recovery cleared only its own
+   * pair, never the dead letter.
+   */
+  outboxDeadFinal: PayoutWebhookOutboxEntry[];
   lines: string[];
 }
 
@@ -8453,7 +8600,219 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, lines };
+  // --- Payout webhook outbox: failed deliveries stay pending, then dead-letter ---
+  // The delivery segments so far prove the signature and the retry
+  // path, but none ever shows what happens to a delivery that keeps
+  // failing: `deliverPayoutWebhook` returns one call's outcome and
+  // keeps no memory, so a caller whose endpoint stays down had no
+  // ready answer to "what is still undelivered, and what has
+  // exhausted its retries". Here a fresh webhook built from the
+  // main task (pinned eventId and `at` — the main task's own
+  // webhook carries a random eventId, so it cannot be printed
+  // byte-identically) is delivered to the billing endpoint — the
+  // same receiver that answered 200 in the fan-out segment, now
+  // down — through a scripted `fetchImpl` (zero network, no
+  // `globalThis` swap: the option exists precisely for this) that
+  // answers 500 every time, with `maxAttempts: 1` so each
+  // scripted 500 is exactly one recorded attempt, and each
+  // failure is recorded in a fresh `PayoutWebhookOutbox` on the
+  // fixed clock from the reported result's `ok` branch — this
+  // repo's delivery reports failures instead of throwing, so
+  // there is no try/catch here, unlike the sibling escrow
+  // demo's outbox segment: after two failures the pair is
+  // pending (attempts 2) and the dead letter is empty — still
+  // retryable — and after the third the pair leaves pending and
+  // dead-letters at the maxAttempts cap of 3, its `lastError`
+  // the exact delivery error. A second event (its own fixed
+  // eventId, built over the same task with the demo secret)
+  // then fails once and delivers 200 on its second call, so
+  // the success record clears its own pair: the ledger ends
+  // pending 0, dead letter 1. Hand-pinned expectations (see
+  // the fixture comment above), asserted HERE, outside the
+  // printing: the pending/dead-letter counts and attempt
+  // numbers at each stage, the dead entry's `lastError`
+  // verbatim, every captured call a POST to the pinned
+  // endpoint carrying the byte-identical signed body, and
+  // the recovery's success clearing only its own pair. Zero
+  // network, zero real waiting, no wall clock.
+  const outboxNowMs = Date.parse(DEMO_OUTBOX_NOW);
+  const outbox = new PayoutWebhookOutbox({
+    maxAttempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+    now: () => outboxNowMs,
+  });
+  const outboxDeadWebhook = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET, {
+    now: DEMO_OUTBOX_NOW,
+    eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+  });
+  const outboxDeadCalls: FanoutCall[] = [];
+  const outboxDeadFetch: PayoutWebhookFetchImpl = async (url, init) => {
+    outboxDeadCalls.push({
+      url,
+      body: String(init.body ?? ""),
+      signature: String(
+        new Headers(init.headers).get("x-hub-signature-256") ?? "",
+      ),
+    });
+    return new Response("boom", { status: 500 });
+  };
+  const recordDeadFailure = async (): Promise<void> => {
+    const result = await deliverPayoutWebhook(
+      DEMO_OUTBOX_ENDPOINT,
+      outboxDeadWebhook,
+      {
+        maxAttempts: 1,
+        backoffMs: 0,
+        fetchImpl: outboxDeadFetch,
+        sleepImpl: async () => {},
+      },
+    );
+    if (result.ok) {
+      throw new Error(
+        "demo fixture broken: outbox dead-letter delivery unexpectedly succeeded (scripted 500, maxAttempts 1)",
+      );
+    }
+    outbox.recordAttempt({
+      endpoint: DEMO_OUTBOX_ENDPOINT,
+      eventId: outboxDeadWebhook.payload.eventId,
+      ok: false,
+      // Conditional spreads: the attempt shape omits absent
+      // fields rather than carrying explicit `undefined` (the
+      // repo builds with `exactOptionalPropertyTypes`).
+      ...(result.status !== undefined ? { status: result.status } : {}),
+      ...(result.error !== undefined ? { error: result.error } : {}),
+      at: outboxNowMs,
+    });
+  };
+  await recordDeadFailure();
+  await recordDeadFailure();
+  const outboxPendingAfterTwo = outbox.pending();
+  const outboxDeadAfterTwo = outbox.deadLetter();
+  await recordDeadFailure();
+  const outboxPendingAfterThree = outbox.pending();
+  const outboxDeadAfterThree = outbox.deadLetter();
+  const outboxRecoveredWebhook = buildPayoutWebhook(
+    task,
+    DEMO_WEBHOOK_SECRET,
+    {
+      now: DEMO_OUTBOX_RECOVERED_AT,
+      eventId: DEMO_OUTBOX_RECOVERED_EVENT_ID,
+    },
+  );
+  const outboxRecoveredCalls: FanoutCall[] = [];
+  const outboxRecoveredFetch: PayoutWebhookFetchImpl = async (url, init) => {
+    outboxRecoveredCalls.push({
+      url,
+      body: String(init.body ?? ""),
+      signature: String(
+        new Headers(init.headers).get("x-hub-signature-256") ?? "",
+      ),
+    });
+    const status = outboxRecoveredCalls.length === 1 ? 500 : 200;
+    return new Response(status === 200 ? "{}" : "boom", { status });
+  };
+  const outboxRecoveredFailure = await deliverPayoutWebhook(
+    DEMO_OUTBOX_ENDPOINT,
+    outboxRecoveredWebhook,
+    {
+      maxAttempts: 1,
+      backoffMs: 0,
+      fetchImpl: outboxRecoveredFetch,
+      sleepImpl: async () => {},
+    },
+  );
+  if (outboxRecoveredFailure.ok) {
+    throw new Error(
+      "demo fixture broken: outbox recovery first delivery unexpectedly succeeded (scripted 500, maxAttempts 1)",
+    );
+  }
+  outbox.recordAttempt({
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_RECOVERED_EVENT_ID,
+    ok: false,
+    ...(outboxRecoveredFailure.status !== undefined
+      ? { status: outboxRecoveredFailure.status }
+      : {}),
+    ...(outboxRecoveredFailure.error !== undefined
+      ? { error: outboxRecoveredFailure.error }
+      : {}),
+    at: outboxNowMs,
+  });
+  const outboxRecoveredPendingAfterFailure = outbox.pending();
+  const outboxRecoveredDelivery = await deliverPayoutWebhook(
+    DEMO_OUTBOX_ENDPOINT,
+    outboxRecoveredWebhook,
+    {
+      maxAttempts: 1,
+      backoffMs: 0,
+      fetchImpl: outboxRecoveredFetch,
+      sleepImpl: async () => {},
+    },
+  );
+  outbox.recordAttempt({
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_RECOVERED_EVENT_ID,
+    ok: outboxRecoveredDelivery.ok,
+    ...(outboxRecoveredDelivery.status !== undefined
+      ? { status: outboxRecoveredDelivery.status }
+      : {}),
+    at: outboxNowMs,
+  });
+  const outboxPendingFinal = outbox.pending();
+  const outboxDeadFinal = outbox.deadLetter();
+  if (
+    outboxPendingAfterTwo.length !== 1 ||
+    outboxPendingAfterTwo[0]?.endpoint !== DEMO_OUTBOX_ENDPOINT ||
+    outboxPendingAfterTwo[0]?.eventId !== DEMO_OUTBOX_DEAD_EVENT_ID ||
+    outboxPendingAfterTwo[0]?.attempts !== 2 ||
+    outboxPendingAfterTwo[0]?.lastAt !== outboxNowMs ||
+    outboxDeadAfterTwo.length !== 0 ||
+    outboxPendingAfterThree.length !== 0 ||
+    outboxDeadAfterThree.length !== 1 ||
+    outboxDeadAfterThree[0]?.endpoint !== DEMO_OUTBOX_ENDPOINT ||
+    outboxDeadAfterThree[0]?.eventId !== DEMO_OUTBOX_DEAD_EVENT_ID ||
+    outboxDeadAfterThree[0]?.attempts !== DEMO_OUTBOX_MAX_ATTEMPTS ||
+    outboxDeadAfterThree[0]?.lastError !== DEMO_OUTBOX_DEAD_LAST_ERROR ||
+    outboxDeadAfterThree[0]?.lastAt !== outboxNowMs ||
+    outboxDeadCalls.length !== DEMO_OUTBOX_MAX_ATTEMPTS ||
+    outboxDeadCalls.some(
+      (call) =>
+        call.url !== DEMO_OUTBOX_ENDPOINT ||
+        call.body !== JSON.stringify(outboxDeadWebhook.payload) ||
+        call.signature !== outboxDeadWebhook.signature,
+    ) ||
+    outboxRecoveredFailure.error !== DEMO_OUTBOX_DEAD_LAST_ERROR ||
+    outboxRecoveredPendingAfterFailure.length !== 1 ||
+    outboxRecoveredPendingAfterFailure[0]?.eventId !==
+      DEMO_OUTBOX_RECOVERED_EVENT_ID ||
+    outboxRecoveredPendingAfterFailure[0]?.attempts !== 1 ||
+    outboxRecoveredDelivery.ok !== true ||
+    outboxRecoveredDelivery.status !== 200 ||
+    outboxRecoveredDelivery.attempts !== 1 ||
+    outboxRecoveredCalls.length !== 2 ||
+    outboxRecoveredCalls.some(
+      (call) =>
+        call.url !== DEMO_OUTBOX_ENDPOINT ||
+        call.body !== JSON.stringify(outboxRecoveredWebhook.payload) ||
+        call.signature !== outboxRecoveredWebhook.signature,
+    ) ||
+    outboxPendingFinal.length !== 0 ||
+    outboxDeadFinal.length !== 1 ||
+    outboxDeadFinal[0]?.eventId !== DEMO_OUTBOX_DEAD_EVENT_ID
+  ) {
+    throw new Error(
+      "demo fixture broken: payout webhook outbox segment does not match the pinned shape (dead-letter pair pending 1 at attempts 2 after two 500s then dead-lettered at attempts 3 with the pinned last error, recovered pair pending at attempts 1 after one 500 then cleared by its 200, every captured call a POST carrying the byte-identical signed body)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+    `  ${DEMO_OUTBOX_ENDPOINT} — event ${DEMO_OUTBOX_DEAD_EVENT_ID}: 3 scripted 500s, no retries (maxAttempts 1, backoffMs 0), each recorded in the outbox`,
+    `  after 2 failures: pending 1 (attempts 2), dead letter 0 — still retryable`,
+    `  after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human`,
+    `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+  );
+
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, lines };
 }
 
 async function main(): Promise<void> {

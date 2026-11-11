@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1294 tests, all local
+npm test   # 1296 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1557,8 +1557,21 @@ outbox.deadLetter(); // 3 consecutive failures — needs a human, not another re
 A failed attempt increments the pair's consecutive-failure count
 (capped at `maxAttempts`, while later failures still refresh
 `lastError`/`lastAt`); a success (`ok: true`, or `acknowledge()`)
-clears the pair, so a later failure counts from 1 again. The ledger
-is process-local and records only — it never retries, and its
+clears the pair, so a later failure counts from 1 again.
+
+`npm run demo` closes with an outbox segment: a signed payout
+webhook is delivered to the billing endpoint through a scripted
+fetch that answers 500 three times — each failure recorded in a
+`PayoutWebhookOutbox` on a fixed clock — so after two failures
+the pair is still pending (attempts 2) and after the third it
+dead-letters at the `maxAttempts` cap of 3, with the exact
+`server responded with status 500` delivery error as its
+`lastError`; a second event then fails once and delivers 200, so
+its success clears its own pair and the ledger ends pending 0,
+dead letter 1. The segment records each attempt from the
+delivery result's `ok` branch — this repo's delivery reports a
+failure instead of throwing, so there is no try/catch in the
+loop. The ledger is process-local and records only — it never retries, and its
 snapshot (`exportSnapshot()` / `PayoutWebhookOutbox.restore()`) is
 unsigned trusted configuration in the same posture as
 `PayoutEventDedupe.exportSnapshot()`: persist it where the webhook
@@ -2196,7 +2209,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1294 tests covering the happy path, reject→resubmit
+`npm test` runs 1296 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

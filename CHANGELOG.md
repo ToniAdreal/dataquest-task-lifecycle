@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook outbox closing segment in the demo (2026-11-11,
+  backlog #1042, mirrors escrow #1024): `npm run demo` now ends by
+  delivering a signed payout webhook to the billing endpoint through
+  a scripted fetch that answers 500 three times — each failure
+  recorded in a `PayoutWebhookOutbox` on a fixed clock — so the pair
+  reads pending at attempts 2 after two failures and dead-letters at
+  the `maxAttempts` cap of 3 after the third, with the exact
+  `server responded with status 500` delivery error as its
+  `lastError`; a second event fails once and then delivers 200, so
+  its success clears its own pair and the ledger ends pending 0,
+  dead letter 1. Both webhooks are built fresh from the main task
+  with pinned `eventId`s and `at` instants, and each attempt is
+  recorded from the delivery result's `ok` branch — this repo's
+  delivery reports failures instead of throwing, so the segment uses
+  no try/catch, unlike the sibling escrow demo. Two new demo tests
+  pin the ledger state at each stage and the printed lines
+  byte-identically across two runs; the demo now prints 939 lines.
+
 - Benchmark rows for the three signed-snapshot envelopes (2026-11-11,
   backlog #1041, mirrors escrow #1040): `bench/bench.ts` measures
   `exportSignedSnapshot` / `restoreSignedSnapshot` on

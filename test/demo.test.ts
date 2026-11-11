@@ -19,6 +19,13 @@ import {
   DEMO_JITTER_EVENT_ID,
   DEMO_JITTER_NOW,
   DEMO_JITTER_TASK_ID,
+  DEMO_OUTBOX_DEAD_EVENT_ID,
+  DEMO_OUTBOX_DEAD_LAST_ERROR,
+  DEMO_OUTBOX_ENDPOINT,
+  DEMO_OUTBOX_MAX_ATTEMPTS,
+  DEMO_OUTBOX_NOW,
+  DEMO_OUTBOX_RECOVERED_AT,
+  DEMO_OUTBOX_RECOVERED_EVENT_ID,
   DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
   DEMO_IDEMPOTENCY_HEADER_NOW,
   DEMO_IDEMPOTENCY_HEADER_TASK_ID,
@@ -53,6 +60,7 @@ import { readmeDiagramInSync } from "../src/diagram.js";
 import {
   MAX_NOTE_LENGTH,
   PayoutEventDedupe,
+  PayoutWebhookOutbox,
   SNAPSHOT_VERSION,
   TaskLifecycle,
   actOnStaleTasks,
@@ -1052,11 +1060,17 @@ Stale-task watchdog reminder loop (staleTasks screening + notify-only action —
   DEMO-059: state PAID, entered <timestamp>, dwell 22 days — stale: false (terminal beats the budget)
   staleTasks selection: [DEMO-057] — the fresh task is within budget, the terminal task is excluded despite its dwell
   actOnStaleTasks (action: notify the assignee, dispatch nothing): 1 attempted
-  DEMO-057: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`;
+  DEMO-057: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)
+
+Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):
+  https://billing.example.com/hooks/payout — event evt_demo_outbox_001: 3 scripted 500s, no retries (maxAttempts 1, backoffMs 0), each recorded in the outbox
+  after 2 failures: pending 1 (attempts 2), dead letter 0 — still retryable
+  after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human
+  recovered event evt_demo_outbox_002: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 933);
+  assert.equal(lines.length, 939);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -3755,7 +3769,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 933);
+  assert.equal(out.trimEnd().split("\n").length, 939);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8765,7 +8779,8 @@ test("demo shows the payout webhook X-Event-Id header segment: both deliveries c
     assert.ok(text.includes(line), `missing X-Event-Id line: ${line}`);
   }
   // The jitter backoff segment follows this one, and the
-  // watchdog reminder loop closes the demo after it, so the
+  // watchdog reminder loop follows after it (the payout
+  // webhook outbox segment now closes the demo), so the
   // X-Event-Id body-check line is no longer the last line —
   // it must be followed by the jitter segment.
   assert.ok(
@@ -9042,9 +9057,11 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
   ]) {
     assert.ok(text.includes(line), `missing jitter backoff line: ${line}`);
   }
-  // The watchdog reminder loop now closes the demo, so the
-  // jitter body-check line is no longer the last line —
-  // it must be followed by the reminder segment.
+  // The watchdog reminder loop follows the jitter segment
+  // (and the payout webhook outbox segment closes the demo
+  // after it), so the jitter body-check line is no longer
+  // the last line — it must be followed by the reminder
+  // segment.
   assert.ok(
     text.indexOf(
       "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
@@ -9217,9 +9234,11 @@ test("demo shows the stale-task watchdog reminder loop in-process: only the idle
     ["OPEN", "OPEN", "PAID"],
   );
 
-  // The segment follows the jitter backoff segment and closes
-  // the demo; its printed lines are pinned literals (every
-  // timestamp is a fixed literal, so no normalization needed).
+  // The segment follows the jitter backoff segment and is
+  // followed by the payout webhook outbox segment, which now
+  // closes the demo; its printed lines are pinned literals
+  // (every timestamp is a fixed literal, so no normalization
+  // needed).
   const header =
     "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):";
   const headerAt = text.indexOf(header);
@@ -9241,9 +9260,17 @@ test("demo shows the stale-task watchdog reminder loop in-process: only the idle
   ]) {
     assert.ok(text.includes(line), `missing reminder loop line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+  // The reminder result line is no longer the demo's last
+  // line — the payout webhook outbox segment follows it and
+  // closes the demo.
+  assert.ok(
+    text.indexOf(
+      "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+    ) >
+      text.indexOf(
+        `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+      ),
+    "payout webhook outbox segment must follow the watchdog reminder loop",
   );
 });
 
@@ -9253,6 +9280,13 @@ test("demo watchdog reminder loop segment is deterministic: two runs print byte-
       ls.indexOf(
         "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
       ),
+      // The slice ends before the blank line that opens the
+      // payout webhook outbox segment (which now closes the
+      // demo); without the end bound the segment would swallow
+      // the outbox lines.
+      ls.indexOf(
+        "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -9277,6 +9311,160 @@ test("demo watchdog reminder loop segment is deterministic: two runs print byte-
   assert.deepEqual(
     a.watchdogReminderTasks.map((t) => t.history.length),
     b.watchdogReminderTasks.map((t) => t.history.length),
+  );
+});
+
+test("demo shows the payout webhook outbox segment in-process: three 500s dead-letter, one failure then 200 clears its own pair", async () => {
+  const {
+    outbox,
+    outboxPendingAfterTwo,
+    outboxDeadAfterTwo,
+    outboxPendingAfterThree,
+    outboxDeadAfterThree,
+    outboxDeadWebhook,
+    outboxRecoveredWebhook,
+    outboxRecoveredDelivery,
+    outboxDeadFetchCalls,
+    outboxRecoveredFetchCalls,
+    outboxPendingFinal,
+    outboxDeadFinal,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  const outboxNowMs = Date.parse(DEMO_OUTBOX_NOW);
+
+  // The dead-letter pair: pending at attempts 2 after two
+  // failures, dead-lettered at attempts 3 after the third —
+  // the boundary is the outbox's own `maxAttempts`.
+  assert.equal(outboxPendingAfterTwo.length, 1);
+  assert.deepEqual(outboxPendingAfterTwo[0], {
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+    attempts: 2,
+    lastError: DEMO_OUTBOX_DEAD_LAST_ERROR,
+    lastAt: outboxNowMs,
+  });
+  assert.deepEqual(outboxDeadAfterTwo, []);
+  assert.deepEqual(outboxPendingAfterThree, []);
+  assert.equal(outboxDeadAfterThree.length, 1);
+  assert.deepEqual(outboxDeadAfterThree[0], {
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+    attempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+    lastError: DEMO_OUTBOX_DEAD_LAST_ERROR,
+    lastAt: outboxNowMs,
+  });
+  // Both webhooks are built from the main task with pinned
+  // eventIds and `at` instants, so the dead one is a fixed
+  // signed payload — and its signature verifies under the
+  // demo secret, exactly as a receiver would check it.
+  assert.equal(outboxDeadWebhook.payload.eventId, DEMO_OUTBOX_DEAD_EVENT_ID);
+  assert.equal(outboxDeadWebhook.payload.at, DEMO_OUTBOX_NOW);
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(outboxDeadWebhook.payload),
+      outboxDeadWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    true,
+  );
+  assert.equal(
+    outboxRecoveredWebhook.payload.eventId,
+    DEMO_OUTBOX_RECOVERED_EVENT_ID,
+  );
+  assert.equal(outboxRecoveredWebhook.payload.at, DEMO_OUTBOX_RECOVERED_AT);
+  // The recovered pair: one failure, then a 200 whose success
+  // record clears it — the ledger ends pending 0, dead letter 1.
+  assert.deepEqual(outboxRecoveredDelivery, {
+    ok: true,
+    attempts: 1,
+    status: 200,
+  });
+  assert.equal(outboxDeadFetchCalls, DEMO_OUTBOX_MAX_ATTEMPTS);
+  assert.equal(outboxRecoveredFetchCalls, 2);
+  assert.deepEqual(outboxPendingFinal, []);
+  assert.equal(outboxDeadFinal.length, 1);
+  assert.equal(outboxDeadFinal[0]?.eventId, DEMO_OUTBOX_DEAD_EVENT_ID);
+  assert.equal(outboxDeadFinal[0]?.attempts, DEMO_OUTBOX_MAX_ATTEMPTS);
+
+  // Independent cross-check: a fresh outbox fed the same three
+  // failures through the library entry points directly must
+  // dead-letter the identical entry — the segment is not
+  // self-certifying.
+  const independent = new PayoutWebhookOutbox({
+    maxAttempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+    now: () => outboxNowMs,
+  });
+  for (let i = 0; i < DEMO_OUTBOX_MAX_ATTEMPTS; i += 1) {
+    independent.recordAttempt({
+      endpoint: DEMO_OUTBOX_ENDPOINT,
+      eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+      ok: false,
+      status: 500,
+      error: DEMO_OUTBOX_DEAD_LAST_ERROR,
+      at: outboxNowMs,
+    });
+  }
+  assert.deepEqual(independent.deadLetter(), outboxDeadAfterThree);
+  assert.deepEqual(independent.pending(), []);
+
+  // The segment follows the watchdog reminder loop and closes
+  // the demo; its printed lines are pinned literals (every
+  // value is a fixed endpoint, eventId, or count, so no
+  // normalization is needed).
+  const header =
+    "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):";
+  const headerAt = text.indexOf(header);
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        `  ${DEMO_REMINDER_STALE_TASK_ID}: acted true — notified, task unchanged at OPEN (no EXPIRE dispatched: stale is not overdue, and the state machine has no REMIND event — the reminder is an out-of-band notification, and the disposition is the caller's choice)`,
+      ),
+    "payout webhook outbox segment must follow the watchdog reminder loop",
+  );
+  for (const line of [
+    `  ${DEMO_OUTBOX_ENDPOINT} — event ${DEMO_OUTBOX_DEAD_EVENT_ID}: 3 scripted 500s, no retries (maxAttempts 1, backoffMs 0), each recorded in the outbox`,
+    `  after 2 failures: pending 1 (attempts 2), dead letter 0 — still retryable`,
+    `  after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human`,
+    `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+  ]) {
+    assert.ok(text.includes(line), `missing outbox line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+  );
+});
+
+test("demo payout webhook outbox segment is deterministic: two runs print byte-identical outbox lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + endpoint + after-2 + after-3 + recovered lines;
+  // every value is a pinned literal, so no normalization is
+  // needed.
+  assert.equal(segA.length, 5);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.outboxPendingAfterTwo, b.outboxPendingAfterTwo);
+  assert.deepEqual(a.outboxDeadAfterThree, b.outboxDeadAfterThree);
+  assert.deepEqual(a.outboxPendingFinal, b.outboxPendingFinal);
+  assert.deepEqual(a.outboxDeadFinal, b.outboxDeadFinal);
+  assert.deepEqual(a.outboxRecoveredDelivery, b.outboxRecoveredDelivery);
+  assert.equal(a.outboxDeadFetchCalls, b.outboxDeadFetchCalls);
+  assert.equal(a.outboxRecoveredFetchCalls, b.outboxRecoveredFetchCalls);
+  assert.equal(
+    a.outboxDeadWebhook.signature,
+    b.outboxDeadWebhook.signature,
+  );
+  assert.equal(
+    a.outboxRecoveredWebhook.signature,
+    b.outboxRecoveredWebhook.signature,
   );
 });
 
@@ -9450,7 +9638,8 @@ test("demo payout-aging segment is deterministic: two runs print byte-identical 
         "Payout aging (payoutAging buckets unreconciled PAID tasks by days since PAYOUT_COMPLETE, so finance chases the oldest first):",
       ),
       // The slice ends before the blank line that opens the
-      // watchdog reminder loop (which closes the demo).
+      // watchdog reminder loop (which the payout webhook
+      // outbox segment now follows).
       ls.indexOf(
         "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
       ) - 1,
