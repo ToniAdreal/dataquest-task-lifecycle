@@ -83,6 +83,7 @@ export type {
   AuditSecret,
   DispatchOptions,
   ExpireOverdueResult,
+  ExpireOverdueTasksOptions,
   LedgerPayout,
   ListenerErrorContext,
   NextSlaDeadline,

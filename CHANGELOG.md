@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in `dryRun` rehearsal for the SLA watchdog executor
+  (2026-11-11, backlog #1051, mirrors escrow #1050):
+  `expireOverdueTasks(tasks, now, at, { dryRun: true })` screens the
+  same overdue set in the same order but dispatches nothing — no
+  state change, no history append, no subscription notification —
+  and each result carries `wouldExpire` (true exactly when the live
+  run would have expired that task) and, when false, the same-wording
+  `error` the live run would have reported (no `EXPIRE` edge, a
+  backdated `at` pin, or a `rolePolicy` that does not admit
+  `system`); `expired` is false throughout and `entry` is never
+  present. The prediction replays the live dispatch's checks in
+  order (clock, transition table, RBAC) without dispatching.
+  Unlike escrow, which pins the screening `now` as its audit
+  timestamp, this executor's `now` only screens: the clock check
+  reads the `at` pin when given, and is skipped without a pin
+  because dispatch stamps the wall clock unchecked in that case
+  (its non-decreasing-timestamp check only covers an explicitly
+  provided `at`). Illegal options throw
+  `invalid expireOverdueTasks options: …` fail-fast. 13 tests in
+  `test/expireOverdueDryRun.test.ts`.
+
 - `tasksByFilters` overdue axis (2026-11-11, backlog #1049, mirrors
   escrow #1048): `TasksByFiltersOptions.overdue` (`true` keeps only
   past-deadline non-terminal tasks, `false` keeps the complement,

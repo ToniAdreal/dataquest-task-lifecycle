@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1335 tests, all local
+npm test   # 1348 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -616,6 +616,22 @@ dispatch's non-decreasing-timestamp check and lands as a per-task
 (a non-Date/non-string value, an invalid Date, a non-canonical
 string) throws `invalid at: …` before any task is screened or
 dispatched, so a bad pin can never half-stamp a batch.
+
+For rehearsing a batch before expiring it for real, pass
+`{ dryRun: true }` as a fourth argument:
+`expireOverdueTasks(tasks, now, at, { dryRun: true })`. The executor
+screens the same set in the same order but dispatches nothing — no
+state change, no history append, no subscription notification — and
+each result carries `wouldExpire` (true exactly when the live run
+would have expired that task) and, when false, the same-wording
+`error` the live run would have reported (no `EXPIRE` edge, a
+backdated `at` pin, or a `rolePolicy` that does not admit `system`);
+`expired` is false throughout and `entry` is never present. The
+clock check reads the `at` pin when given; without a pin the live
+dispatch stamps the wall clock unchecked, so the prediction does the
+same. Illegal options throw
+`invalid expireOverdueTasks options: …` fail-fast, before any
+screening.
 
 Every successful EXPIRE dispatch is signed with the `system` actor —
 the same attribution `actOnStaleTasks` uses for its default ABANDON
@@ -2235,7 +2251,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1335 tests covering the happy path, reject→resubmit
+`npm test` runs 1348 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

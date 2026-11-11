@@ -669,6 +669,17 @@ export interface ExpireOverdueResult {
    * true; failed dispatches leave this absent.
    */
   entry?: TaskHistoryEntry;
+  /**
+   * Dry-run only (`expireOverdueTasks(..., { dryRun: true })`):
+   * whether the live run would expire this task — true exactly when
+   * the task is in the screened set, an `EXPIRE` edge is legal from
+   * its current state, the effective audit timestamp is not earlier
+   * than its last history entry, and the `system` actor passes its
+   * `rolePolicy` (when the policy lists `EXPIRE`). Present only on
+   * dry-run results; the live run reports the actual outcome via
+   * `expired` instead, and leaves this absent.
+   */
+  wouldExpire?: boolean;
 }
 
 /**
@@ -699,6 +710,98 @@ function resolveWatchdogAt(at: Date | string | undefined): string | undefined {
       typeof at === "string" ? JSON.stringify(at) : String(at)
     }`,
   );
+}
+
+/**
+ * Options for {@link expireOverdueTasks}.
+ */
+export interface ExpireOverdueTasksOptions {
+  /**
+   * Dry run: predict instead of expiring. When true, the executor
+   * dispatches nothing — no state change, no history append, no
+   * subscription notification — and returns the same per-task
+   * results the live run would have attempted, each carrying
+   * `wouldExpire` (and, when false, the same-wording `error` the
+   * live run would have reported). `expired` is false throughout a
+   * dry run and `entry` is never present. Illegal values fail fast
+   * (`opts` must be an object, `dryRun` must be a boolean).
+   */
+  dryRun?: boolean;
+}
+
+/**
+ * Dry-run prediction for one screened task: replay, in the same
+ * order, the checks the live `dispatch("EXPIRE", { actor: "system",
+ * at: <auditAt> })` would run — without dispatching anything, so
+ * the task is untouched and no listener is notified:
+ *
+ * (1) when the caller pinned `at`, the pin must not move the audit
+ * clock backwards (same check dispatch runs first, same wording);
+ * without a pin dispatch stamps the wall clock UNCHECKED — its
+ * non-decreasing-timestamp check only covers an explicitly provided
+ * `at` — so the prediction likewise skips the clock check and a
+ * task whose last entry sits in the future still predicts expiry;
+ * (2) edge legality, read off the transition table via
+ * `transition()` (its throw carries the exact message the live run
+ * would report); (3) RBAC, read off the task's snapshot policy —
+ * the live run dispatches as the `system` actor, so a policy that
+ * lists `EXPIRE` must include it. The `requireActor` gate needs no
+ * prediction: the live run always passes an actor (`system`), and
+ * `EXPIRE` carries no amount, so the money/cap checks never apply
+ * to it.
+ *
+ * `auditAt` is the `at` pin when the caller passed one, else
+ * `undefined` (no clock check — see (1)). The screening `now` is
+ * deliberately NOT consulted here — it only selects the batch, it
+ * never enters the audit trail — so a dry run can never disagree
+ * with the live run about the same call: a backdated screening
+ * `now` with a valid `at` pin still predicts expiry, exactly as the
+ * live run would expire it.
+ */
+function predictExpireOverdueTask(
+  task: TaskLifecycle,
+  auditAt: string | undefined,
+): ExpireOverdueResult {
+  // (1) Backward clock, only when the caller pinned `at`: dispatch
+  // validates an explicitly provided `at` against the last history
+  // entry, and stamps the wall clock unchecked when none is given.
+  const history = task.history;
+  const last = history[history.length - 1];
+  if (
+    auditAt !== undefined &&
+    last !== undefined &&
+    Date.parse(auditAt) < Date.parse(last.at)
+  ) {
+    return {
+      task,
+      expired: false,
+      wouldExpire: false,
+      error: `invalid dispatch options: at ${auditAt} is earlier than the previous entry's at ${last.at}`,
+    };
+  }
+  // (2) Edge legality from the transition table, no dispatch.
+  try {
+    transition(task.state, "EXPIRE");
+  } catch (err) {
+    return {
+      task,
+      expired: false,
+      wouldExpire: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  // (3) RBAC: the live run dispatches as `system`; toJSON writes the
+  // policy only when non-empty, so an absent policy means unrestricted.
+  const allowedRoles = task.toJSON().rolePolicy?.["EXPIRE"];
+  if (allowedRoles !== undefined && !allowedRoles.includes("system")) {
+    return {
+      task,
+      expired: false,
+      wouldExpire: false,
+      error: `actor not authorized for EXPIRE: "system" is not in [${allowedRoles.join(", ")}]`,
+    };
+  }
+  return { task, expired: false, wouldExpire: true };
 }
 
 /**
@@ -745,16 +848,58 @@ function resolveWatchdogAt(at: Date | string | undefined): string | undefined {
  * append-only history. Only overdue (non-terminal, past deadline) tasks
  * are attempted; the result has one entry per attempted task, in batch
  * order. The `now` default is the real clock, so unit tests pin it.
+ *
+ * Dry run (`opts.dryRun: true`): the safe rehearsal port for an
+ * operator about to expire a batch — the executor screens the same
+ * set, in the same order, but dispatches nothing: no state change, no
+ * history append, no subscription notification. Each result carries
+ * `wouldExpire` (true exactly when the live run would have expired
+ * that task) and, when false, the same-wording `error` the live run
+ * would have reported (no `EXPIRE` edge, a backdated audit timestamp,
+ * or a `rolePolicy` that does not admit `system`); `expired` is false
+ * throughout and `entry` is never present. The prediction replays the
+ * live dispatch's checks off the transition table and the task's own
+ * history and snapshot policy — it never dispatches, so a dry run
+ * leaves no residue and the same batch can immediately be expired
+ * for real. Note the clock check reads the `at` pin when given;
+ * without a pin, dispatch stamps the wall clock without a
+ * backward-clock check (it only validates an explicitly provided
+ * `at`), so the prediction does the same — unlike the sibling
+ * escrow executor, which pins `now` as the audit timestamp, this
+ * executor's `now` only screens. Illegal `opts` throw fail-fast,
+ * before any screening.
  */
 export function expireOverdueTasks(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
   at?: Date | string,
+  opts?: ExpireOverdueTasksOptions,
 ): ExpireOverdueResult[] {
+  // Fail fast on illegal opts before screening or dispatching
+  // anything: a malformed option must never half-run a batch.
+  if (opts !== undefined) {
+    if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+      throw new Error(
+        "invalid expireOverdueTasks options: opts must be an object",
+      );
+    }
+    if (opts.dryRun !== undefined && typeof opts.dryRun !== "boolean") {
+      throw new Error(
+        `invalid expireOverdueTasks options: dryRun must be a boolean, got ${JSON.stringify(opts.dryRun)}`,
+      );
+    }
+  }
   // Fail fast on a bad `at` before screening or dispatching anything:
   // a malformed pin must never half-stamp a batch.
   const atIso = resolveWatchdogAt(at);
-  return expiredTasks(tasks, now).map((task) => {
+  const screened = expiredTasks(tasks, now);
+  if (opts?.dryRun === true) {
+    // Predict against the `at` pin when given; without a pin the
+    // live dispatch stamps the wall clock unchecked, so the
+    // prediction receives no audit timestamp to check.
+    return screened.map((task) => predictExpireOverdueTask(task, atIso));
+  }
+  return screened.map((task) => {
     try {
       // Attributed to the `system` actor, like actOnStaleTasks' default
       // action: watchdog-driven expiry must stay distinguishable from a
