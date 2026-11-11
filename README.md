@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1304 tests, all local
+npm test   # 1315 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -949,7 +949,13 @@ task with `new TaskLifecycle(id, { requirePayoutRef: true })` makes a
 checks, before anything is appended — a rejected dispatch leaves no
 trace). The switch is task configuration, not audit data: it is never
 written into the `toJSON()` snapshot, so a restored task re-enables it
-via `fromHistory(id, history, { requirePayoutRef: true })`. For the other
+via `fromHistory(id, history, { requirePayoutRef: true })`. The settled
+amount has the same opt-in: `new TaskLifecycle(id, { requirePayoutAmount: true })`
+makes a `PAYOUT_COMPLETE` dispatch without a `payoutAmount` throw
+`payout amount required: …`; a present amount still goes through the
+usual validation (finite, non-negative, at most 2 decimal places), and
+0 is a legal amount. Same in-memory-only semantics, re-enabled via
+`fromHistory(id, history, { requirePayoutAmount: true })`. For the other
 half of the loop, the
 `unreconciledPayouts()` reconciliation helper flags `PAID` tasks whose
 `PAYOUT_COMPLETE` entry lacks one:
@@ -2215,7 +2221,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1304 tests covering the happy path, reject→resubmit
+`npm test` runs 1315 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2266,7 +2272,9 @@ preservation, malformed-ref snapshot rejection, the no-ref
 PAYOUT_COMPLETE advisory path, and the `requirePayoutRef` opt-in
 enforcement: gate-on-PAYOUT_COMPLETE-only, non-boolean rejection at
 construction, failed-dispatch key non-consumption, in-memory-only
-switch semantics with `fromHistory` re-attachment), and settlement reconciliation screening
+switch semantics with `fromHistory` re-attachment), and the
+`requirePayoutAmount` opt-in enforcement (same gate shape, plus a
+0-amount pass and invalid-amount shape errors ahead of the gate), and settlement reconciliation screening
 (`unreconciledPayouts`: mixed PAID batches, request-only refs not
 reconciling, empty-input and purity, snapshot-rehydrated tasks), and
 dispatch idempotency keys (duplicate no-op without transition validation,

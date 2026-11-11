@@ -11,6 +11,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Opt-in `requirePayoutAmount` gate for `PAYOUT_COMPLETE`
+  (2026-11-11, backlog #1045, mirrors `requirePayoutRef`):
+  constructing a task with `new TaskLifecycle(id,
+  { requirePayoutAmount: true })` makes a `PAYOUT_COMPLETE` dispatch
+  without a `payoutAmount` throw `payout amount required: …` and
+  append nothing — the up-front counterpart to the advisory default
+  and the `unreconciledPayouts()` post-hoc check. The gate only
+  checks presence: a present amount still goes through the usual
+  dispatch validation (finite, non-negative, at most 2 decimal
+  places), so `NaN`/negative/sub-cent amounts are rejected with the
+  same `invalid dispatch options: …` error whether the switch is on
+  or off, and 0 is a legal amount. Like `requirePayoutRef`, the
+  switch is task configuration, not audit data — it is never written
+  into the `toJSON()` snapshot and is re-enabled via
+  `fromHistory(id, history, { requirePayoutAmount: true })` — and a
+  rejected dispatch consumes no idempotency key and leaves no seq
+  gap. Eleven new tests pin the gate, the 0-amount pass, the
+  shape-error-before-gate ordering, the default advisory path, the
+  PAYOUT_COMPLETE-only scope, non-boolean construction rejection,
+  key non-consumption, snapshot exclusion, and both rehydration
+  paths.
+
 - Payout webhook outbox `lastError` length cap (2026-11-11,
   backlog #1044, mirrors escrow #1043): `MAX_OUTBOX_ERROR_LENGTH`
   (1024) and `truncateOutboxError` are exported from

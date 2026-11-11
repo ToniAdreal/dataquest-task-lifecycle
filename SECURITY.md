@@ -72,7 +72,11 @@ webhook signatures (`src/settlementWebhook.ts`).
   — a missing reference is unevidenced, not a build failure. The opt-in
   `requirePayoutRef: true` constructor flag tightens this for callers
   who want it: a `PAYOUT_COMPLETE` dispatch without a `payoutRef` then
-  throws. `quotedAmount` has the same advisory status on the quote side.
+  throws. The same opt-in exists for the amount:
+  `requirePayoutAmount: true` makes a `PAYOUT_COMPLETE` dispatch
+  without a `payoutAmount` throw (a present amount is still validated
+  as finite, non-negative, and at most 2 decimal places; 0 is legal).
+  `quotedAmount` has the same advisory status on the quote side.
 
 ### Enforced by the library (verifiable in `src/`)
 

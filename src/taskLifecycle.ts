@@ -2010,6 +2010,23 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * it via `fromHistory(id, history, { requirePayoutRef: true })`. Invalid
  * values throw `invalid option: …` at construction.
  *
+ * `requirePayoutAmount` is an optional boolean (default `false`): when
+ * `true`, `dispatch("PAYOUT_COMPLETE")` without a `payoutAmount` throws
+ * `payout amount required: …` and appends nothing. This is the
+ * opt-in up-front counterpart to the advisory default and the
+ * `unreconciledPayouts()` post-hoc reconciliation helper — for payout
+ * flows where a settled amount is always known. The gate only checks
+ * presence: a present amount still goes through the usual dispatch
+ * validation (finite, non-negative, at most 2 decimal places), so
+ * `NaN`/negative/sub-cent amounts are rejected with the same
+ * `invalid dispatch options: …` error whether the switch is on or off,
+ * and `0` is a legal amount (a zero-value settlement is still a
+ * settlement). The switch is task configuration, not audit data: it is
+ * never written into the `toJSON()` snapshot envelope, so a rehydrated
+ * task must re-enable it via
+ * `fromHistory(id, history, { requirePayoutAmount: true })`. Invalid
+ * values throw `invalid option: …` at construction.
+ *
  * `requireActor` is an optional boolean (default `false`): when `true`,
  * every `dispatch()` without an `actor` throws
  * `actor required: …` and appends nothing. This is the opt-in up-front
@@ -2052,6 +2069,7 @@ export interface TaskLifecycleOptions {
   maxVisitsByState?: Partial<Record<TaskState, number>>;
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
+  requirePayoutAmount?: boolean;
   requireActor?: boolean;
   idempotencyKeys?: string[];
   auditSecret?: AuditSecret;
@@ -2091,6 +2109,7 @@ const TASK_OPTION_FIELDS = new Set([
   "maxVisitsByState",
   "rolePolicy",
   "requirePayoutRef",
+  "requirePayoutAmount",
   "requireActor",
   "idempotencyKeys",
   "auditSecret",
@@ -2102,6 +2121,16 @@ function assertRequirePayoutRef(value: unknown, tag: string): boolean {
   if (typeof value !== "boolean") {
     throw new Error(
       `${tag}: requirePayoutRef must be a boolean, got ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+function assertRequirePayoutAmount(value: unknown, tag: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${tag}: requirePayoutAmount must be a boolean, got ${String(value)}`,
     );
   }
   return value;
@@ -3551,6 +3580,12 @@ export class TaskLifecycle {
    */
   private _requirePayoutRef: boolean;
   /**
+   * Up-front enforcement for PAYOUT_COMPLETE evidence. Task configuration:
+   * never written into the JSON snapshot (see toJSON), so a rehydrated
+   * task re-enables it via fromHistory(id, history, { requirePayoutAmount }).
+   */
+  private _requirePayoutAmount: boolean;
+  /**
    * Up-front enforcement for audit attribution. Task configuration:
    * never written into the JSON snapshot (see toJSON), so a rehydrated
    * task re-enables it via fromHistory(id, history, { requireActor }).
@@ -3594,6 +3629,10 @@ export class TaskLifecycle {
     this._rolePolicy = assertRolePolicy(opts?.rolePolicy, "invalid option");
     this._requirePayoutRef = assertRequirePayoutRef(
       opts?.requirePayoutRef,
+      "invalid option",
+    );
+    this._requirePayoutAmount = assertRequirePayoutAmount(
+      opts?.requirePayoutAmount,
       "invalid option",
     );
     this._requireActor = assertRequireActor(
@@ -4067,6 +4106,24 @@ export class TaskLifecycle {
         "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled",
       );
     }
+    if (
+      event === "PAYOUT_COMPLETE" &&
+      this._requirePayoutAmount &&
+      opts?.payoutAmount === undefined
+    ) {
+      // Same shape as the requirePayoutRef gate directly above: opt-in
+      // configuration, advisory default stays legal, and requiring the
+      // amount cannot prove the external payment happened — it only
+      // guarantees the audit trail records how much settled. Only
+      // presence is checked here: a present amount already passed the
+      // dispatch shape validation (finite, non-negative, at most 2
+      // decimal places), so NaN/negative/sub-cent amounts never reach
+      // this gate. Checked before the idempotency key is consumed, so a
+      // rejected dispatch consumes nothing.
+      throw new Error(
+        "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled",
+      );
+    }
     // All checks passed: consume the idempotency key exactly once, with the
     // successful append. Keys are never recorded for failed dispatches,
     // so retrying a bad call with the same key stays possible.
@@ -4254,6 +4311,11 @@ export class TaskLifecycle {
    * task re-enables up-front payout-reference enforcement via
    * `fromHistory(id, history, { requirePayoutRef: true })`; until then
    * `PAYOUT_COMPLETE` without a `payoutRef` is legal again.
+   *
+   * `requirePayoutAmount` is likewise NOT included, for the same reason:
+   * a rehydrated task re-enables up-front payout-amount enforcement via
+   * `fromHistory(id, history, { requirePayoutAmount: true })`; until then
+   * `PAYOUT_COMPLETE` without a `payoutAmount` is legal again.
    *
    * `requireActor` is likewise NOT included, for the same reason: a
    * rehydrated task re-enables up-front actor-required enforcement via
@@ -4490,6 +4552,10 @@ export class TaskLifecycle {
    * rehydrated task is unrestricted (policy is caller configuration, not
    * audit data, so the log cannot restore it on its own).
    * `opts.requirePayoutRef` re-attaches up-front payout-reference
+   * enforcement the same way; omit it and the rehydrated task falls back
+   * to the advisory default (the switch is not part of the audit log, so
+   * it cannot be restored on its own).
+   * `opts.requirePayoutAmount` re-attaches up-front payout-amount
    * enforcement the same way; omit it and the rehydrated task falls back
    * to the advisory default (the switch is not part of the audit log, so
    * it cannot be restored on its own).
