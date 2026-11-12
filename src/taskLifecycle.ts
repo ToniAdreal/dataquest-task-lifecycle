@@ -1107,6 +1107,20 @@ export interface StaleActionResult {
   /** Set when the action threw; the message of the caught error. */
   error?: string;
   /**
+   * Dry-run only (`actOnStaleTasks(..., { dryRun: true })`):
+   * whether the live run would attempt this task — true exactly
+   * when the task is in the `staleTasks()` selection. The executor
+   * cannot predict whether the action would succeed (the default
+   * ABANDON dispatch is illegal from SUBMITTED, IN_REVIEW and
+   * OPEN, and an arbitrary caller-supplied action can throw for
+   * its own reasons), so `wouldAct` answers only "selected",
+   * never "would succeed" — unlike `expireOverdueTasks`, whose
+   * fixed EXPIRE action lets the dry run predict the outcome.
+   * Present only on dry-run results; the live run reports the
+   * actual outcome via `acted` instead, and leaves this absent.
+   */
+  wouldAct?: boolean;
+  /**
    * The audit entry the successful action appended — a frozen,
    * detached copy of the task's last history entry, so a stale-patrol
    * report can cite it (task id, from/to state, timestamp) without
@@ -1165,21 +1179,64 @@ export interface StaleActionResult {
  * entry trips dispatch's non-decreasing-timestamp check and lands
  * as a per-task `{ acted: false, error }` — the batch continues.
  * An invalid `at` throws `invalid at: …` before any action runs.
+ *
+ * Dry run (`opts.dryRun: true`): the safe rehearsal port for an
+ * operator about to run a stale-task sweep — the executor screens
+ * the same set, in the same order, but calls nothing: no state
+ * change, no history append, no subscription notification. Each
+ * result carries `wouldAct: true` (the task is in the stale
+ * selection) with `acted: false` and no `error`/`entry`; an action
+ * that would have thrown is never invoked, so a dry run never
+ * throws for an action's sake. The same batch can immediately be
+ * acted on for real. `at` is still validated fail-fast in a dry
+ * run, so a bad pin is never silently accepted. Illegal `opts`
+ * throw fail-fast, before any screening or action. This mirrors
+ * the sibling escrow `actOnStaleEscrows` dry-run port (backlog
+ * #1083) — same trailing `opts`, same `wouldAct` semantics, so a
+ * caller rehearsing a sweep across both repos reads one contract.
  */
+export interface ActOnStaleTasksOptions {
+  /**
+   * Dry run: predict instead of acting. When true, the executor
+   * selects the same stale tasks but calls the action for none
+   * of them, and returns one `{ task, acted: false, wouldAct:
+   * true }` result per selected task. `acted` is false
+   * throughout a dry run and `error`/`entry` are never present.
+   * Illegal values fail fast (`opts` must be an object, `dryRun`
+   * must be a boolean).
+   */
+  dryRun?: boolean;
+}
+
 export function actOnStaleTasks(
   tasks: readonly TaskLifecycle[],
   action: StaleTaskAction | undefined,
   maxAgeByState: Partial<Record<TaskState, number>>,
   now: Date = new Date(),
   at?: Date | string,
+  opts?: ActOnStaleTasksOptions,
 ): StaleActionResult[] {
+  if (opts !== undefined) {
+    if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+      throw new Error(
+        "invalid actOnStaleTasks options: opts must be an object",
+      );
+    }
+    if (opts.dryRun !== undefined && typeof opts.dryRun !== "boolean") {
+      throw new Error(
+        `invalid actOnStaleTasks options: dryRun must be a boolean, got ${JSON.stringify(opts.dryRun)}`,
+      );
+    }
+  }
   if (action !== undefined && typeof action !== "function") {
     throw new Error("invalid action: expected a function (task) => void");
   }
   // Fail fast on a bad `at` before screening or acting on anything:
   // a malformed pin must never half-stamp a batch. A custom action
   // manages its own timestamps, so `at` only stamps the default
-  // ABANDON dispatch below.
+  // ABANDON dispatch below. The pin is validated in a dry run too:
+  // the dry run screens the same batch, so a bad pin is rejected
+  // before any result is produced.
   const atIso = resolveWatchdogAt(at);
   const run: StaleTaskAction =
     action ??
@@ -1190,7 +1247,11 @@ export function actOnStaleTasks(
       }));
   // staleTasks() validates maxAgeByState and now fail-fast, before any
   // action runs.
-  return staleTasks(tasks, maxAgeByState, now).map((task) => {
+  const selected = staleTasks(tasks, maxAgeByState, now);
+  if (opts?.dryRun === true) {
+    return selected.map((task) => ({ task, acted: false, wouldAct: true }));
+  }
+  return selected.map((task) => {
     // History is append-only, so growth across the action is exactly
     // "the action appended an audit entry". The history getter returns
     // frozen detached copies, so the last entry is already the

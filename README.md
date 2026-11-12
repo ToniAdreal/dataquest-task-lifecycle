@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1482 tests, all local
+npm test   # 1497 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -706,6 +706,22 @@ const outcomes = actOnStaleTasks(tasks, undefined, budgets);
 // or a custom action, e.g. notify-only paging that never transitions:
 // const outcomes = actOnStaleTasks(tasks, (t) => pageOnCall(t.id), budgets);
 ```
+
+For rehearsing a sweep before acting on it for real, pass
+`{ dryRun: true }` as a sixth argument:
+`actOnStaleTasks(tasks, undefined, budgets, now, at, { dryRun: true })`.
+The executor screens the same stale set, in the same order, but calls
+the action for none of them — no state change, no history append, no
+subscription notification — and returns `{ task, acted: false,
+wouldAct: true }` per selected task. `wouldAct` answers only
+"selected", never "would succeed": the default ABANDON dispatch is
+illegal from SUBMITTED, IN_REVIEW and OPEN, and a custom action can
+throw for its own reasons, so a dry run never predicts the outcome
+of an action it did not run. The same batch can immediately be acted
+on for real. `at` is still validated fail-fast in a dry run, and
+illegal options throw `invalid actOnStaleTasks options: …` before any
+screening. This mirrors the sibling escrow `actOnStaleEscrows`
+dry-run port — same trailing `opts`, same `wouldAct` semantics.
 
 Why the executor exists instead of a hand-written loop: `ABANDON` is
 **not** a legal event from every non-terminal state — the transition
@@ -2400,7 +2416,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1482 tests covering the happy path, reject→resubmit
+`npm test` runs 1497 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2442,6 +2458,9 @@ mixed-batch per-task outcomes with the default ABANDON action,
 unactionable stale tasks never blocking the batch, failed tasks
 untouched, custom notify-only and throwing actions isolated per task,
 fail-fast validation of the budget/`now`/action before any action runs,
+dry-run rehearsal (`{ dryRun: true }`: same stale set, zero action
+calls, `wouldAct` answering "selected" only, illegal options and a
+bad `at` pin failing fast, zero subscription notifications),
 injectable `now`, auditable `actor: "system"` dispatch with an intact
 hash chain), and per-edge agreement between the rendered
 diagram and `transition()`. Settlement payout references are covered too

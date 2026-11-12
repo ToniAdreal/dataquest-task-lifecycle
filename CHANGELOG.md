@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Dry-run rehearsal port for `actOnStaleTasks` (2026-11-12, backlog
+  #1086, the sibling escrow `actOnStaleEscrows` dry-run port from
+  #1083 mirrored for the dataquest watchdog executor): a trailing
+  `opts?: ActOnStaleTasksOptions` with `dryRun?: boolean`. With
+  `{ dryRun: true }` the executor screens the same stale set, in
+  the same order, but calls the action for none of them — no state
+  change, no history append, no subscription notification — and
+  returns one `{ task, acted: false, wouldAct: true }` result per
+  selected task. `wouldAct` answers only "in the stale selection",
+  never "would succeed": the default ABANDON dispatch is illegal
+  from SUBMITTED, IN_REVIEW and OPEN, and a custom action can
+  throw for its own reasons. `StaleActionResult` gains the
+  optional `wouldAct` field (dry-run results only; the live run
+  leaves it absent, and a dry run never carries `error` or
+  `entry`). Illegal `opts` (non-object, non-boolean `dryRun`) and
+  a bad `at` pin fail fast before any screening, exactly like the
+  live run's other fail-fast checks. 15 tests in
+  `test/actOnStaleDryRun.test.ts`.
+
 - Task settlements summary CSV/JSON rendering + strict parse
   round-trip (2026-11-12, backlog #1079, the escrow
   `renderReportCsv` / `parseSettlementReportCsv` /

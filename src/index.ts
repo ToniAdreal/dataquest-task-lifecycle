@@ -92,6 +92,7 @@ export type {
   VerifyPayoutWebhookOptions,
 } from "./settlementWebhook.js";
 export type {
+  ActOnStaleTasksOptions,
   AuditChainOptions,
   AuditSecret,
   DispatchOptions,
