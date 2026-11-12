@@ -44,6 +44,13 @@ export {
 } from "./taskLifecycle.js";
 export { historyFromNdjson, historyToNdjson } from "./ndjson.js";
 export {
+  parseTaskSettlementsCsv,
+  parseTaskSettlementsJson,
+  renderTaskSettlementsCsv,
+  renderTaskSettlementsJson,
+} from "./settlementSummary.js";
+export type { TaskSettlementsSummaryCsv } from "./settlementSummary.js";
+export {
   buildPayoutWebhook,
   buildPayoutWebhooks,
   deliverPayoutWebhook,

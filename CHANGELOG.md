@@ -11,6 +11,38 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Task settlements summary CSV/JSON rendering + strict parse
+  round-trip (2026-11-12, backlog #1079, the escrow
+  `renderReportCsv` / `parseSettlementReportCsv` /
+  `renderReportJson` / `parseSettlementReportJson` paradigm for
+  the dataquest summary): new `src/settlementSummary.ts` with
+  `renderTaskSettlementsCsv(summary)` (header row + exactly one
+  data row, RFC 4180 escaping, amounts in integer minor units),
+  `parseTaskSettlementsCsv(text)` (strict: header must match
+  verbatim, exactly one data row, 8 canonical integer fields,
+  non-negative except `gap`, which may be negative),
+  `renderTaskSettlementsJson(summary)` /
+  `parseTaskSettlementsJson(text)` (same eight fields as numbers,
+  canonical key order, same strict shape check), all exported
+  from `src/index.ts` with the `TaskSettlementsSummaryCsv` type.
+  Round-trip is the identity (`parse(render(s))` deep-equals
+  `s`, re-rendering a parsed value is byte-identical). Both
+  parsers fail closed on a bad header, wrong column/field count,
+  non-integer or non-canonical amounts, negative counts/totals, a
+  `gap` that does not equal `quotedTotal - paidTotal`, missing or
+  unknown fields, or string amounts in JSON; both renderers apply
+  the same shape check (including safe-integer figures, so a JSON
+  round-trip is exact) before emitting text. CRLF endings, a
+  trailing newline, trailing blank lines, a UTF-8 BOM, and RFC
+  4180 quoted fields parse and re-render to the canonical bytes.
+  Unlike escrow's CSV, this CSV carries the whole summary, so a
+  parsed value is the full summary. 13 tests in
+  `test/settlementSummary.test.ts`, including the golden CSV/JSON
+  for the demo-shaped batch (6 tasks, 3 PAID, quoted 650000, paid
+  1634900, gap -984900, 1 mismatched, 1 unquoted PAID task
+  settled 1009850) and the `gap + unquotedPaidTotal` identity
+  surviving both round-trips.
+
 - Signed snapshot envelopes gain an optional expiry (2026-11-12,
   backlog #1076): `TaskLifecycle`, `PayoutEventDedupe`, and
   `PayoutWebhookOutbox` `exportSignedSnapshot(secret, opts?)` accept

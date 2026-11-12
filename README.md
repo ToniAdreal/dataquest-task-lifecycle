@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1460 tests, all local
+npm test   # 1473 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1282,6 +1282,50 @@ field, so a batch mixing currencies must be grouped by currency by
 the caller first — and overflow is fail-fast, like the two helpers
 it builds on. An empty batch returns an all-zero summary.
 
+The summary also has canonical text forms, so a caller doing batch
+reconciliation no longer has to hand-write the export — the escrow
+`renderReportCsv` / `parseSettlementReportCsv` /
+`renderReportJson` / `parseSettlementReportJson` paradigm, for this
+summary:
+
+```ts
+import {
+  parseTaskSettlementsCsv,
+  parseTaskSettlementsJson,
+  renderTaskSettlementsCsv,
+  renderTaskSettlementsJson,
+  summarizeTaskSettlements,
+} from "dataquest-task-lifecycle";
+
+const summary = summarizeTaskSettlements(allTasks);
+renderTaskSettlementsCsv(summary);
+// => "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal\n6,3,650000,1634900,-984900,1,1,1009850"
+renderTaskSettlementsJson(summary);
+// => '{"tasks":6,"paid":3,"quotedTotal":650000,"paidTotal":1634900,"gap":-984900,"mismatched":1,"unquotedPaid":1,"unquotedPaidTotal":1009850}'
+parseTaskSettlementsCsv(renderTaskSettlementsCsv(summary)); // => the same summary
+parseTaskSettlementsJson(renderTaskSettlementsJson(summary)); // => the same summary
+```
+
+The CSV is a header row plus exactly one data row, in canonical
+field order, all money figures integer minor units — a row that
+pastes straight into a reconciliation spreadsheet or a settlement
+statement. The JSON writes the same eight fields as numbers, in
+canonical key order, for the API/storage hop. Unlike escrow's CSV,
+which drops the deposit breakdown and audit window, this CSV
+carries the whole summary: a parsed value is the full summary and
+re-renders byte-identically. Both parsers are strict and fail
+closed — a bad header, a wrong column count, a non-integer or
+non-canonical amount (`5.0`, `1e3`, `007`), a negative count or
+total, a `gap` that does not equal `quotedTotal - paidTotal`, a
+missing or unknown field, or string amounts in JSON all throw with
+the direction's prefix instead of returning a half-summary — and
+both renderers apply the same shape check before emitting text, so
+a malformed object never becomes a plausible-looking document.
+CRLF endings, a trailing newline, trailing blank lines, a UTF-8
+BOM, and RFC 4180 quoted fields are transport artifacts and parse;
+import is structural validation only, not a re-verification of the
+audit histories the summary claims to summarize.
+
 ### Payout webhooks
 
 The in-process `subscribe()` hook cannot notify anything outside the
@@ -2352,7 +2396,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1460 tests covering the happy path, reject→resubmit
+`npm test` runs 1473 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
