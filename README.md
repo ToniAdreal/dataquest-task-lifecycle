@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1438 tests, all local
+npm test   # 1460 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -797,7 +797,15 @@ restore; the envelope secret need not equal the audit secret. The
 secret is never written into the envelope, the MAC is integrity
 protection only (not encryption), and the unsigned path is
 unchanged — the two forms never accept each other, so a signed
-restore cannot silently downgrade to trusted configuration.
+restore cannot silently downgrade to trusted configuration. The
+envelope can also carry an optional expiry:
+`task.exportSignedSnapshot(secret, { expiresAt })` or
+`{ maxAgeMs, now? }` writes a canonical ISO-8601 UTC `expiresAt`
+into the envelope, covered by the MAC, and `restoreSignedSnapshot`
+rejects an expired envelope (`now > Date.parse(expiresAt)`) before
+any snapshot parsing — restoring at exactly `expiresAt` still
+succeeds — with the restore clock injectable through `opts.now`;
+an envelope without `expiresAt` never expires.
 
 To answer "what moved since the last snapshot I stored" without
 hand-written field compares, `diffTaskSnapshots(before, after)`
@@ -1487,7 +1495,15 @@ restore, so a signed restore cannot silently downgrade to the
 trusted-configuration path. A tampered entry, a tampered `seenAtMs`,
 a tampered `mac`, or a wrong secret all fail closed with no store
 produced, and a MAC-valid envelope whose snapshot is itself malformed
-still fails the strict snapshot validation. The MAC is integrity
+still fails the strict snapshot validation. The envelope can also
+carry an optional expiry: `exportSignedSnapshot(secret,
+{ expiresAt })` or `{ maxAgeMs, now? }` writes a canonical ISO-8601
+UTC `expiresAt` into the envelope, covered by the MAC, and
+`restoreSignedSnapshot` rejects an expired envelope
+(`now > Date.parse(expiresAt)`) before any snapshot parsing —
+restoring at exactly `expiresAt` still succeeds — with the restore
+clock injectable through `opts.now`; an envelope without `expiresAt`
+never expires. The MAC is integrity
 protection only, not encryption: the eventIds inside are wire-visible
 values, so keep the secret where the snapshot writer keeps its other
 signing-side secrets. This mirrors the sibling escrow
@@ -1689,7 +1705,14 @@ trusted-configuration path. A tampered attempts count, a tampered
 `lastError`/`lastAt`, a tampered `(endpoint, eventId)` key, a tampered
 `mac`, or a wrong secret all fail closed with no outbox produced, and
 a MAC-valid envelope whose snapshot is itself malformed still fails
-the strict snapshot validation. The MAC is integrity protection only,
+the strict snapshot validation. The envelope can also carry an
+optional expiry: `exportSignedSnapshot(secret, { expiresAt })` or
+`{ maxAgeMs, now? }` writes a canonical ISO-8601 UTC `expiresAt`
+into the envelope, covered by the MAC, and `restoreSignedSnapshot`
+rejects an expired envelope (`now > Date.parse(expiresAt)`) before
+any snapshot parsing — restoring at exactly `expiresAt` still
+succeeds — with the restore clock injectable through `opts.now`;
+an envelope without `expiresAt` never expires. The MAC is integrity protection only,
 not encryption: the endpoints and eventIds inside are wire-visible
 values, so keep the secret where the snapshot writer keeps its other
 signing-side secrets. Same envelope shape and canonical form as the
@@ -2329,7 +2352,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1438 tests covering the happy path, reject→resubmit
+`npm test` runs 1460 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

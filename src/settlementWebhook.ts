@@ -852,7 +852,17 @@ export interface PayoutEventDedupeSnapshot {
  *   their original first-seen timestamps).
  * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
  *   `snapshot` (object keys sorted recursively, array order
- *   preserved) under the caller's secret.
+ *   preserved) under the caller's secret — or, when `expiresAt`
+ *   is present, over the canonical JSON of
+ *   `{ expiresAt, snapshot }`, so the expiry timestamp is inside
+ *   the MAC coverage and cannot be extended without the secret.
+ * - `expiresAt`: optional canonical ISO-8601 UTC timestamp. When
+ *   present the envelope restores only while `now <= expiresAt`
+ *   (`now > expiresAt` is expired, checked after the MAC so a
+ *   tampered `expiresAt` fails as a MAC mismatch first); absent
+ *   means the envelope never expires, exactly as before this
+ *   field existed — envelopes exported without it verify
+ *   unchanged.
  *
  * The envelope carries no secret: the secret is caller configuration,
  * never persisted in the envelope, and the same secret must be
@@ -868,6 +878,7 @@ export interface PayoutEventDedupeSnapshot {
 export interface PayoutEventDedupeSignedSnapshotEnvelope {
   v: 1;
   snapshot: PayoutEventDedupeSnapshot;
+  expiresAt?: string;
   mac: string;
 }
 
@@ -911,6 +922,173 @@ function canonicalJsonForSnapshot(value: unknown): string {
 }
 
 /**
+ * Canonical ISO-8601 UTC timestamp check: a string that
+ * `Date.parse` accepts and that round-trips through
+ * `new Date(ms).toISOString()` unchanged. Same rule as the
+ * `TaskLifecycle` module's `isCanonicalIso` — a loose date string
+ * must never become an envelope expiry, because an ambiguous
+ * expiry is a silently wrong one.
+ */
+function isCanonicalIsoTimestamp(s: unknown): s is string {
+  if (typeof s !== "string") return false;
+  const ms = Date.parse(s);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === s;
+}
+
+/**
+ * Options for `exportSignedSnapshot(secret, opts?)` on
+ * `PayoutEventDedupe` and `PayoutWebhookOutbox` (backlog #1076):
+ * an optional expiry for the envelope. Exactly one of
+ * `expiresAt` / `maxAgeMs` may be set; `now` is only used with
+ * `maxAgeMs`. The resolved timestamp is written into the envelope
+ * and covered by its MAC, so it cannot be extended without the
+ * secret. An envelope exported with neither option never expires.
+ */
+export interface SignedSnapshotExportOptions {
+  /**
+   * Absolute expiry for the envelope, a canonical ISO-8601 UTC
+   * timestamp string (`new Date(ms).toISOString()` form — exactly
+   * what `Date.parse` round-trips). Mutually exclusive with
+   * `maxAgeMs`.
+   */
+  expiresAt?: string;
+  /**
+   * Relative expiry in milliseconds from `now` (below): the
+   * envelope's `expiresAt` is set to
+   * `new Date(now + maxAgeMs).toISOString()`. Mutually exclusive
+   * with `expiresAt`. Must be a positive finite number.
+   */
+  maxAgeMs?: number;
+  /**
+   * Clock override (milliseconds since the epoch) used only with
+   * `maxAgeMs` to compute `expiresAt`; defaults to `Date.now()`.
+   * Inject a fixed time for deterministic tests. Supplying it
+   * without `maxAgeMs` is a configuration error — there is nothing
+   * for it to compute.
+   */
+  now?: number;
+}
+
+/**
+ * Resolve the `expiresAt` for a signed snapshot export from
+ * `SignedSnapshotExportOptions`: `expiresAt` must already be a
+ * canonical ISO-8601 UTC string, `maxAgeMs` must be a positive
+ * finite number and is resolved against `now` (default
+ * `Date.now()`), the two are mutually exclusive, and `now`
+ * without `maxAgeMs` is a configuration error. Returns
+ * `undefined` when the caller set neither (no expiry). `label`
+ * is the owning class name, used to prefix the error messages.
+ */
+function resolveSignedSnapshotExpiresAt(
+  opts: SignedSnapshotExportOptions | undefined,
+  label: string,
+): string | undefined {
+  if (opts === undefined) return undefined;
+  if (typeof opts !== "object" || opts === null || Array.isArray(opts))
+    throw new Error(
+      `${label}: exportSignedSnapshot options must be an object`,
+    );
+  const { expiresAt, maxAgeMs, now } = opts;
+  if (expiresAt !== undefined && maxAgeMs !== undefined)
+    throw new Error(
+      `${label}: exportSignedSnapshot options must not combine expiresAt and maxAgeMs`,
+    );
+  if (now !== undefined && maxAgeMs === undefined)
+    throw new Error(
+      `${label}: exportSignedSnapshot option now is only used with maxAgeMs`,
+    );
+  if (
+    now !== undefined &&
+    (typeof now !== "number" || !Number.isFinite(now))
+  )
+    throw new Error(
+      `${label}: exportSignedSnapshot option now must be a finite number of milliseconds since the epoch`,
+    );
+  if (expiresAt !== undefined) {
+    if (!isCanonicalIsoTimestamp(expiresAt))
+      throw new Error(
+        `${label}: exportSignedSnapshot option expiresAt must be a canonical ISO-8601 UTC timestamp string`,
+      );
+    return expiresAt;
+  }
+  if (maxAgeMs !== undefined) {
+    if (
+      typeof maxAgeMs !== "number" ||
+      !Number.isFinite(maxAgeMs) ||
+      maxAgeMs <= 0
+    )
+      throw new Error(
+        `${label}: exportSignedSnapshot option maxAgeMs must be a positive finite number`,
+      );
+    return new Date((now ?? Date.now()) + maxAgeMs).toISOString();
+  }
+  return undefined;
+}
+
+/**
+ * Read and validate an envelope's `expiresAt` field (backlog
+ * #1076): absent means no expiry; present must be a canonical
+ * ISO-8601 UTC timestamp string, anything else fails the envelope
+ * before the MAC is even computed. `label` is only used by the
+ * callers' own error text — this helper reports through `fail`.
+ */
+function signedSnapshotExpiresAt(
+  record: Record<string, unknown>,
+  fail: (detail: string) => never,
+): string | undefined {
+  const raw: unknown = record.expiresAt;
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || !isCanonicalIsoTimestamp(raw))
+    fail("expiresAt must be a canonical ISO-8601 UTC timestamp string");
+  return raw;
+}
+
+/**
+ * Resolve the clock (milliseconds since the epoch) for a signed
+ * snapshot expiry check from a restore options object's `now`
+ * clock function (default `Date.now`). Mirrors the constructor's
+ * `now must be a function` validation so a bad clock fails with a
+ * configuration error, not a `TypeError`, before any snapshot
+ * parsing.
+ */
+function signedSnapshotRestoreNow(
+  nowOpt: (() => number) | undefined,
+  label: string,
+): number {
+  if (nowOpt === undefined) return Date.now();
+  if (typeof nowOpt !== "function")
+    throw new Error(
+      `${label}: invalid signed snapshot envelope: restore option now must be a function`,
+    );
+  const now = nowOpt();
+  if (typeof now !== "number" || !Number.isFinite(now))
+    throw new Error(
+      `${label}: invalid signed snapshot envelope: restore option now must return a finite number of milliseconds since the epoch`,
+    );
+  return now;
+}
+
+/**
+ * Fail-closed expiry check for a signed snapshot envelope
+ * (backlog #1076), run after the MAC verifies and before any
+ * snapshot parsing: an envelope is expired only when
+ * `now > Date.parse(expiresAt)` — restoring at exactly
+ * `expiresAt` still succeeds, the same inclusive boundary the
+ * payout webhook freshness window uses
+ * (`now - at > maxAgeMs` fails).
+ */
+function assertSignedSnapshotNotExpired(
+  expiresAt: string | undefined,
+  now: number,
+  label: string,
+): void {
+  if (expiresAt !== undefined && now > Date.parse(expiresAt))
+    throw new Error(
+      `${label}: signed snapshot envelope expired at ${expiresAt}`,
+    );
+}
+
+/**
  * Validate a signed-snapshot secret and return its bytes. A secret
  * is a non-empty string (UTF-8) or a non-empty `Buffer` — the same
  * input shapes as the sibling escrow `SettlementEventDedupe` helper,
@@ -942,13 +1120,23 @@ function signedSnapshotSecretBytes(secret: unknown): Buffer {
   );
 }
 
-/** HMAC-SHA256 (hex) over the canonical JSON of a snapshot. */
+/**
+ * HMAC-SHA256 (hex) over the canonical JSON of a snapshot — or,
+ * when `expiresAt` is present, over the canonical JSON of
+ * `{ expiresAt, snapshot }`, so the expiry timestamp is inside the
+ * MAC coverage and cannot be extended without the secret. Envelopes
+ * without `expiresAt` MAC exactly as before, so envelopes exported
+ * before this field existed still verify.
+ */
 function computeSnapshotMac(
   snapshot: PayoutEventDedupeSnapshot,
   secretBytes: Buffer,
+  expiresAt?: string,
 ): string {
+  const macInput =
+    expiresAt === undefined ? snapshot : { expiresAt, snapshot };
   return createHmac("sha256", secretBytes)
-    .update(canonicalJsonForSnapshot(snapshot), "utf8")
+    .update(canonicalJsonForSnapshot(macInput), "utf8")
     .digest("hex");
 }
 
@@ -1150,13 +1338,29 @@ export class PayoutEventDedupe {
    * caller-configuration error. The unsigned `exportSnapshot()`
    * path is unchanged: this envelope is opt-in, and a caller that
    * never signs keeps the old trusted-configuration semantics.
+   *
+   * `opts` optionally bounds the envelope's life
+   * (see {@link SignedSnapshotExportOptions}): `expiresAt` (an
+   * absolute canonical ISO-8601 UTC timestamp) or `maxAgeMs`
+   * (relative to `opts.now`, default `Date.now()`). The timestamp
+   * is written into the envelope and covered by the MAC, so it
+   * cannot be extended without the secret; an envelope exported
+   * with neither option never expires, exactly as before.
    */
   exportSignedSnapshot(
     secret: string | Buffer,
+    opts?: SignedSnapshotExportOptions,
   ): PayoutEventDedupeSignedSnapshotEnvelope {
     const secretBytes = signedSnapshotSecretBytes(secret);
     const snapshot = this.exportSnapshot();
-    return { v: 1, snapshot, mac: computeSnapshotMac(snapshot, secretBytes) };
+    const expiresAt = resolveSignedSnapshotExpiresAt(
+      opts,
+      "PayoutEventDedupe",
+    );
+    const mac = computeSnapshotMac(snapshot, secretBytes, expiresAt);
+    return expiresAt === undefined
+      ? { v: 1, snapshot, mac }
+      : { v: 1, snapshot, expiresAt, mac };
   }
 
   /**
@@ -1297,6 +1501,17 @@ export class PayoutEventDedupe {
    * hex digests; a wrong-length `mac` is rejected as malformed
    * before comparison.
    *
+   * When the envelope carries `expiresAt`, restore additionally
+   * checks it after the MAC — so a tampered timestamp fails as a
+   * MAC mismatch first, never as an expiry — and before any
+   * snapshot parsing: the envelope is expired only when
+   * `now > Date.parse(expiresAt)`, so restoring at exactly
+   * `expiresAt` still succeeds, and an expired envelope throws a
+   * descriptive `Error` with no dedupe produced. The clock is the
+   * restore options' `now` (`opts.now`, default `Date.now`), the
+   * same clock the restored dedupe's entries expire against. An
+   * envelope without `expiresAt` never expires.
+   *
    * On success the semantics are exactly
    * {@link PayoutEventDedupe.restore}'s: expired entries are
    * dropped, over-capacity snapshots keep the newest entries, TTLs
@@ -1329,13 +1544,19 @@ export class PayoutEventDedupe {
       fail("expected an object of the form { v: 1, snapshot, mac }");
     const record = envelope as Record<string, unknown>;
     for (const key of Object.keys(record)) {
-      if (key !== "v" && key !== "snapshot" && key !== "mac")
+      if (
+        key !== "v" &&
+        key !== "snapshot" &&
+        key !== "mac" &&
+        key !== "expiresAt"
+      )
         fail(`unknown field "${key}"`);
     }
     if (record.v !== 1)
       fail(
         `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
       );
+    const expiresAt = signedSnapshotExpiresAt(record, fail);
     const mac = record.mac;
     if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
       throw new Error(
@@ -1351,6 +1572,7 @@ export class PayoutEventDedupe {
     const expectedMac = computeSnapshotMac(
       snapshot as PayoutEventDedupeSnapshot,
       secretBytes,
+      expiresAt,
     );
     const macBytes = Buffer.from(mac, "hex");
     const expectedBytes = Buffer.from(expectedMac, "hex");
@@ -1361,7 +1583,13 @@ export class PayoutEventDedupe {
       throw new Error(
         "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
       );
-    // MAC verified — now the same strict structural validation as restore().
+    // MAC verified — now the expiry check, then the same strict
+    // structural validation as restore().
+    assertSignedSnapshotNotExpired(
+      expiresAt,
+      signedSnapshotRestoreNow(opts.now, "PayoutEventDedupe"),
+      "PayoutEventDedupe",
+    );
     return PayoutEventDedupe.restore(snapshot, opts);
   }
 
@@ -1579,7 +1807,17 @@ export interface PayoutWebhookOutboxSnapshot {
  *   exactly as `exportSnapshot()` produces it.
  * - `mac`: lowercase hex HMAC-SHA256 over the canonical JSON of
  *   `snapshot` (object keys sorted recursively, array order
- *   preserved) under the caller's secret.
+ *   preserved) under the caller's secret — or, when `expiresAt`
+ *   is present, over the canonical JSON of
+ *   `{ expiresAt, snapshot }`, so the expiry timestamp is inside
+ *   the MAC coverage and cannot be extended without the secret.
+ * - `expiresAt`: optional canonical ISO-8601 UTC timestamp. When
+ *   present the envelope restores only while `now <= expiresAt`
+ *   (`now > expiresAt` is expired, checked after the MAC so a
+ *   tampered `expiresAt` fails as a MAC mismatch first); absent
+ *   means the envelope never expires, exactly as before this
+ *   field existed — envelopes exported without it verify
+ *   unchanged.
  *
  * Why this exists: the unsigned snapshot is trusted configuration —
  * anyone able to rewrite the persisted file can silently clear a
@@ -1603,6 +1841,7 @@ export interface PayoutWebhookOutboxSnapshot {
 export interface PayoutWebhookOutboxSignedSnapshotEnvelope {
   v: 1;
   snapshot: PayoutWebhookOutboxSnapshot;
+  expiresAt?: string;
   mac: string;
 }
 
@@ -1644,14 +1883,21 @@ function outboxSignedSnapshotSecretBytes(secret: unknown): Buffer {
  * using the shared {@link canonicalJsonForSnapshot} form (object keys
  * sorted recursively, array order preserved) — the same canonical
  * form as the sibling `PayoutEventDedupe` envelope, so the two
- * envelopes are verified by the same rule.
+ * envelopes are verified by the same rule. When `expiresAt` is
+ * present the MAC covers the canonical JSON of
+ * `{ expiresAt, snapshot }`, so the expiry timestamp cannot be
+ * extended without the secret; envelopes without `expiresAt` MAC
+ * exactly as before.
  */
 function computeOutboxSnapshotMac(
   snapshot: PayoutWebhookOutboxSnapshot,
   secretBytes: Buffer,
+  expiresAt?: string,
 ): string {
+  const macInput =
+    expiresAt === undefined ? snapshot : { expiresAt, snapshot };
   return createHmac("sha256", secretBytes)
-    .update(canonicalJsonForSnapshot(snapshot), "utf8")
+    .update(canonicalJsonForSnapshot(macInput), "utf8")
     .digest("hex");
 }
 
@@ -1987,17 +2233,29 @@ export class PayoutWebhookOutbox {
    * caller-configuration error. The unsigned `exportSnapshot()`
    * path is unchanged: this envelope is opt-in, and a caller that
    * never signs keeps the old trusted-configuration semantics.
+   *
+   * `opts` optionally bounds the envelope's life
+   * (see {@link SignedSnapshotExportOptions}): `expiresAt` (an
+   * absolute canonical ISO-8601 UTC timestamp) or `maxAgeMs`
+   * (relative to `opts.now`, default `Date.now()`). The timestamp
+   * is written into the envelope and covered by the MAC, so it
+   * cannot be extended without the secret; an envelope exported
+   * with neither option never expires, exactly as before.
    */
   exportSignedSnapshot(
     secret: string | Buffer,
+    opts?: SignedSnapshotExportOptions,
   ): PayoutWebhookOutboxSignedSnapshotEnvelope {
     const secretBytes = outboxSignedSnapshotSecretBytes(secret);
     const snapshot = this.exportSnapshot();
-    return {
-      v: 1,
-      snapshot,
-      mac: computeOutboxSnapshotMac(snapshot, secretBytes),
-    };
+    const expiresAt = resolveSignedSnapshotExpiresAt(
+      opts,
+      "PayoutWebhookOutbox",
+    );
+    const mac = computeOutboxSnapshotMac(snapshot, secretBytes, expiresAt);
+    return expiresAt === undefined
+      ? { v: 1, snapshot, mac }
+      : { v: 1, snapshot, expiresAt, mac };
   }
 
   /**
@@ -2179,6 +2437,17 @@ export class PayoutWebhookOutbox {
    * over equal-length hex digests; a wrong-length `mac` is rejected
    * as malformed before comparison.
    *
+   * When the envelope carries `expiresAt`, restore additionally
+   * checks it after the MAC — so a tampered timestamp fails as a
+   * MAC mismatch first, never as an expiry — and before any
+   * snapshot parsing: the envelope is expired only when
+   * `now > Date.parse(expiresAt)`, so restoring at exactly
+   * `expiresAt` still succeeds, and an expired envelope throws a
+   * descriptive `Error` with no outbox produced. The clock is the
+   * restore options' `now` (`opts.now`, default `Date.now`), the
+   * same clock the restored outbox records new attempts against.
+   * An envelope without `expiresAt` never expires.
+   *
    * On success the semantics are exactly
    * {@link PayoutWebhookOutbox.restore}'s: duplicate pairs
    * collapse to their last occurrence, and whether a restored entry
@@ -2211,13 +2480,19 @@ export class PayoutWebhookOutbox {
       fail("expected an object of the form { v: 1, snapshot, mac }");
     const record = envelope as Record<string, unknown>;
     for (const key of Object.keys(record)) {
-      if (key !== "v" && key !== "snapshot" && key !== "mac")
+      if (
+        key !== "v" &&
+        key !== "snapshot" &&
+        key !== "mac" &&
+        key !== "expiresAt"
+      )
         fail(`unknown field "${key}"`);
     }
     if (record.v !== 1)
       fail(
         `unsupported envelope version ${JSON.stringify(record.v) ?? String(record.v)} (expected 1)`,
       );
+    const expiresAt = signedSnapshotExpiresAt(record, fail);
     const mac = record.mac;
     if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac))
       throw new Error(
@@ -2233,6 +2508,7 @@ export class PayoutWebhookOutbox {
     const expectedMac = computeOutboxSnapshotMac(
       snapshot as PayoutWebhookOutboxSnapshot,
       secretBytes,
+      expiresAt,
     );
     const macBytes = Buffer.from(mac, "hex");
     const expectedBytes = Buffer.from(expectedMac, "hex");
@@ -2243,7 +2519,13 @@ export class PayoutWebhookOutbox {
       throw new Error(
         "PayoutWebhookOutbox: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
       );
-    // MAC verified — now the same strict structural validation as restore().
+    // MAC verified — now the expiry check, then the same strict
+    // structural validation as restore().
+    assertSignedSnapshotNotExpired(
+      expiresAt,
+      signedSnapshotRestoreNow(opts.now, "PayoutWebhookOutbox"),
+      "PayoutWebhookOutbox",
+    );
     return PayoutWebhookOutbox.restore(snapshot, opts);
   }
 

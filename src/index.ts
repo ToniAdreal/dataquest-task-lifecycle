@@ -81,6 +81,7 @@ export type {
   PayoutWebhookOutboxSignedSnapshotEnvelope,
   PayoutWebhookOutboxSnapshot,
   PayoutWebhookPayload,
+  SignedSnapshotExportOptions,
   VerifyPayoutWebhookOptions,
 } from "./settlementWebhook.js";
 export type {
@@ -104,7 +105,9 @@ export type {
   TaskEvent,
   TaskEventListener,
   TaskHistoryEntry,
+  TaskLifecycleExportSignedSnapshotOptions,
   TaskLifecycleOptions,
+  TaskLifecycleRestoreSignedSnapshotOptions,
   TaskLifecycleSignedSnapshotEnvelope,
   TaskSettlementsSummary,
   TaskSnapshot,

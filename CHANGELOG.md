@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Signed snapshot envelopes gain an optional expiry (2026-11-12,
+  backlog #1076): `TaskLifecycle`, `PayoutEventDedupe`, and
+  `PayoutWebhookOutbox` `exportSignedSnapshot(secret, opts?)` accept
+  `expiresAt` (a canonical ISO-8601 UTC timestamp) or `maxAgeMs`
+  (relative to `opts.now`, default `Date.now()`); the timestamp is
+  written into the envelope and covered by its MAC, so it cannot be
+  extended without the secret. `restoreSignedSnapshot` rejects an
+  expired envelope (`now > Date.parse(expiresAt)`) after the MAC
+  check and before any snapshot parsing — restoring at exactly
+  `expiresAt` still succeeds — with the clock injectable through
+  `opts.now` (a millisecond timestamp for `TaskLifecycle`, the
+  options' `now` clock function for the dedupe and the outbox). An
+  envelope without `expiresAt` never expires, and envelopes
+  exported before this field existed verify unchanged. 22 tests in
+  `test/signedSnapshotExpiry.test.ts`, covering all three envelope
+  types: round-trip, expiry, inclusive boundary, tampered
+  `expiresAt` failing as a MAC mismatch, and invalid option values.
+
 - `PayoutWebhookOutbox` capacity limit (2026-11-12, backlog
   #1073, mirrors `PayoutEventDedupe`): `maxEntries` (default
   10_000, positive integer, same error style as `maxAttempts`).

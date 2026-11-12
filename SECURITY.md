@@ -116,6 +116,12 @@ webhook signatures (`src/settlementWebhook.ts`).
   secret is never written into the envelope — a restored dedupe
   must be handed the secret again, like the audit secret above, and
   key storage and distribution remain the caller's responsibility.
+  The envelope can also carry an optional expiry (`expiresAt` /
+  `maxAgeMs` on export, covered by the MAC); restore rejects an
+  expired envelope (`now > Date.parse(expiresAt)`) after the MAC
+  check and before any snapshot parsing, so a stolen envelope stops
+  working at its expiry instead of resurrecting state indefinitely.
+  An envelope without `expiresAt` never expires.
 
   Task snapshots get the same treatment as an opt-in layer:
   `TaskLifecycle.exportSignedSnapshot(secret)` wraps the whole
@@ -133,6 +139,12 @@ webhook signatures (`src/settlementWebhook.ts`).
   still handed through to `fromJSON`, so a keyed chain re-verifies
   under its own key — and the unsigned snapshot stays accepted as
   trusted configuration, the two forms never accepting each other.
+  The envelope can also carry an optional expiry (`expiresAt` /
+  `maxAgeMs` on export, covered by the MAC); restore rejects an
+  expired envelope (`now > Date.parse(expiresAt)`) after the MAC
+  check and before any snapshot parsing, so a stolen envelope stops
+  working at its expiry instead of resurrecting revoked state
+  indefinitely. An envelope without `expiresAt` never expires.
 
   Outbox snapshots get the same treatment:
   `PayoutWebhookOutbox.exportSignedSnapshot(secret)` wraps the
@@ -152,7 +164,13 @@ webhook signatures (`src/settlementWebhook.ts`).
   are wire-visible values, and the secret is never written into the
   envelope — a restored outbox must be handed the secret again, like
   the audit key above, and key storage and distribution remain the
-  caller's responsibility.
+  caller's responsibility. The envelope can also carry an optional
+  expiry (`expiresAt` / `maxAgeMs` on export, covered by the MAC);
+  restore rejects an expired envelope
+  (`now > Date.parse(expiresAt)`) after the MAC check and before
+  any snapshot parsing, so a stolen envelope stops working at its
+  expiry instead of resurrecting dead letters indefinitely. An
+  envelope without `expiresAt` never expires.
 - **Strict snapshot and history validation.** `TaskLifecycle.fromJSON`
   runs `parseSnapshot` (`src/taskLifecycle.ts`) on untrusted input:
   the schema-version gate (`v`, when present, must be exactly
