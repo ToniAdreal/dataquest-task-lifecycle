@@ -19,6 +19,9 @@ import {
   DEMO_JITTER_EVENT_ID,
   DEMO_JITTER_NOW,
   DEMO_JITTER_TASK_ID,
+  DEMO_LIMIT_ACTOR_TASK_ID,
+  DEMO_LIMIT_EVENT_ID_NOW,
+  DEMO_LIMIT_IDEMPOTENCY_TASK_ID,
   DEMO_OUTBOX_DEAD_EVENT_ID,
   DEMO_OUTBOX_DEAD_LAST_ERROR,
   DEMO_OUTBOX_ENDPOINT,
@@ -58,7 +61,11 @@ import {
 } from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
 import {
+  MAX_ACTOR_LENGTH,
+  MAX_EVENT_ID_LENGTH,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
   MAX_NOTE_LENGTH,
+  MAX_TASK_ID_LENGTH,
   PayoutEventDedupe,
   PayoutWebhookOutbox,
   SNAPSHOT_VERSION,
@@ -1076,11 +1083,21 @@ Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then
   https://billing.example.com/hooks/payout — event evt_demo_outbox_001: 3 scripted 500s, no retries (maxAttempts 1, backoffMs 0), each recorded in the outbox
   after 2 failures: pending 1 (attempts 2), dead letter 0 — still retryable
   after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human
-  recovered event evt_demo_outbox_002: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`;
+  recovered event evt_demo_outbox_002: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1
+
+Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):
+  DEMO-097: actor of 257 characters rejected — invalid dispatch options: actor must be at most 256 characters, got 257 (state DRAFT, history 0)
+  DEMO-097: actor of exactly 256 characters accepted verbatim — PUBLISH lands, state OPEN, history 1
+  buildPayoutWebhook: eventId of 257 characters rejected — cannot build payout webhook: 'eventId' must be at most 256 characters, got 257 for task DEMO-001 (the main task is untouched)
+  buildPayoutWebhook: eventId of exactly 256 characters builds and verifies under the demo secret
+  constructor: task id of 257 characters rejected — invalid task: id must be at most 256 characters, got 257
+  constructor: task id of exactly 256 characters accepted verbatim — state DRAFT, history 0
+  DEMO-098: idempotencyKey of 257 characters rejected — invalid dispatch options: idempotencyKey must be at most 256 characters, got 257 (state DRAFT, history 0, key unconsumed)
+  DEMO-098: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`;
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 949);
+  assert.equal(lines.length, 959);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -3802,7 +3819,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 949);
+  assert.equal(out.trimEnd().split("\n").length, 959);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8812,8 +8829,8 @@ test("demo shows the payout webhook X-Event-Id header segment: both deliveries c
     assert.ok(text.includes(line), `missing X-Event-Id line: ${line}`);
   }
   // The jitter backoff segment follows this one, and the
-  // watchdog reminder loop follows after it (the payout
-  // webhook outbox segment now closes the demo), so the
+  // watchdog reminder loop follows after it (the caller
+  // string length-limit segment now closes the demo), so the
   // X-Event-Id body-check line is no longer the last line —
   // it must be followed by the jitter segment.
   assert.ok(
@@ -9091,10 +9108,11 @@ test("demo shows the payout webhook jitter backoff segment: jittered waits stay 
     assert.ok(text.includes(line), `missing jitter backoff line: ${line}`);
   }
   // The watchdog reminder loop follows the jitter segment
-  // (and the payout webhook outbox segment closes the demo
-  // after it), so the jitter body-check line is no longer
-  // the last line — it must be followed by the reminder
-  // segment.
+  // (and the payout webhook outbox segment is followed by
+  // the caller string length-limit segment, which closes
+  // the demo, after it), so the jitter body-check line is
+  // no longer the last line — it must be followed by the
+  // reminder segment.
   assert.ok(
     text.indexOf(
       "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
@@ -9268,9 +9286,10 @@ test("demo shows the stale-task watchdog reminder loop in-process: only the idle
   );
 
   // The segment follows the jitter backoff segment and is
-  // followed by the payout webhook outbox segment, which now
-  // closes the demo; its printed lines are pinned literals
-  // (every timestamp is a fixed literal, so no normalization
+  // followed by the payout webhook outbox segment and then
+  // the caller string length-limit segment, which now closes
+  // the demo; its printed lines are pinned literals (every
+  // timestamp is a fixed literal, so no normalization
   // needed).
   const header =
     "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):";
@@ -9294,8 +9313,9 @@ test("demo shows the stale-task watchdog reminder loop in-process: only the idle
     assert.ok(text.includes(line), `missing reminder loop line: ${line}`);
   }
   // The reminder result line is no longer the demo's last
-  // line — the payout webhook outbox segment follows it and
-  // closes the demo.
+  // line — the payout webhook outbox segment follows it,
+  // and the caller string length-limit segment closes the
+  // demo after the outbox.
   assert.ok(
     text.indexOf(
       "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
@@ -9314,9 +9334,9 @@ test("demo watchdog reminder loop segment is deterministic: two runs print byte-
         "Stale-task watchdog reminder loop (staleTasks screening + notify-only action — a stale task is nudged, never expired):",
       ),
       // The slice ends before the blank line that opens the
-      // payout webhook outbox segment (which now closes the
-      // demo); without the end bound the segment would swallow
-      // the outbox lines.
+      // payout webhook outbox segment (which the caller
+      // string length-limit segment now follows); without the
+      // end bound the segment would swallow the outbox lines.
       ls.indexOf(
         "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
       ) - 1,
@@ -9441,10 +9461,11 @@ test("demo shows the payout webhook outbox segment in-process: three 500s dead-l
   assert.deepEqual(independent.deadLetter(), outboxDeadAfterThree);
   assert.deepEqual(independent.pending(), []);
 
-  // The segment follows the watchdog reminder loop and closes
-  // the demo; its printed lines are pinned literals (every
-  // value is a fixed endpoint, eventId, or count, so no
-  // normalization is needed).
+  // The segment follows the watchdog reminder loop and is
+  // followed by the caller string length-limit segment, which
+  // closes the demo; its printed lines are pinned literals
+  // (every value is a fixed endpoint, eventId, or count, so
+  // no normalization is needed).
   const header =
     "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):";
   const headerAt = text.indexOf(header);
@@ -9463,9 +9484,17 @@ test("demo shows the payout webhook outbox segment in-process: three 500s dead-l
   ]) {
     assert.ok(text.includes(line), `missing outbox line: ${line}`);
   }
-  assert.equal(
-    lines[lines.length - 1],
-    `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+  // The outbox recovered line is no longer the demo's last
+  // line — the caller string length-limit segment follows it
+  // and closes the demo.
+  assert.ok(
+    text.indexOf(
+      "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):",
+    ) >
+      text.indexOf(
+        `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+      ),
+    "caller string length-limit segment must follow the payout webhook outbox segment",
   );
 });
 
@@ -9475,6 +9504,13 @@ test("demo payout webhook outbox segment is deterministic: two runs print byte-i
       ls.indexOf(
         "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
       ),
+      // The slice ends before the blank line that opens the
+      // caller string length-limit segment (which now closes
+      // the demo); without the end bound the segment would
+      // swallow the length-limit lines.
+      ls.indexOf(
+        "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -9499,6 +9535,160 @@ test("demo payout webhook outbox segment is deterministic: two runs print byte-i
     a.outboxRecoveredWebhook.signature,
     b.outboxRecoveredWebhook.signature,
   );
+});
+
+test("demo shows the caller string length-limit segment in-process: four 257-character callers rejected verbatim, each 256-character boundary accepted", async () => {
+  const {
+    task,
+    limitActorTask,
+    limitActorError,
+    limitActorStateAfterReject,
+    limitActorHistoryLengthAfterReject,
+    limitActorBoundaryState,
+    limitActorBoundaryHistoryLength,
+    limitEventIdError,
+    limitEventIdWebhook,
+    limitEventIdVerified,
+    limitTaskIdError,
+    limitTaskIdBoundaryTask,
+    limitIdempotencyTask,
+    limitIdempotencyError,
+    limitIdempotencyStateAfterReject,
+    limitIdempotencyHistoryLengthAfterReject,
+    limitIdempotencyDuplicateReturn,
+    limitIdempotencyHistoryLengthAfterDuplicate,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // The caps are the library's own exported constants (256);
+  // the demo asserts the verbatim errors against them, so a
+  // drifted cap or message fails the demo itself, not just
+  // this test.
+  assert.equal(MAX_ACTOR_LENGTH, 256);
+  assert.equal(MAX_EVENT_ID_LENGTH, 256);
+  assert.equal(MAX_TASK_ID_LENGTH, 256);
+  assert.equal(MAX_IDEMPOTENCY_KEY_LENGTH, 256);
+
+  // Actor: the 257-character PUBLISH is refused before any
+  // history is written; the 256-character one lands verbatim.
+  assert.equal(limitActorTask.id, DEMO_LIMIT_ACTOR_TASK_ID);
+  assert.equal(
+    limitActorError,
+    `invalid dispatch options: actor must be at most ${MAX_ACTOR_LENGTH} characters, got ${MAX_ACTOR_LENGTH + 1}`,
+  );
+  assert.equal(limitActorStateAfterReject, "DRAFT");
+  assert.equal(limitActorHistoryLengthAfterReject, 0);
+  assert.equal(limitActorBoundaryState, "OPEN");
+  assert.equal(limitActorBoundaryHistoryLength, 1);
+  assert.equal(limitActorTask.state, "OPEN");
+  assert.equal(limitActorTask.history.length, 1);
+  assert.equal(limitActorTask.history[0]?.actor, "a".repeat(256));
+
+  // Webhook eventId: the 257-character build is refused and
+  // the main task is untouched; the 256-character one builds
+  // over the main task and verifies under the demo secret.
+  assert.equal(
+    limitEventIdError,
+    `cannot build payout webhook: 'eventId' must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${MAX_EVENT_ID_LENGTH + 1} for task ${task.id}`,
+  );
+  assert.equal(limitEventIdWebhook.payload.eventId, "e".repeat(256));
+  assert.equal(limitEventIdWebhook.payload.at, DEMO_LIMIT_EVENT_ID_NOW);
+  assert.equal(limitEventIdVerified, true);
+  assert.equal(
+    verifyPayoutWebhook(
+      JSON.stringify(limitEventIdWebhook.payload),
+      limitEventIdWebhook.signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    true,
+  );
+  assert.equal(task.state, "PAID");
+
+  // Task id: the 257-character construction is refused; the
+  // 256-character one constructs as a fresh DRAFT task.
+  assert.equal(
+    limitTaskIdError,
+    `invalid task: id must be at most ${MAX_TASK_ID_LENGTH} characters, got ${MAX_TASK_ID_LENGTH + 1}`,
+  );
+  assert.equal(limitTaskIdBoundaryTask.id, "t".repeat(256));
+  assert.equal(limitTaskIdBoundaryTask.state, "DRAFT");
+  assert.equal(limitTaskIdBoundaryTask.history.length, 0);
+
+  // IdempotencyKey: the 257-character PUBLISH is refused
+  // before the dedupe lookup, so the key is not consumed —
+  // the demo re-presents it and still gets the length error
+  // — and the 256-character key lands, its same-key retry a
+  // no-op: the boundary key still dedupes.
+  assert.equal(limitIdempotencyTask.id, DEMO_LIMIT_IDEMPOTENCY_TASK_ID);
+  assert.equal(
+    limitIdempotencyError,
+    `invalid dispatch options: idempotencyKey must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters, got ${MAX_IDEMPOTENCY_KEY_LENGTH + 1}`,
+  );
+  assert.equal(limitIdempotencyStateAfterReject, "DRAFT");
+  assert.equal(limitIdempotencyHistoryLengthAfterReject, 0);
+  assert.equal(limitIdempotencyDuplicateReturn, "OPEN");
+  assert.equal(limitIdempotencyHistoryLengthAfterDuplicate, 1);
+  assert.equal(limitIdempotencyTask.state, "OPEN");
+  assert.equal(limitIdempotencyTask.history.length, 1);
+
+  // The segment closes the demo, after the outbox segment;
+  // its printed lines are pinned literals (every value is a
+  // fixed task id, cap, or verbatim error, so no
+  // normalization is needed).
+  const header =
+    "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):";
+  const headerAt = text.indexOf(header);
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+      ),
+    "caller string length-limit segment must follow the payout webhook outbox segment",
+  );
+  for (const line of [
+    `  ${DEMO_LIMIT_ACTOR_TASK_ID}: actor of 257 characters rejected — ${limitActorError} (state DRAFT, history 0)`,
+    `  ${DEMO_LIMIT_ACTOR_TASK_ID}: actor of exactly 256 characters accepted verbatim — PUBLISH lands, state OPEN, history 1`,
+    `  buildPayoutWebhook: eventId of 257 characters rejected — ${limitEventIdError} (the main task is untouched)`,
+    "  buildPayoutWebhook: eventId of exactly 256 characters builds and verifies under the demo secret",
+    `  constructor: task id of 257 characters rejected — ${limitTaskIdError}`,
+    "  constructor: task id of exactly 256 characters accepted verbatim — state DRAFT, history 0",
+    `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of 257 characters rejected — ${limitIdempotencyError} (state DRAFT, history 0, key unconsumed)`,
+    `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
+  ]) {
+    assert.ok(text.includes(line), `missing length-limit line: ${line}`);
+  }
+  assert.equal(
+    lines[lines.length - 1],
+    `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
+  );
+});
+
+test("demo caller string length-limit segment is deterministic: two runs print byte-identical length-limit lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):",
+      ),
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + actor reject + actor boundary + eventId reject
+  // + eventId boundary + task-id reject + task-id boundary
+  // + key reject + key boundary lines; every value is a
+  // pinned literal, so no normalization is needed.
+  assert.equal(segA.length, 9);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.limitActorError, b.limitActorError);
+  assert.equal(a.limitEventIdError, b.limitEventIdError);
+  assert.equal(a.limitTaskIdError, b.limitTaskIdError);
+  assert.equal(a.limitIdempotencyError, b.limitIdempotencyError);
+  assert.equal(
+    a.limitEventIdWebhook.signature,
+    b.limitEventIdWebhook.signature,
+  );
+  assert.equal(a.limitIdempotencyDuplicateReturn, b.limitIdempotencyDuplicateReturn);
 });
 
 test("demo shows the external-ledger reconciliation segment in-process: all five reconcilePayouts groups land on the pinned fixtures", async () => {

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1420 tests, all local
+npm test   # 1422 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1632,7 +1632,7 @@ longer than `MAX_EVENT_ID_LENGTH` (256 characters) is rejected at
 `recordAttempt()` and at snapshot restore, never truncated —
 truncation would change the pair's key.
 
-`npm run demo` closes with an outbox segment: a signed payout
+`npm run demo` has an outbox segment near the end: a signed payout
 webhook is delivered to the billing endpoint through a scripted
 fetch that answers 500 three times — each failure recorded in a
 `PayoutWebhookOutbox` on a fixed clock — so after two failures
@@ -1644,7 +1644,14 @@ its success clears its own pair and the ledger ends pending 0,
 dead letter 1. The segment records each attempt from the
 delivery result's `ok` branch — this repo's delivery reports a
 failure instead of throwing, so there is no try/catch in the
-loop. The ledger is process-local and records only — it never retries, and its
+loop. The demo closes with a caller string length-limit segment:
+each of the four guard caps the library landed one item at a
+time — dispatch `actor`, webhook `eventId`, task `id`, dispatch
+`idempotencyKey`, all 256 characters — is shown firing once, a
+257-character caller rejected with its verbatim error and the
+task left untouched, and then its exactly-256-character boundary
+accepted verbatim (the boundary key's same-key retry is still a
+no-op, so it still dedupes). The ledger is process-local and records only — it never retries, and its
 snapshot (`exportSnapshot()` / `PayoutWebhookOutbox.restore()`) is
 unsigned trusted configuration in the same posture as
 `PayoutEventDedupe.exportSnapshot()`: persist it where the webhook

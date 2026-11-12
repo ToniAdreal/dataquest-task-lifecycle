@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo caller string length-limit segment (2026-11-12, backlog
+  #1068): `npm run demo` now closes by showing all four guard
+  caps the library landed one item at a time — dispatch `actor`
+  (#1057), webhook `eventId` (#1060), task `id` (#1062), dispatch
+  `idempotencyKey` (#1065), each 256 characters — firing once
+  each. A 257-character caller is rejected with its verbatim
+  error and the task left untouched (DRAFT, 0 history; the
+  overlong key is refused before the dedupe lookup, so
+  re-presenting it still reports the length error instead of a
+  no-op), and the exactly-256-character boundary is accepted
+  verbatim (the boundary key's same-key retry is a no-op, so it
+  still dedupes); the boundary webhook builds over the main
+  task and verifies under the demo secret. 2 tests in
+  `test/demo.test.ts` (segment assertions + byte-identical
+  determinism), golden demo output 949 → 959 lines.
+
 - `idempotencyKey` length cap (2026-11-11, backlog #1065, mirrors
   escrow #1064): `MAX_IDEMPOTENCY_KEY_LENGTH = 256`, exported from
   the index. `dispatch()` rejects an `idempotencyKey` longer than 256
