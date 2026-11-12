@@ -645,6 +645,16 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `getSlaDeadline` / `clearSlaDeadline` reject unknown states like
+  `setSlaDeadline` does (2026-11-12, backlog #1082): both now throw
+  `invalid SLA deadline: unknown state …` before touching the
+  deadline map, so `clearSlaDeadline("OPNE")` can no longer look
+  like a successful clear and `getSlaDeadline("OPNE")` can no longer
+  be mistaken for "no deadline set". The no-argument
+  `clearSlaDeadline()` still clears every state, and a known state
+  with no deadline still reads back `undefined`. 9 tests in
+  `test/slaUnknownState.test.ts`.
+
 - `reconcilePayouts()` compares a shared `payoutRef` as a batch
   total (2026-11-11, backlog #1054): several PAID tasks sharing
   one reference are one transfer, so the ledger row's amount is

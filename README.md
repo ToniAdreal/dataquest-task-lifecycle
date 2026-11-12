@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1473 tests, all local
+npm test   # 1482 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -552,7 +552,11 @@ Deadlines can also be attached at construction instead of one
 `new TaskLifecycle(id, { slaDeadlines: { OPEN: "…", ACCEPTED: "…" } })`.
 The option applies the same validation and canonical-ISO normalization
 as `setSlaDeadline` — an unknown state or unparseable date throws at
-construction and no task is created. It is also how a history-only
+construction and no task is created. `getSlaDeadline` and
+`clearSlaDeadline` apply the same unknown-state gate: a misspelled
+state throws `invalid SLA deadline: unknown state …` instead of
+returning `undefined` or silently doing nothing (only the no-argument
+`clearSlaDeadline()` clears every state). It is also how a history-only
 rebuild re-attaches deadlines: the audit log itself carries none, so
 `fromHistory(id, history, { slaDeadlines })` passes the option through
 the constructor (see "Replay" below); a snapshot restore does not need
@@ -2396,7 +2400,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1473 tests covering the happy path, reject→resubmit
+`npm test` runs 1482 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

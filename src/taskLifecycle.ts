@@ -4298,18 +4298,34 @@ export class TaskLifecycle {
     this._slaDeadlines.set(forState, new Date(ms).toISOString());
   }
 
-  /** SLA deadline attached to a state, or undefined if none set. */
+  /**
+   * SLA deadline attached to a state, or undefined if none set.
+   * Throws on an unknown state, with the same `invalid SLA deadline:
+   * unknown state …` error `setSlaDeadline` raises — a misspelled
+   * state is a caller bug, not a missing deadline.
+   */
   getSlaDeadline(state: TaskState = this._state): string | undefined {
+    if (!STATES.has(state)) {
+      throw new Error(`invalid SLA deadline: unknown state ${String(state)}`);
+    }
     return this._slaDeadlines.get(state);
   }
 
   /**
    * Clear the SLA deadline for one state, or for all states when called
-   * without an argument.
+   * without an argument. A named state must be known: an unknown state
+   * throws the same `invalid SLA deadline: unknown state …` error
+   * `setSlaDeadline` raises, so `clearSlaDeadline("OPNE")` can never
+   * look like a successful clear.
    */
   clearSlaDeadline(state?: TaskState): void {
     if (state === undefined) this._slaDeadlines.clear();
-    else this._slaDeadlines.delete(state);
+    else {
+      if (!STATES.has(state)) {
+        throw new Error(`invalid SLA deadline: unknown state ${String(state)}`);
+      }
+      this._slaDeadlines.delete(state);
+    }
   }
 
   /**
