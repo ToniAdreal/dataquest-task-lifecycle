@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1497 tests, all local
+npm test   # 1508 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1819,7 +1819,18 @@ revisited. `maxRounds` (default 1) bounds the loop; `backoffMs`
 in-flight re-deliveries the same way `deliverPayoutWebhookToMany`
 bounds its fan-out; `signal` aborts at round boundaries with
 already-made attempts kept. A `deliverOne` that throws is recorded
-as a failed attempt with its message, never a runner crash. Honest
+as a failed attempt with its message, never a runner crash. Pass
+`dryRun: true` to rehearse instead of retrying: the runner takes
+one pass over `outbox.pending()` and reports each pair as
+`{ endpoint, eventId, wouldRetry: true }` on the summary's
+`wouldRetry` field — no delivery, no ledger writes, no sleep — so a
+retry storm over dozens of pending pairs can be previewed before it
+is really sent. A dry run never changes the ledger, so rehearsing
+and then running the live retry still delivers every pair; an
+already-aborted signal reports `aborted: true` with an empty
+`wouldRetry` list. `wouldRetry` answers only "in the pending
+selection", never "would succeed": a pair whose delivery would fail
+is still listed, because the dry run never calls `deliverOne`. Honest
 limit: the runner is in-process only and persists nothing — a dead
 process loses the ledger unless it exported a snapshot first (see
 Limitations).
@@ -2416,7 +2427,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1497 tests covering the happy path, reject→resubmit
+`npm test` runs 1508 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

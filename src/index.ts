@@ -83,6 +83,7 @@ export type {
   PayoutWebhookOutboxAttempt,
   PayoutWebhookOutboxEntry,
   PayoutWebhookOutboxOptions,
+  PayoutWebhookOutboxRetryDryRunEntry,
   PayoutWebhookOutboxRetryOptions,
   PayoutWebhookOutboxRetrySummary,
   PayoutWebhookOutboxSignedSnapshotEnvelope,

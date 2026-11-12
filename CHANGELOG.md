@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Dry-run rehearsal port for the payout webhook outbox retry
+  runner (2026-11-12, backlog #1089, the escrow
+  `retrySettlementWebhookOutbox` dry run from #1088 mirrored for
+  the dataquest runner): `retryPayoutWebhookOutbox(outbox,
+  deliverOne, { dryRun: true })` takes one pass over
+  `outbox.pending()` and reports one `{ endpoint, eventId, wouldRetry:
+  true }` entry per pending pair on the summary's new `wouldRetry`
+  field, in `pending()` order — without calling `deliverOne`,
+  recording anything, acknowledging anything, or sleeping. `wouldRetry`
+  answers only "in the pending selection", never "would succeed". A
+  pre-aborted signal reports `aborted: true` with an empty list, and
+  invalid options (including a non-boolean `dryRun`) still fail fast
+  before any delivery. Live summaries never carry `wouldRetry`. 11
+  tests in `test/payoutWebhookOutboxRetryDryRun.test.ts`.
+
 - Dry-run rehearsal port for `actOnStaleTasks` (2026-11-12, backlog
   #1086, the sibling escrow `actOnStaleEscrows` dry-run port from
   #1083 mirrored for the dataquest watchdog executor): a trailing
