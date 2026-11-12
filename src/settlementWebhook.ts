@@ -1407,6 +1407,19 @@ export interface PayoutWebhookOutboxOptions {
    */
   maxAttempts?: number;
   /**
+   * Maximum number of `(endpoint, eventId)` pairs the outbox tracks.
+   * Defaults to 10_000, mirroring {@link PayoutEventDedupe}'s
+   * `maxEntries`. Must be a positive integer (>= 1). When a new pair
+   * would push the ledger past the cap, `recordAttempt()` evicts
+   * dead-lettered pairs first (oldest `lastAt` first) and only then
+   * the oldest pending pair, so a burst of fresh failures never
+   * silently discards a pair that still has retries left while a
+   * dead letter is available to drop; `restore()` instead trims an
+   * over-capacity snapshot to the newest `maxEntries` pairs by
+   * `lastAt`, mirroring `PayoutEventDedupe.restore`.
+   */
+  maxEntries?: number;
+  /**
    * Clock source (milliseconds since the epoch). Defaults to
    * `Date.now`. Inject a fake clock for deterministic tests; it is
    * also the default timestamp for attempts recorded without an
@@ -1686,6 +1699,12 @@ function computeOutboxSnapshotMac(
  *   without bound); the refreshed `lastError` is truncated to
  *   {@link MAX_OUTBOX_ERROR_LENGTH} characters at record time, so
  *   the ledger itself stays bounded too;
+ * - the ledger holds at most `maxEntries` pairs (default 10_000):
+ *   recording a failure for a new pair evicts dead-lettered pairs
+ *   first (oldest `lastAt` first) and only then the oldest pending
+ *   pair, so a burst of fresh failures never pushes the ledger past
+ *   the cap; restoring an over-capacity snapshot keeps the newest
+ *   pairs by `lastAt` instead;
  * - a successful attempt (`ok: true`, or `acknowledge()`) removes the
  *   pair entirely, so a later failure starts counting from 1 again;
  * - `pending()` lists pairs with `attempts < maxAttempts`,
@@ -1694,6 +1713,7 @@ function computeOutboxSnapshotMac(
  */
 export class PayoutWebhookOutbox {
   private readonly maxAttempts: number;
+  private readonly maxEntries: number;
   private readonly clock: () => number;
   /**
    * endpoint -> eventId -> accumulated record. Nested maps (not a
@@ -1712,10 +1732,17 @@ export class PayoutWebhookOutbox {
         "PayoutWebhookOutbox: maxAttempts must be a positive integer",
       );
     }
+    const maxEntries = opts.maxEntries ?? 10_000;
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+      throw new Error(
+        "PayoutWebhookOutbox: maxEntries must be a positive integer",
+      );
+    }
     if (opts.now !== undefined && typeof opts.now !== "function") {
       throw new Error("PayoutWebhookOutbox: now must be a function");
     }
     this.maxAttempts = maxAttempts;
+    this.maxEntries = maxEntries;
     this.clock = opts.now ?? Date.now;
   }
 
@@ -1723,7 +1750,12 @@ export class PayoutWebhookOutbox {
    * Record one delivery attempt. A failed attempt increments the
    * pair's consecutive-failure count (capped at `maxAttempts`) and
    * refreshes `lastError`/`lastAt`; a successful attempt removes the
-   * pair, exactly like `acknowledge()`.
+   * pair, exactly like `acknowledge()`. Recording a failure for a
+   * pair the ledger does not track yet makes room first when the
+   * ledger is at `maxEntries` (see `evictForInsert`): dead-lettered
+   * pairs go first, oldest `lastAt` first, and only then the oldest
+   * pending pair — re-failing a pair already tracked never evicts
+   * anything, because the ledger does not grow.
    *
    * Caller bugs fail fast: an empty/non-string `endpoint` or
    * `eventId`, an `eventId` longer than {@link MAX_EVENT_ID_LENGTH}
@@ -1777,12 +1809,20 @@ export class PayoutWebhookOutbox {
       }
       return;
     }
+    // Look the pair up before fetching the bucket: eviction below
+    // may drop the endpoint's last pair and with it the bucket
+    // itself, so the bucket reference must be taken after eviction,
+    // not before.
+    const prev = this.records.get(endpoint)?.get(eventId);
+    // A re-recorded pair only refreshes its own record, so the ledger
+    // cannot grow past the cap by re-failing a pair it already tracks.
+    // A genuinely new pair makes room first (see `evictForInsert`).
+    if (prev === undefined) this.evictForInsert();
     let byEvent = this.records.get(endpoint);
     if (byEvent === undefined) {
       byEvent = new Map<string, PayoutWebhookOutboxEntry>();
       this.records.set(endpoint, byEvent);
     }
-    const prev = byEvent.get(eventId);
     const entry: PayoutWebhookOutboxEntry = {
       endpoint,
       eventId,
@@ -1792,6 +1832,55 @@ export class PayoutWebhookOutbox {
     if (attempt.error !== undefined)
       entry.lastError = truncateOutboxError(attempt.error);
     byEvent.set(eventId, entry);
+  }
+
+  /**
+   * Drop one tracked `(endpoint, eventId)` pair (and its endpoint
+   * bucket when it empties). Shared by eviction and the public
+   * removal paths so the nested-map shape stays consistent.
+   */
+  private removePair(endpoint: string, eventId: string): void {
+    const byEvent = this.records.get(endpoint);
+    if (byEvent === undefined) return;
+    byEvent.delete(eventId);
+    if (byEvent.size === 0) this.records.delete(endpoint);
+  }
+
+  /**
+   * Make room for one new pair before `recordAttempt()` inserts it.
+   * Eviction prefers dead-lettered pairs — they have exhausted their
+   * retries, so dropping one loses the least actionable record —
+   * oldest `lastAt` first within that class; only when no
+   * dead-lettered pair remains is the oldest pending pair evicted.
+   * Ties in `lastAt` keep insertion order (the first-recorded of the
+   * tied pairs goes first), because `Map` iteration is insertion
+   * order and a candidate only replaces the current victim when it
+   * is strictly better. The loop runs until the ledger is under the
+   * cap, so a single insert can never leave `size` above
+   * `maxEntries`; it is a no-op while the ledger still fits.
+   */
+  private evictForInsert(): void {
+    while (this.size >= this.maxEntries) {
+      let victim: PayoutWebhookOutboxEntry | undefined;
+      for (const byEvent of this.records.values()) {
+        for (const entry of byEvent.values()) {
+          if (victim === undefined) {
+            victim = entry;
+            continue;
+          }
+          const entryDead = entry.attempts >= this.maxAttempts;
+          const victimDead = victim.attempts >= this.maxAttempts;
+          if (entryDead && !victimDead) victim = entry;
+          else if (
+            entryDead === victimDead &&
+            entry.lastAt < victim.lastAt
+          )
+            victim = entry;
+        }
+      }
+      if (victim === undefined) break;
+      this.removePair(victim.endpoint, victim.eventId);
+    }
   }
 
   /**
@@ -1931,6 +2020,14 @@ export class PayoutWebhookOutbox {
    * Whether a restored entry reads as pending or dead-lettered is
    * derived from its `attempts` against the new outbox's
    * `maxAttempts` (see {@link PayoutWebhookOutboxSnapshot}).
+   *
+   * If the snapshot holds more pairs than the restoring outbox's
+   * `maxEntries`, the oldest pairs by `lastAt` are dropped until it
+   * fits (ties break by snapshot order, earliest first), mirroring
+   * `PayoutEventDedupe.restore` — a persisted snapshot can predate
+   * a tighter cap, and a restart must not silently grow the ledger
+   * past it. The load-time drops are not observable: there is no
+   * eviction counter on this class.
    * This covers a single process across its own restart only; see
    * {@link PayoutWebhookOutboxSnapshot} for the multi-instance
    * and trust limits.
@@ -2025,6 +2122,26 @@ export class PayoutWebhookOutbox {
       // `PayoutEventDedupe.restore`.
       byEvent.delete(entry.eventId);
       byEvent.set(entry.eventId, { ...entry });
+    }
+    // Trim an over-capacity snapshot to the newest pairs by `lastAt`
+    // (ties break by snapshot order, earliest first), mirroring
+    // `PayoutEventDedupe.restore`. `restoreSignedSnapshot` funnels
+    // through here, so signed restores trim the same way.
+    if (outbox.size > outbox.maxEntries) {
+      const excess = outbox.size - outbox.maxEntries;
+      const all: PayoutWebhookOutboxEntry[] = [];
+      for (const byEvent of outbox.records.values()) {
+        for (const entry of byEvent.values()) all.push(entry);
+      }
+      const drop = new Set(
+        all
+          .map((_, i) => i)
+          .sort((a, b) => all[a].lastAt - all[b].lastAt || a - b)
+          .slice(0, excess),
+      );
+      for (let i = 0; i < all.length; i++) {
+        if (drop.has(i)) outbox.removePair(all[i].endpoint, all[i].eventId);
+      }
     }
     return outbox;
   }

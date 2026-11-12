@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `PayoutWebhookOutbox` capacity limit (2026-11-12, backlog
+  #1073, mirrors `PayoutEventDedupe`): `maxEntries` (default
+  10_000, positive integer, same error style as `maxAttempts`).
+  Recording a failure for a new pair past the cap evicts
+  dead-lettered pairs first (oldest `lastAt` first) and only then
+  the oldest pending pair, so a burst of fresh failures never
+  silently drops a pair that still has retries left while a dead
+  letter is available; re-failing a pair already tracked never
+  evicts anything. `restore()` (and, through it, the signed
+  restore) trims an over-capacity snapshot to the newest pairs by
+  `lastAt`, the same trim `PayoutEventDedupe.restore` applies. 16
+  tests in `test/payoutWebhookOutboxMaxEntries.test.ts`, including
+  the 10_000 default pinned by inserting 10_001 pairs; mutation
+  check (both eviction paths disabled) turns 13 of the 16 red.
+
 - Demo caller string length-limit segment (2026-11-12, backlog
   #1068): `npm run demo` now closes by showing all four guard
   caps the library landed one item at a time — dispatch `actor`

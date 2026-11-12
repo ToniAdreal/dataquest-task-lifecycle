@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1422 tests, all local
+npm test   # 1438 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1632,6 +1632,18 @@ longer than `MAX_EVENT_ID_LENGTH` (256 characters) is rejected at
 `recordAttempt()` and at snapshot restore, never truncated —
 truncation would change the pair's key.
 
+The ledger is capped at `maxEntries` pairs (default 10_000,
+mirroring `PayoutEventDedupe`): recording a failure for a new pair
+past the cap evicts dead-lettered pairs first (oldest `lastAt`
+first) and only then the oldest pending pair, so a burst of fresh
+failures never silently drops a pair that still has retries left
+while a dead letter is available to drop; re-failing a pair the
+ledger already tracks never evicts anything, because the ledger
+does not grow. Restoring an over-capacity snapshot keeps the
+newest pairs by `lastAt` instead — the same trim
+`PayoutEventDedupe.restore` applies — and the signed restore
+funnels through the same path, so both restore forms trim alike.
+
 `npm run demo` has an outbox segment near the end: a signed payout
 webhook is delivered to the billing endpoint through a scripted
 fetch that answers 500 three times — each failure recorded in a
@@ -2317,7 +2329,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1410 tests covering the happy path, reject→resubmit
+`npm test` runs 1438 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
