@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Budget-usage read-only API (2026-11-13, backlog #1115): public
+  `resubmitCount` / `disputeCount` getters and `visitCount(state)`
+  expose the same history-derived used counts the three budget checks
+  read (`maxResubmits`, `maxDisputes`, `maxVisitsByState`), so a
+  watchdog or dashboard can ask how much budget is left before
+  dispatching instead of waiting for the budget-exhausted error text.
+  The counts are readable with or without a budget configured
+  (unlimited is not uncounted), are pure reads, and need no new
+  snapshot fields — `toJSON()` / `fromJSON()` and `fromHistory()`
+  preserve them automatically because they derive from the history.
+  `visitCount` throws `invalid visit count: unknown state …` on an
+  unknown state, the same fail-fast bar `setSlaDeadline` applies. 12
+  tests in `test/budgetUsage.test.ts`.
+
 - `nextTaskDeadline(tasks, now)` (2026-11-13, backlog #1114, the
   whole-map counterpart to `nextSlaDeadline` and the dataquest-side
   mirror of escrow's `nextEscrowDeadline`): from a batch of tasks it

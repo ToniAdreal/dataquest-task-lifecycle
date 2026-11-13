@@ -4520,6 +4520,46 @@ export class TaskLifecycle {
   }
 
   /**
+   * How many RESUBMITs have been used so far — read-only, derived from
+   * the append-only history (the exact count the `maxResubmits` budget
+   * check reads), so a watchdog or dashboard can ask "how many are
+   * left" before dispatching instead of waiting for
+   * `resubmit budget exhausted: …` to be thrown. Readable with or
+   * without a budget configured: unlimited is not uncounted.
+   */
+  get resubmitCount(): number {
+    return this._resubmitCount;
+  }
+
+  /**
+   * How many DISPUTE appeal rounds have been used so far — read-only,
+   * derived from the append-only history (the exact count the
+   * `maxDisputes` budget check reads). Same read-before-dispatch
+   * purpose as {@link resubmitCount}, and readable with or without a
+   * budget configured.
+   */
+  get disputeCount(): number {
+    return this._disputeCount;
+  }
+
+  /**
+   * How many times the task has visited a state so far — read-only,
+   * derived from the append-only history (the exact count the
+   * `maxVisitsByState` budget check reads): 1 for the initial state
+   * plus 1 per history entry landing in that state, exactly as
+   * documented on the per-state visit budget. A state the task never
+   * entered counts 0. Throws on an unknown state, with the same
+   * `… unknown state …` bar `setSlaDeadline` applies — a misspelled
+   * state is a caller bug, not a zero count.
+   */
+  visitCount(state: TaskState): number {
+    if (!STATES.has(state)) {
+      throw new Error(`invalid visit count: unknown state ${String(state)}`);
+    }
+    return this._stateVisitCount(state);
+  }
+
+  /**
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they

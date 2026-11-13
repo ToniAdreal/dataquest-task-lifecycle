@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1549 tests, all local
+npm test   # 1561 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2255,6 +2255,28 @@ RESUBMIT round inside the budget and has its second RESUBMIT rejected
 with the pinned error, while the unbudgeted DEMO-084 runs the same two
 rounds and both pass.
 
+## Reading budget usage
+
+The three budgets' used counts used to be readable only by waiting for
+the budget-exhausted error text — a watchdog that wants to ask "how
+many RESUBMITs are left" before dispatching had no read path. Three
+read-only accessors expose the same history-derived counts the budget
+checks read, so they can never drift from the audit trail:
+
+```ts
+task.resubmitCount; // RESUBMITs used so far
+task.disputeCount; // DISPUTE rounds used so far
+task.visitCount("CAPTURING"); // visits to a state so far (1 for the initial state)
+```
+
+All three are readable with or without a budget configured: unlimited
+is not uncounted. `visitCount` throws `invalid visit count: unknown
+state …` on a misspelled state — the same fail-fast bar
+`setSlaDeadline` applies — rather than returning a misleading 0.
+Counts are pure reads (no state or history mutation) and need no new
+snapshot fields: they are derived from the history, so `toJSON()` /
+`fromJSON()` and `fromHistory()` preserve them automatically.
+
 ## Event-level RBAC
 
 Tasks can gate individual events on named actors — the "only a senior
@@ -2500,7 +2522,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1549 tests covering the happy path, reject→resubmit
+`npm test` runs 1561 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2511,7 +2533,11 @@ visit budget (`maxVisitsByState`: total-visit counting including the
 initial visit, state-based (not event-based) blocking, check ordering
 after transition/RBAC/event budgets, snapshot round-trips that preserve
 the budget and used count, `fromHistory` re-attachment, and
-malformed-envelope rejection),
+malformed-envelope rejection), the budget-usage read-only API
+(`resubmitCount` / `disputeCount` / `visitCount(state)`: counts stepping
+with dispatch, agreement with the exhausted-error numbers, snapshot and
+`fromHistory` survival, unknown-state rejection for `visitCount`, and
+read purity),
 dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
