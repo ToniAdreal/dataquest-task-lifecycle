@@ -47,6 +47,7 @@ export {
   diffTaskSettlementsSummaries,
   parseTaskSettlementsCsv,
   parseTaskSettlementsJson,
+  renderTaskSettlements,
   renderTaskSettlementsCsv,
   renderTaskSettlementsJson,
 } from "./settlementSummary.js";

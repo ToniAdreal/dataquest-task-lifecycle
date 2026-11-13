@@ -1,3 +1,4 @@
+import { formatMinorUnits } from "./taskLifecycle.js";
 import type { TaskSettlementsSummary } from "./taskLifecycle.js";
 
 /**
@@ -407,6 +408,76 @@ export function parseTaskSettlementsJson(text: string): TaskSettlementsSummary {
   }
   assertSummaryShape(parsed, "cannot parse task settlements JSON");
   return parsed as TaskSettlementsSummary;
+}
+
+/**
+ * Render a task settlements summary as plain human-readable text — the
+ * form for a log line or a terminal paste during reconciliation: a
+ * caller that wants to eyeball a batch's quoted-vs-settled position
+ * no longer has to hand-build the string or paste a JSON document
+ * into a chat.
+ *
+ * The layout is the dataquest-side mirror of escrow's `renderReport`
+ * (backlog #1096): a title line, a counts line, the three money
+ * lines, the two exception rows, and a units line, in that fixed
+ * order — so the same summary always renders the same bytes, and a
+ * reader scanning two batches can compare line by line:
+ *
+ * ```text
+ * Task settlements summary
+ * Tasks: 6 (paid: 3)
+ * Quoted total: 6500.00
+ * Paid total: 16349.00
+ * Gap: -9849.00 (overpaid)
+ * Mismatched payouts: 1
+ * Unquoted paid tasks: 1
+ * Unquoted paid total: 10098.50
+ * Amounts are integer minor units (cents).
+ * ```
+ *
+ * Money figures go through {@link formatMinorUnits}, so `650000`
+ * reads `6500.00` and `-984900` reads `-9849.00`; the gap carries its
+ * meaning in parentheses — `(overpaid)` when the batch settled more
+ * than it was quoted, `(underpaid)` when it settled less, `(balanced)`
+ * when the two totals agree — because a bare negative gap is easy to
+ * read backwards at 2 a.m. The counts and the exception rows are
+ * always present, even when zero, so a zero batch reads as an
+ * explicit all-zero position rather than a missing section.
+ *
+ * Before rendering, the summary is shape-checked with
+ * {@link assertSummaryShape}: a non-object summary, a missing or
+ * unknown field, a non-integer or unsafe-integer figure, a negative
+ * count or total, or a `gap` that does not equal
+ * `quotedTotal - paidTotal` throws
+ * `cannot render task settlements summary: …` instead of emitting a
+ * plausible-looking document.
+ *
+ * Honest limit, shared with the CSV/JSON renderers' import note but
+ * stronger here: this is a display form, not an interchange form.
+ * There is no parser back — the CSV and JSON renderers are the
+ * round-trippable text forms — and reading figures off this text
+ * does not re-verify the audit histories the summary claims to
+ * summarize.
+ *
+ * Pure: the summary is only read, never mutated.
+ */
+export function renderTaskSettlements(
+  summary: TaskSettlementsSummary,
+): string {
+  assertSummaryShape(summary, "cannot render task settlements summary");
+  const gapNote =
+    summary.gap < 0 ? "overpaid" : summary.gap > 0 ? "underpaid" : "balanced";
+  return [
+    "Task settlements summary",
+    `Tasks: ${summary.tasks} (paid: ${summary.paid})`,
+    `Quoted total: ${formatMinorUnits(summary.quotedTotal)}`,
+    `Paid total: ${formatMinorUnits(summary.paidTotal)}`,
+    `Gap: ${formatMinorUnits(summary.gap)} (${gapNote})`,
+    `Mismatched payouts: ${summary.mismatched}`,
+    `Unquoted paid tasks: ${summary.unquotedPaid}`,
+    `Unquoted paid total: ${formatMinorUnits(summary.unquotedPaidTotal)}`,
+    "Amounts are integer minor units (cents).",
+  ].join("\n");
 }
 
 /**

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1520 tests, all local
+npm test   # 1532 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1312,12 +1312,15 @@ summary:
 import {
   parseTaskSettlementsCsv,
   parseTaskSettlementsJson,
+  renderTaskSettlements,
   renderTaskSettlementsCsv,
   renderTaskSettlementsJson,
   summarizeTaskSettlements,
 } from "dataquest-task-lifecycle";
 
 const summary = summarizeTaskSettlements(allTasks);
+renderTaskSettlements(summary);
+// => "Task settlements summary\nTasks: 6 (paid: 3)\nQuoted total: 6500.00\nPaid total: 16349.00\nGap: -9849.00 (overpaid)\nMismatched payouts: 1\nUnquoted paid tasks: 1\nUnquoted paid total: 10098.50\nAmounts are integer minor units (cents)."
 renderTaskSettlementsCsv(summary);
 // => "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal\n6,3,650000,1634900,-984900,1,1,1009850"
 renderTaskSettlementsJson(summary);
@@ -1345,6 +1348,20 @@ CRLF endings, a trailing newline, trailing blank lines, a UTF-8
 BOM, and RFC 4180 quoted fields are transport artifacts and parse;
 import is structural validation only, not a re-verification of the
 audit histories the summary claims to summarize.
+
+The same summary also has a plain-text form for a log line or a
+terminal paste: `renderTaskSettlements(summary)` prints a title
+line, a counts line, the three money lines (amounts through
+`formatMinorUnits`, two decimals, no currency symbol), the
+mismatched and unquoted rows, and a units line, in that fixed
+order. The gap carries its meaning in parentheses — `(overpaid)`
+when the batch settled more than it was quoted, `(underpaid)` when
+it settled less, `(balanced)` when the totals agree. It is a
+display form only: there is no parser back (the CSV and JSON forms
+are the round-trippable ones), and it applies the same shape check
+first, so a malformed summary throws
+`cannot render task settlements summary: …` instead of printing a
+plausible-looking document.
 
 The same question one re-run later — "what moved since the summary
 I stored?" — is `diffTaskSettlementsSummaries(before, after)`, the
@@ -2457,7 +2474,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1520 tests covering the happy path, reject→resubmit
+`npm test` runs 1532 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

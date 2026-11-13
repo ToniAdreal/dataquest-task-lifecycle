@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `renderTaskSettlements(summary)` (2026-11-13, backlog #1096,
+  the dataquest-side mirror of escrow's `renderReport`): plain
+  human-readable text form of a task settlements summary — title
+  line, counts line, the three money lines via `formatMinorUnits`,
+  the mismatched and unquoted rows, and a units line, in a fixed
+  order. The gap carries `(overpaid)` / `(underpaid)` / `(balanced)`
+  in parentheses. Shape-checked with the same check as the CSV/JSON
+  renderers (`cannot render task settlements summary: …` on a
+  malformed summary). Display only: no parser back; the CSV and
+  JSON forms stay the round-trippable ones. 12 tests in
+  `test/renderTaskSettlements.test.ts`.
+
 - `diffTaskSettlementsSummaries(a, b)` (2026-11-13, backlog #1094,
   the dataquest-side mirror of escrow's `diffSettlementReports`
   from #1092): field-level difference between two task settlements
