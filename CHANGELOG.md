@@ -25,6 +25,26 @@ change type; no entry describes a feature that is not in the history.
   the second 149.50 `(underpaid)`). All six figures are pinned
   fail-fast in the demo. 4 tests in `test/demo.test.ts`.
 
+- Benchmark `diffTaskSettlementsSummaries` + `renderTaskSettlements`
+  rows (2026-11-13, backlog #1111): two fixed golden summaries over
+  the same 10-task mixed batch — the second re-driven with three
+  payout amounts moved (STS-04 settles 290 instead of 280, STS-05
+  settles exactly its 250 quote instead of 260, STS-06 settles 100
+  instead of 90) — so the diff row pins exactly four moved fields
+  (paidTotal 131500 -> 132500, gap -14000 -> -15000, mismatched 2 ->
+  1, unquotedPaidTotal 15000 -> 16000) with an identical pair pinned
+  to `{}` outside the timed loop, and the render row pins the
+  nine-line plain text verbatim (the re-driven summary's rendering
+  pinned verbatim outside the timed loop too). This run measured
+  ~328,766 ops/sec (3.04 µs/op) for the diff and ~29,437 ops/sec
+  (33.97 µs/op) for the render on Node v24.22.1 / AMD EPYC 9D25;
+  only the two new rows were added to the README Benchmarks table —
+  the other rows are retained from the earlier run, because this
+  run's shared host was heavily loaded (the unchanged
+  `summarizeTaskSettlements` row measured 13,776 ops/sec here versus
+  30,296 in the table), so a whole-table refresh from this run would
+  have misrepresented the other paths.
+
 - `renderTaskSettlements(summary)` (2026-11-13, backlog #1096,
   the dataquest-side mirror of escrow's `renderReport`): plain
   human-readable text form of a task settlements summary — title
@@ -716,6 +736,15 @@ change type; no entry describes a feature that is not in the history.
   type-level breaking change; there is no runtime behavior change.
 
 ### Fixed
+
+- `payoutAging` bench fixture went stale at backlog #1046
+  (2026-11-11): the fixture's supposedly reconciled task carried a
+  payoutRef but no payoutAmount, which #1046 made unreconciled, so
+  the bench failed its load-time self-check (`bench-age-reconciled`
+  landed in over30Days with age 99) and `npm run bench` could not run
+  at all. The reconciled stand-in now carries a payoutAmount of 100
+  as well, restoring the fixture's stated shape (one reconciled task
+  excluded from every bucket); no library code changed.
 
 - `getSlaDeadline` / `clearSlaDeadline` reject unknown states like
   `setSlaDeadline` does (2026-11-12, backlog #1082): both now throw

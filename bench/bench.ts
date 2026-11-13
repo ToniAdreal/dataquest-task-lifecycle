@@ -58,7 +58,18 @@
  *      same batch: per task `historyToNdjson` -> `historyFromNdjson`
  *      -> `TaskLifecycle.fromHistory`, then `unreconciledPayouts`
  *      over the rebuilt batch, self-checked against the hand-computed
- *      unreconciled ids and byte-identical re-exported NDJSON;
+ *      unreconciled ids and byte-identical re-exported NDJSON; two
+ *      more rows cover the summary's own follow-on operations, both
+ *      over the same fixed mixed batch of 10 tasks:
+ *      `diffTaskSettlementsSummaries` compares the batch summary
+ *      against a second hand-computed summary (three payout amounts
+ *      moved, one mismatch resolved — four fields move, the rest
+ *      stay), self-checked per iteration for the four changed fields
+ *      and their from/to values, with an identical pair pinned to
+ *      `{}` once, outside the timed loop; `renderTaskSettlements`
+ *      renders the fixed summary to its nine-line plain text,
+ *      self-checked per iteration against the hand-written text,
+ *      line for line;
  *   7. payout webhook fan-out delivery — `deliverPayoutWebhookToMany()`
  *      delivering one PAID task's settlement event to 4 endpoints at
  *      once (one shared `eventId`, one byte-identical body, each copy
@@ -1474,6 +1485,7 @@ import {
   deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
   diffTaskSnapshots,
+  diffTaskSettlementsSummaries,
   expiredTasks,
   expireOverdueTasks,
   formatMinorUnits,
@@ -1494,6 +1506,7 @@ import {
   PayoutEventDedupe,
   PayoutWebhookOutbox,
   reconcilePayouts,
+  renderTaskSettlements,
   replay,
   staleTasks,
   stateDiagram,
@@ -1528,6 +1541,7 @@ import {
   type TaskHistoryEntry,
   type TaskLifecycleSignedSnapshotEnvelope,
   type TaskSettlementsSummary,
+  type TaskSettlementsSummaryDiff,
   type TaskSnapshot,
   type TaskState,
   type TransitionEdge,
@@ -2193,6 +2207,160 @@ if (
       "benchmark fixture failed: summarizeTaskSettlements of an empty batch is not all zeros",
     );
   }
+}
+
+// Settlement-summary diff / render fixture: the same fixed mixed
+// batch of 10 tasks, re-driven with three payout amounts moved —
+// STS-04 settles 290 instead of 280, STS-05 settles exactly its 250
+// quote instead of 260, STS-06 settles 100 instead of 90 — so the
+// second summary is a second hand-computed golden, never derived by
+// calling summarizeTaskSettlements itself:
+//   tasks 10, paid 8,
+//   quotedTotal unchanged (100+200+150+300+250+175)*100 = 117500,
+//   paidTotal (100+200+150+290+250+100+60+175)*100 = 132500,
+//   gap 117500 - 132500 = -15000,
+//   mismatched 1 (only STS-04: 300 quoted, 290 paid),
+//   unquotedPaid 2, unquotedPaidTotal (100+60)*100 = 16000.
+// The diff between the two summaries therefore moves exactly four
+// fields — paidTotal, gap, mismatched, unquotedPaidTotal — and the
+// other four stay, which is what the diff row pins per iteration;
+// an identical pair diffs to {} (pinned once, outside the timed
+// loop). The render row pins the before summary's nine-line plain
+// text verbatim, and the after summary's rendering is pinned
+// verbatim once, outside the timed loop, so a formatting change
+// cannot pass by only timing the before text.
+const summaryDiffBatch: TaskLifecycle[] = [
+  buildPaidTask("BENCH-STS-01", { quotedAmount: 100, payoutAmount: 100 }),
+  buildPaidTask("BENCH-STS-02", { quotedAmount: 200, payoutAmount: 200 }),
+  buildPaidTask("BENCH-STS-03", { quotedAmount: 150, payoutAmount: 150 }),
+  buildPaidTask("BENCH-STS-04", { quotedAmount: 300, payoutAmount: 290 }),
+  buildPaidTask("BENCH-STS-05", { quotedAmount: 250, payoutAmount: 250 }),
+  buildPaidTask("BENCH-STS-06", { payoutAmount: 100 }),
+  buildPaidTask("BENCH-STS-07", { payoutAmount: 60 }),
+  buildPaidTask("BENCH-STS-08", { quotedAmount: 175, payoutAmount: 175 }),
+  buildQuotedNonPaidTask("BENCH-STS-09", 999, false),
+  buildQuotedNonPaidTask("BENCH-STS-10", 888, true),
+];
+const expectedTaskSettlementsSummaryAfter: TaskSettlementsSummary = {
+  tasks: 10,
+  paid: 8,
+  quotedTotal: 117500,
+  paidTotal: 132500,
+  gap: -15000,
+  mismatched: 1,
+  unquotedPaid: 2,
+  unquotedPaidTotal: 16000,
+};
+const expectedTaskSettlementsSummaryDiff: TaskSettlementsSummaryDiff = {
+  paidTotalChanged: { from: 131500, to: 132500 },
+  gapChanged: { from: -14000, to: -15000 },
+  mismatchedChanged: { from: 2, to: 1 },
+  unquotedPaidTotalChanged: { from: 15000, to: 16000 },
+};
+const EXPECTED_RENDERED_TASK_SETTLEMENTS_SUMMARY =
+  "Task settlements summary\n" +
+  "Tasks: 10 (paid: 8)\n" +
+  "Quoted total: 1175.00\n" +
+  "Paid total: 1315.00\n" +
+  "Gap: -140.00 (overpaid)\n" +
+  "Mismatched payouts: 2\n" +
+  "Unquoted paid tasks: 2\n" +
+  "Unquoted paid total: 150.00\n" +
+  "Amounts are integer minor units (cents).";
+const EXPECTED_RENDERED_TASK_SETTLEMENTS_SUMMARY_AFTER =
+  "Task settlements summary\n" +
+  "Tasks: 10 (paid: 8)\n" +
+  "Quoted total: 1175.00\n" +
+  "Paid total: 1325.00\n" +
+  "Gap: -150.00 (overpaid)\n" +
+  "Mismatched payouts: 1\n" +
+  "Unquoted paid tasks: 2\n" +
+  "Unquoted paid total: 160.00\n" +
+  "Amounts are integer minor units (cents).";
+function checkTaskSettlementsSummaryAfter(
+  summary: TaskSettlementsSummary,
+): boolean {
+  return (
+    summary.tasks === expectedTaskSettlementsSummaryAfter.tasks &&
+    summary.paid === expectedTaskSettlementsSummaryAfter.paid &&
+    summary.quotedTotal === expectedTaskSettlementsSummaryAfter.quotedTotal &&
+    summary.paidTotal === expectedTaskSettlementsSummaryAfter.paidTotal &&
+    summary.gap === expectedTaskSettlementsSummaryAfter.gap &&
+    summary.mismatched === expectedTaskSettlementsSummaryAfter.mismatched &&
+    summary.unquotedPaid ===
+      expectedTaskSettlementsSummaryAfter.unquotedPaid &&
+    summary.unquotedPaidTotal ===
+      expectedTaskSettlementsSummaryAfter.unquotedPaidTotal
+  );
+}
+function checkTaskSettlementsSummaryDiff(
+  diff: TaskSettlementsSummaryDiff,
+): boolean {
+  return (
+    Object.keys(diff).sort().join(",") ===
+      "gapChanged,mismatchedChanged,paidTotalChanged,unquotedPaidTotalChanged" &&
+    diff.paidTotalChanged?.from ===
+      expectedTaskSettlementsSummaryDiff.paidTotalChanged?.from &&
+    diff.paidTotalChanged?.to ===
+      expectedTaskSettlementsSummaryDiff.paidTotalChanged?.to &&
+    diff.gapChanged?.from ===
+      expectedTaskSettlementsSummaryDiff.gapChanged?.from &&
+    diff.gapChanged?.to ===
+      expectedTaskSettlementsSummaryDiff.gapChanged?.to &&
+    diff.mismatchedChanged?.from ===
+      expectedTaskSettlementsSummaryDiff.mismatchedChanged?.from &&
+    diff.mismatchedChanged?.to ===
+      expectedTaskSettlementsSummaryDiff.mismatchedChanged?.to &&
+    diff.unquotedPaidTotalChanged?.from ===
+      expectedTaskSettlementsSummaryDiff.unquotedPaidTotalChanged?.from &&
+    diff.unquotedPaidTotalChanged?.to ===
+      expectedTaskSettlementsSummaryDiff.unquotedPaidTotalChanged?.to
+  );
+}
+if (
+  summaryDiffBatch.length !== 10 ||
+  summaryDiffBatch
+    .slice(0, 8)
+    .some((t) => t.state !== "PAID" || t.history.length !== 8) ||
+  summaryDiffBatch[8]?.state !== "ACCEPTED" ||
+  summaryDiffBatch[8]?.history.length !== 2 ||
+  summaryDiffBatch[9]?.state !== "ABANDONED" ||
+  summaryDiffBatch[9]?.history.length !== 3 ||
+  !checkTaskSettlementsSummaryAfter(
+    summarizeTaskSettlements(summaryDiffBatch),
+  ) ||
+  !checkTaskSettlementsSummaryDiff(
+    diffTaskSettlementsSummaries(
+      expectedTaskSettlementsSummary,
+      expectedTaskSettlementsSummaryAfter,
+    ),
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: settlement summary diff fixture differs from the hand-computed expectation",
+  );
+}
+if (
+  Object.keys(
+    diffTaskSettlementsSummaries(
+      expectedTaskSettlementsSummary,
+      expectedTaskSettlementsSummary,
+    ),
+  ).length !== 0
+) {
+  throw new Error(
+    "benchmark self-check failed: diffTaskSettlementsSummaries identical pair",
+  );
+}
+if (
+  renderTaskSettlements(expectedTaskSettlementsSummary) !==
+    EXPECTED_RENDERED_TASK_SETTLEMENTS_SUMMARY ||
+  renderTaskSettlements(expectedTaskSettlementsSummaryAfter) !==
+    EXPECTED_RENDERED_TASK_SETTLEMENTS_SUMMARY_AFTER
+) {
+  throw new Error(
+    "benchmark fixture failed: renderTaskSettlements differs from the hand-written text",
+  );
 }
 
 // Settled amount of one PAID task, read from its last PAYOUT_COMPLETE
@@ -11381,6 +11549,36 @@ function benchSummarizeTaskSettlements(): number {
   }, ITERATIONS);
 }
 
+function benchDiffTaskSettlementsSummaries(): number {
+  return measure(() => {
+    if (
+      !checkTaskSettlementsSummaryDiff(
+        diffTaskSettlementsSummaries(
+          expectedTaskSettlementsSummary,
+          expectedTaskSettlementsSummaryAfter,
+        ),
+      )
+    ) {
+      throw new Error(
+        "benchmark self-check failed: diffTaskSettlementsSummaries",
+      );
+    }
+  }, ITERATIONS);
+}
+
+function benchRenderTaskSettlements(): number {
+  return measure(() => {
+    if (
+      renderTaskSettlements(expectedTaskSettlementsSummary) !==
+      EXPECTED_RENDERED_TASK_SETTLEMENTS_SUMMARY
+    ) {
+      throw new Error(
+        "benchmark self-check failed: renderTaskSettlements",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchExpiredTasks(): number {
   return measure(() => {
     const out = expiredTasks(watchdogBatch, WATCHDOG_NOW);
@@ -11668,7 +11866,9 @@ function benchDiffTaskSnapshots(): number {
 // endpoints (exactly 7 days -> days7To30, exactly 30 days ->
 // over30Days); one PAID stand-in with no PAYOUT_COMPLETE entry at
 // all (the defensive unknown shape, unreachable through dispatch);
-// one reconciled PAID task (a payoutRef on its completion entry) and
+// one reconciled PAID task (a payoutRef and a payoutAmount on its
+// completion entry — since backlog #1046 a ref without an amount is
+// unreconciled, so the ref alone no longer excludes it) and
 // one PAYOUT_PENDING task, both excluded from every bucket. The
 // batch is built once and reused across timed iterations:
 // payoutAging is pure, and its cost is the per-task last-completion
@@ -11680,6 +11880,7 @@ function driveAgingPaidTask(
   id: string,
   completeAt: string,
   completionRef?: string,
+  completionAmount?: number,
 ): TaskLifecycle {
   const task = new TaskLifecycle(id);
   const completeMs = Date.parse(completeAt);
@@ -11702,6 +11903,9 @@ function driveAgingPaidTask(
       actor: "system",
       at: completeAt,
       payoutRef: completionRef,
+      ...(completionAmount === undefined
+        ? {}
+        : { payoutAmount: completionAmount }),
     });
   }
   return task;
@@ -11731,6 +11935,7 @@ const AGING_BATCH: readonly TaskLifecycle[] = [
     "bench-age-reconciled",
     "2026-01-01T00:00:00.000Z",
     "bench-age-rec-01",
+    100,
   ),
   AGING_PENDING_TASK,
   // Defensive stand-in: PAID with no PAYOUT_COMPLETE entry at all.
@@ -13056,6 +13261,8 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
   { path: "totalQuoted (10 mixed tasks)", ops: benchTotalQuoted() },
   { path: "summarizeTaskSettlements (10 mixed tasks)", ops: benchSummarizeTaskSettlements() },
+  { path: "diffTaskSettlementsSummaries (10-task summaries, 4 fields moved)", ops: benchDiffTaskSettlementsSummaries() },
+  { path: "renderTaskSettlements (10-task summary, 9-line text)", ops: benchRenderTaskSettlements() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
   { path: "deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyResubmitDedupe() },

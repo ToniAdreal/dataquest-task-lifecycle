@@ -2655,7 +2655,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred three hot
+`npm run bench` measures locally-observed throughput for the one hundred five hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2707,7 +2707,11 @@ history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
 with a full hash-chain re-verification), payout reconciliation
 screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut` /
-`totalQuoted` / `summarizeTaskSettlements` over a batch of tasks), NDJSON x unreconciled screening
+`totalQuoted` / `summarizeTaskSettlements` over a batch of tasks), summary
+comparison (`diffTaskSettlementsSummaries` over two fixed summaries — one
+identical pair, one four-field move) and summary text rendering
+(`renderTaskSettlements` over the same fixed summary — nine lines, pinned
+verbatim), NDJSON x unreconciled screening
 (`historyToNdjson` -> `historyFromNdjson` ->
 `TaskLifecycle.fromHistory` -> `unreconciledPayouts` over the same
 12-task screening batch), payout webhook fan-out delivery
@@ -2993,7 +2997,20 @@ self-check pins all eight summary fields to the hand-computed
 expectation (tasks 10, paid 8, quoted 117500, paid 131500, gap
 -14000, mismatched 2, unquotedPaid 2, unquotedPaidTotal 15000, all in
 minor units), and the empty batch is pinned to the all-zero summary
-once, outside the timed loop. The NDJSON x
+once, outside the timed loop. The `diffTaskSettlementsSummaries` path
+compares that same fixed summary against a second hand-computed
+summary over the same 10-task batch re-driven with three payout
+amounts moved (STS-04 settles 290 instead of 280, STS-05 settles
+exactly its 250 quote instead of 260, STS-06 settles 100 instead of
+90); its per-iteration self-check pins the four moved fields
+(paidTotal 131500 -> 132500, gap -14000 -> -15000, mismatched 2 -> 1,
+unquotedPaidTotal 15000 -> 16000) and the four unmoved ones' absence
+from the diff, and an identical pair is pinned to `{}` once, outside
+the timed loop. The `renderTaskSettlements` path renders the fixed
+summary to its nine-line plain text; its per-iteration self-check
+pins the rendering verbatim, line for line, and the re-driven
+summary's rendering is pinned verbatim once, outside the timed loop.
+The NDJSON x
 unreconciled row runs the whole forwarder-to-reconciliation chain
 over that same batch on every iteration: each task is exported to
 NDJSON, parsed back, and rebuilt with `TaskLifecycle.fromHistory`,
@@ -3754,6 +3771,8 @@ See the throughput row below. One real run on 2026-11-11:
 | totalPaidOut (12 PAID tasks) | ~42,206 ops/sec (23.69 µs/op) |
 | totalQuoted (10 mixed tasks) | ~64,967 ops/sec (15.39 µs/op) |
 | summarizeTaskSettlements (10 mixed tasks) | ~30,296 ops/sec (33.01 µs/op) |
+| diffTaskSettlementsSummaries (10-task summaries, 4 fields moved) | ~328,766 ops/sec (3.04 µs/op) |
+| renderTaskSettlements (10-task summary, 9-line text) | ~29,437 ops/sec (33.97 µs/op) |
 | deliverPayoutWebhookToMany (4 endpoints) | ~7,479 ops/sec (133.71 µs/op) |
 | deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~3,629 ops/sec (275.57 µs/op) |
 | deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints) | ~3,801 ops/sec (263.09 µs/op) |
