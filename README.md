@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1532 tests, all local
+npm test   # 1536 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -90,7 +90,16 @@ nine fixed vectors (positive, zero, negative, whitespace-trimmed,
 a string and the quoted total itself as a string ("6500.00" →
 650000, cross-checked against `toMinorUnits(totalQuotedValue)`),
 and three illegal shapes pinned to their exact fail-fast
-wording — a dispatch subscription branch
+wording — a settlement summary diff + rendering branch that
+summarizes the screened batch twice with
+`summarizeTaskSettlements` (as recorded: 6 tasks, 4 PAID, quoted
+650000, paid 1634900, gap -984900; then recomputed after DEMO-087
+re-drives DEMO-001's chain with the payout corrected from 10098.5
+to 100.00: paid 635050, gap 14950), diffs the two with
+`diffTaskSettlementsSummaries` (exactly three fields move —
+paidTotal, gap, unquotedPaidTotal — gap as its own entry), and
+prints both summaries with `renderTaskSettlements` (the first
+reads -9849.00 (overpaid), the second 149.50 (underpaid)) — a dispatch subscription branch
 that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
 dispatches in order, each `(event, from, to)` matching the audit
@@ -2474,7 +2483,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1532 tests covering the happy path, reject→resubmit
+`npm test` runs 1536 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

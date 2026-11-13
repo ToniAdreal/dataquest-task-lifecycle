@@ -85,8 +85,10 @@ import {
   parseMinorUnits,
   parsePayoutRetryAfter,
   payoutMismatch,
+  renderTaskSettlements,
   staleTasks,
   stateDiagram,
+  summarizeTaskSettlements,
   tasksApproachingDeadline,
   tasksByActor,
   tasksByEvent,
@@ -101,6 +103,7 @@ import {
   deliverPayoutWebhook,
   deliverPayoutWebhookToMany,
   diffTaskSnapshots,
+  diffTaskSettlementsSummaries,
   verifyPayoutWebhook,
   type TaskEvent,
   type TaskHistoryEntry,
@@ -328,6 +331,30 @@ Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):
   parseMinorUnits("1,234.56") rejected: invalid minor units amount: "1,234.56" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (a thousands separator is not a strict decimal amount)
   parseMinorUnits("1.2e3") rejected: invalid minor units amount: "1.2e3" is not a strict decimal amount (optional minus, at most 2 decimal places, no thousands separator, no scientific notation) (scientific notation is not a strict decimal amount)
   parse: strict decimal only — optional minus, at most 2 decimal places, no thousands separator, no scientific notation; -0.00 parses to 0, never -0
+
+Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):
+  corrected: DEMO-087 re-drives DEMO-001's chain with payoutAmount 100 (the unquoted settlement was corrected from 10098.5 to 100.00)
+  diff: {"paidTotalChanged":{"from":1634900,"to":635050},"gapChanged":{"from":-984900,"to":14950},"unquotedPaidTotalChanged":{"from":1009850,"to":10000}} (only the payout-linked fields moved — tasks, paid, quotedTotal, mismatched and unquotedPaid did not; gap is its own entry)
+  rendered before (renderTaskSettlements, as recorded):
+    Task settlements summary
+    Tasks: 6 (paid: 4)
+    Quoted total: 6500.00
+    Paid total: 16349.00
+    Gap: -9849.00 (overpaid)
+    Mismatched payouts: 1
+    Unquoted paid tasks: 2
+    Unquoted paid total: 10098.50
+    Amounts are integer minor units (cents).
+  rendered after (renderTaskSettlements, payout corrected):
+    Task settlements summary
+    Tasks: 6 (paid: 4)
+    Quoted total: 6500.00
+    Paid total: 6350.50
+    Gap: 149.50 (underpaid)
+    Mismatched payouts: 1
+    Unquoted paid tasks: 2
+    Unquoted paid total: 100.00
+    Amounts are integer minor units (cents).
 
 Dispatch subscription branch (sixth task, in-process fan-out):
 Task DEMO-006: DRAFT
@@ -1097,7 +1124,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 959);
+  assert.equal(lines.length, 983);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1888,7 +1915,7 @@ test("demo minor-unit parsing segment is deterministic: two runs print byte-iden
   const parsingLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):"),
-      ls.indexOf("Dispatch subscription branch (sixth task, in-process fan-out):") - 1,
+      ls.indexOf("Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):") - 1,
     );
   const a = parsingLines((await runDemo()).lines);
   const b = parsingLines((await runDemo()).lines);
@@ -1897,6 +1924,199 @@ test("demo minor-unit parsing segment is deterministic: two runs print byte-iden
   // literal, so no normalization is needed.
   assert.equal(a.length, 16);
   assert.deepEqual(a, b);
+});
+
+test("demo shows the settlement summary diff + rendering branch in-process: one payout corrected, three fields move", async () => {
+  const {
+    settlementSummaryBefore,
+    settlementSummaryAfter,
+    settlementSummaryDiff,
+    settlementSummaryCorrectedTask,
+    settlementSummaryRenderedBefore,
+    settlementSummaryRenderedAfter,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  // Hand-written expectations, independent of the demo's own
+  // literals: the screened batch as recorded — DEMO-096 counts as
+  // a fourth PAID task (settled under a payoutRef with no recorded
+  // amount, so it is a second unquoted PAID task holding 0) — and
+  // the same batch with DEMO-001's payout corrected from 10098.5
+  // to 100.00.
+  assert.deepEqual(settlementSummaryBefore, {
+    tasks: 6,
+    paid: 4,
+    quotedTotal: 650000,
+    paidTotal: 1634900,
+    gap: -984900,
+    mismatched: 1,
+    unquotedPaid: 2,
+    unquotedPaidTotal: 1009850,
+  });
+  assert.deepEqual(settlementSummaryAfter, {
+    tasks: 6,
+    paid: 4,
+    quotedTotal: 650000,
+    paidTotal: 635050,
+    gap: 14950,
+    mismatched: 1,
+    unquotedPaid: 2,
+    unquotedPaidTotal: 10000,
+  });
+  assert.deepEqual(settlementSummaryDiff, {
+    paidTotalChanged: { from: 1634900, to: 635050 },
+    gapChanged: { from: -984900, to: 14950 },
+    unquotedPaidTotalChanged: { from: 1009850, to: 10000 },
+  });
+  // The corrected task is DEMO-001's chain re-driven: the same 12
+  // steps, only the payout differs.
+  assert.equal(settlementSummaryCorrectedTask.id, "DEMO-087");
+  assert.equal(settlementSummaryCorrectedTask.state, "PAID");
+  assert.equal(settlementSummaryCorrectedTask.history.length, 12);
+  assert.equal(
+    settlementSummaryCorrectedTask.history.find(
+      (entry) => entry.event === "PAYOUT_COMPLETE",
+    )?.payoutAmount,
+    100,
+  );
+  // The structured values agree with the library directly, and the
+  // gap identity holds on both sides of the correction.
+  assert.deepEqual(
+    diffTaskSettlementsSummaries(
+      settlementSummaryBefore,
+      settlementSummaryAfter,
+    ),
+    settlementSummaryDiff,
+  );
+  assert.equal(
+    renderTaskSettlements(settlementSummaryBefore),
+    settlementSummaryRenderedBefore,
+  );
+  assert.equal(
+    renderTaskSettlements(settlementSummaryAfter),
+    settlementSummaryRenderedAfter,
+  );
+  assert.equal(
+    settlementSummaryBefore.gap + settlementSummaryBefore.unquotedPaidTotal,
+    24950,
+  );
+  assert.equal(
+    settlementSummaryAfter.gap + settlementSummaryAfter.unquotedPaidTotal,
+    24950,
+  );
+  // Order: the summary branch follows the parsing branch and
+  // precedes the subscription branch.
+  const summaryAt = text.indexOf(
+    "Settlement summary diff + rendering branch",
+  );
+  assert.ok(
+    summaryAt >
+      text.indexOf(
+        "Minor-unit parsing branch (parseMinorUnits over the reconciliation strings):",
+      ),
+    "summary branch must follow the parsing branch",
+  );
+  assert.ok(
+    text.indexOf(
+      "Dispatch subscription branch (sixth task, in-process fan-out):",
+    ) > summaryAt,
+    "subscription branch must follow the summary branch",
+  );
+  assert.match(
+    text,
+    /corrected: DEMO-087 re-drives DEMO-001's chain with payoutAmount 100/,
+  );
+  assert.match(
+    text,
+    /diff: \{"paidTotalChanged":\{"from":1634900,"to":635050\},"gapChanged":\{"from":-984900,"to":14950\},"unquotedPaidTotalChanged":\{"from":1009850,"to":10000\}\}/,
+  );
+});
+
+test("demo settlement summary renders are verbatim: the recorded summary reads overpaid, the recomputed one underpaid", async () => {
+  const {
+    settlementSummaryRenderedBefore,
+    settlementSummaryRenderedAfter,
+  } = await runDemo();
+  assert.equal(
+    settlementSummaryRenderedBefore,
+    [
+      "Task settlements summary",
+      "Tasks: 6 (paid: 4)",
+      "Quoted total: 6500.00",
+      "Paid total: 16349.00",
+      "Gap: -9849.00 (overpaid)",
+      "Mismatched payouts: 1",
+      "Unquoted paid tasks: 2",
+      "Unquoted paid total: 10098.50",
+      "Amounts are integer minor units (cents).",
+    ].join("\n"),
+  );
+  assert.equal(
+    settlementSummaryRenderedAfter,
+    [
+      "Task settlements summary",
+      "Tasks: 6 (paid: 4)",
+      "Quoted total: 6500.00",
+      "Paid total: 6350.50",
+      "Gap: 149.50 (underpaid)",
+      "Mismatched payouts: 1",
+      "Unquoted paid tasks: 2",
+      "Unquoted paid total: 100.00",
+      "Amounts are integer minor units (cents).",
+    ].join("\n"),
+  );
+});
+
+test("demo settlement summary segment is deterministic: two runs print byte-identical summary lines", async () => {
+  const summaryLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):",
+      ),
+      ls.indexOf(
+        "Dispatch subscription branch (sixth task, in-process fan-out):",
+      ) - 1,
+    );
+  const a = summaryLines((await runDemo()).lines);
+  const b = summaryLines((await runDemo()).lines);
+  // Header + corrected line + diff line + rendered-before header +
+  // 9 rendered lines + rendered-after header + 9 rendered lines;
+  // every value is a pinned literal, so no normalization is needed.
+  assert.equal(a.length, 23);
+  assert.deepEqual(a, b);
+});
+
+test("demo settlement summary segment prints the full branch verbatim: corrected line, diff line, both renders", async () => {
+  const { lines } = await runDemo();
+  const start = lines.indexOf(
+    "Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):",
+  );
+  assert.ok(start > 0);
+  assert.deepEqual(lines.slice(start, start + 23), [
+    "Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):",
+    "  corrected: DEMO-087 re-drives DEMO-001's chain with payoutAmount 100 (the unquoted settlement was corrected from 10098.5 to 100.00)",
+    '  diff: {"paidTotalChanged":{"from":1634900,"to":635050},"gapChanged":{"from":-984900,"to":14950},"unquotedPaidTotalChanged":{"from":1009850,"to":10000}} (only the payout-linked fields moved — tasks, paid, quotedTotal, mismatched and unquotedPaid did not; gap is its own entry)',
+    "  rendered before (renderTaskSettlements, as recorded):",
+    "    Task settlements summary",
+    "    Tasks: 6 (paid: 4)",
+    "    Quoted total: 6500.00",
+    "    Paid total: 16349.00",
+    "    Gap: -9849.00 (overpaid)",
+    "    Mismatched payouts: 1",
+    "    Unquoted paid tasks: 2",
+    "    Unquoted paid total: 10098.50",
+    "    Amounts are integer minor units (cents).",
+    "  rendered after (renderTaskSettlements, payout corrected):",
+    "    Task settlements summary",
+    "    Tasks: 6 (paid: 4)",
+    "    Quoted total: 6500.00",
+    "    Paid total: 6350.50",
+    "    Gap: 149.50 (underpaid)",
+    "    Mismatched payouts: 1",
+    "    Unquoted paid tasks: 2",
+    "    Unquoted paid total: 100.00",
+    "    Amounts are integer minor units (cents).",
+  ]);
 });
 
 
@@ -3819,10 +4039,13 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 959);
+  assert.equal(out.trimEnd().split("\n").length, 983);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
+  assert.match(out, /Settlement summary diff \+ rendering branch/);
+  assert.match(out, /Gap: -9849\.00 \(overpaid\)/);
+  assert.match(out, /Gap: 149\.50 \(underpaid\)/);
 });
 
 test("demo shows the stale-task batch execution branch in-process: the unactionable stale task fails in isolation and the rest of the batch is still acted on", async () => {

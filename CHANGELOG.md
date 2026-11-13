@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo settlement summary diff + rendering branch (2026-11-13,
+  backlog #1108): `npm run demo` now summarizes the screened batch
+  twice with `summarizeTaskSettlements` — as recorded (6 tasks, 4
+  `PAID`, quoted 650000, paid 1634900, gap -984900, 1 mismatched, 2
+  unquoted `PAID` tasks holding 1009850) and recomputed after
+  DEMO-087 re-drives DEMO-001's chain with the payout corrected
+  from 10098.5 to 100.00 (paid 635050, gap 14950) — diffs the two
+  with `diffTaskSettlementsSummaries` (exactly three fields move:
+  `paidTotalChanged`, `gapChanged`, `unquotedPaidTotalChanged`,
+  gap as its own entry) and prints both summaries with
+  `renderTaskSettlements` (the first reads -9849.00 `(overpaid)`,
+  the second 149.50 `(underpaid)`). All six figures are pinned
+  fail-fast in the demo. 4 tests in `test/demo.test.ts`.
+
 - `renderTaskSettlements(summary)` (2026-11-13, backlog #1096,
   the dataquest-side mirror of escrow's `renderReport`): plain
   human-readable text form of a task settlements summary — title
