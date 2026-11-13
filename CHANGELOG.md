@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `diffTaskSettlementsSummaries(a, b)` (2026-11-13, backlog #1094,
+  the dataquest-side mirror of escrow's `diffSettlementReports`
+  from #1092): field-level difference between two task settlements
+  summaries — one `{ <field>Changed: { from, to } }` entry per moved
+  field, `{}` when nothing moved. Every comparison is exact-integer
+  (all eight fields are integer minor units or counts, so there is
+  no float tolerance), and `gap` is its own entry, reported
+  separately from `quotedTotal` / `paidTotal`. A comparison, not a
+  validation: it never re-checks the gap identity, and there is no
+  identity guard because a summary carries no batch id. 12 tests in
+  `test/diffTaskSettlementsSummaries.test.ts`.
+
 - Dry-run rehearsal port for the payout webhook outbox retry
   runner (2026-11-12, backlog #1089, the escrow
   `retrySettlementWebhookOutbox` dry run from #1088 mirrored for

@@ -408,3 +408,114 @@ export function parseTaskSettlementsJson(text: string): TaskSettlementsSummary {
   assertSummaryShape(parsed, "cannot parse task settlements JSON");
   return parsed as TaskSettlementsSummary;
 }
+
+/**
+ * Field-level difference between two task settlements summaries.
+ * Only fields that moved are present: two identical summaries diff
+ * to `{}`. Every comparison is an exact integer comparison — all
+ * eight fields are integer minor units or counts (see
+ * {@link TaskSettlementsSummary}), so there is no float tolerance
+ * to disagree about, unlike escrow's `diffSettlementReports`, which
+ * compares money at integer-cent precision because its figures are
+ * raw floats. `gap` is its own entry, reported separately from
+ * `quotedTotal` / `paidTotal`: a re-run that moves both totals by
+ * the same amount leaves `gap` untouched and reports no
+ * `gapChanged`, while a move in the gap alone — the summary's own
+ * figures disagreeing with each other — is still visible.
+ */
+export interface TaskSettlementsSummaryDiff {
+  tasksChanged?: { from: number; to: number };
+  paidChanged?: { from: number; to: number };
+  quotedTotalChanged?: { from: number; to: number };
+  paidTotalChanged?: { from: number; to: number };
+  gapChanged?: { from: number; to: number };
+  mismatchedChanged?: { from: number; to: number };
+  unquotedPaidChanged?: { from: number; to: number };
+  unquotedPaidTotalChanged?: { from: number; to: number };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** One field's move, or `undefined` when the field did not move. */
+function fieldDiff(
+  from: number,
+  to: number,
+): { from: number; to: number } | undefined {
+  return from === to ? undefined : { from, to };
+}
+
+/**
+ * Compare two task settlements summaries and report what changed
+ * between them — the reconciliation question ("what moved since the
+ * summary I stored last night?") without hand-written field compares
+ * that disagree about the gap. This is the dataquest-side mirror of
+ * escrow's `diffSettlementReports` (backlog #1092), with the same
+ * diff shape — `{ <field>Changed: { from, to } }` per moved field,
+ * `{}` when nothing moved — and the same contract: a comparison,
+ * not a validation.
+ *
+ * Two deliberate differences from the escrow mirror, both forced by
+ * what the summary carries:
+ *  - There is no identity guard. A `SettlementReport` carries an
+ *    `escrowId` the escrow diff refuses to cross; a
+ *    `TaskSettlementsSummary` carries no batch id at all, so there
+ *    is nothing to compare identity on. Diffing summaries of two
+ *    different batches is the caller's responsibility — the diff
+ *    answers "what moved", never "are these the same batch".
+ *  - There is no float tolerance. Every field is already an integer
+ *    (minor units or a count), so exact comparison is the rule and
+ *    a sub-cent noise entry can never appear.
+ *
+ * Pure: reads both summaries, never mutates them, and the diff is a
+ * fresh object (its entries hold numbers, so there is nothing to
+ * detach). This is a comparison, not a validation — it does not
+ * re-check that either summary's `gap` equals
+ * `quotedTotal - paidTotal`, that its fields are safe integers, or
+ * that its figures match any audit history; run an untrusted input
+ * through the renderers/parsers when the input itself is untrusted.
+ *
+ *   const before = { tasks: 6, paid: 3, quotedTotal: 650000,
+ *     paidTotal: 1634900, gap: -984900, mismatched: 1,
+ *     unquotedPaid: 1, unquotedPaidTotal: 1009850 };
+ *   const after = { ...before, paidTotal: 1635000, gap: -985000 };
+ *   diffTaskSettlementsSummaries(before, after);
+ *   // { paidTotalChanged: { from: 1634900, to: 1635000 },
+ *   //   gapChanged: { from: -984900, to: -985000 } }
+ *   // (The gap entry is the gap's own move: 650000 - 1635000 is
+ *   // -985000, and no other field moved.)
+ */
+export function diffTaskSettlementsSummaries(
+  a: TaskSettlementsSummary,
+  b: TaskSettlementsSummary,
+): TaskSettlementsSummaryDiff {
+  if (!isRecord(a) || !isRecord(b)) {
+    throw new Error(
+      "invalid task settlements summary diff: both summaries must be objects",
+    );
+  }
+  const diff: TaskSettlementsSummaryDiff = {};
+  const tasks = fieldDiff(a.tasks, b.tasks);
+  if (tasks !== undefined) diff.tasksChanged = tasks;
+  const paid = fieldDiff(a.paid, b.paid);
+  if (paid !== undefined) diff.paidChanged = paid;
+  const quotedTotal = fieldDiff(a.quotedTotal, b.quotedTotal);
+  if (quotedTotal !== undefined) diff.quotedTotalChanged = quotedTotal;
+  const paidTotal = fieldDiff(a.paidTotal, b.paidTotal);
+  if (paidTotal !== undefined) diff.paidTotalChanged = paidTotal;
+  const gap = fieldDiff(a.gap, b.gap);
+  if (gap !== undefined) diff.gapChanged = gap;
+  const mismatched = fieldDiff(a.mismatched, b.mismatched);
+  if (mismatched !== undefined) diff.mismatchedChanged = mismatched;
+  const unquotedPaid = fieldDiff(a.unquotedPaid, b.unquotedPaid);
+  if (unquotedPaid !== undefined) diff.unquotedPaidChanged = unquotedPaid;
+  const unquotedPaidTotal = fieldDiff(
+    a.unquotedPaidTotal,
+    b.unquotedPaidTotal,
+  );
+  if (unquotedPaidTotal !== undefined) {
+    diff.unquotedPaidTotalChanged = unquotedPaidTotal;
+  }
+  return diff;
+}

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1508 tests, all local
+npm test   # 1520 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1346,6 +1346,36 @@ BOM, and RFC 4180 quoted fields are transport artifacts and parse;
 import is structural validation only, not a re-verification of the
 audit histories the summary claims to summarize.
 
+The same question one re-run later — "what moved since the summary
+I stored?" — is `diffTaskSettlementsSummaries(before, after)`, the
+dataquest-side mirror of escrow's `diffSettlementReports` (backlog
+#1092): it reports one `{ <field>Changed: { from, to } }` entry per
+moved field, and `{}` when nothing moved. Every comparison is an
+exact integer comparison (all eight fields are integer minor units
+or counts, so there is no float tolerance to disagree about), and
+`gap` is its own entry, reported separately from `quotedTotal` /
+`paidTotal` — a re-run that moves both totals by the same amount
+leaves the gap untouched and reports no `gapChanged`:
+
+```ts
+import { diffTaskSettlementsSummaries } from "dataquest-task-lifecycle";
+
+const before = { tasks: 6, paid: 3, quotedTotal: 650000,
+  paidTotal: 1634900, gap: -984900, mismatched: 1,
+  unquotedPaid: 1, unquotedPaidTotal: 1009850 };
+const after = { ...before, paidTotal: 1635000, gap: -985000 };
+diffTaskSettlementsSummaries(before, after);
+// => { paidTotalChanged: { from: 1634900, to: 1635000 },
+//      gapChanged: { from: -984900, to: -985000 } }
+```
+
+Two honest limits, both forced by what the summary carries: the
+diff is a comparison, not a validation — it never re-checks that
+either summary's `gap` equals `quotedTotal - paidTotal` — and
+there is no identity guard, because a summary carries no batch id
+at all (unlike escrow's `escrowId` check), so diffing summaries of
+two different batches is the caller's responsibility.
+
 ### Payout webhooks
 
 The in-process `subscribe()` hook cannot notify anything outside the
@@ -2427,7 +2457,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1508 tests covering the happy path, reject→resubmit
+`npm test` runs 1520 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
