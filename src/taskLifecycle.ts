@@ -396,6 +396,88 @@ export function nextSlaDeadline(
   return best;
 }
 
+/** A task together with its next SLA deadline anywhere in its SLA map, as returned by {@link nextTaskDeadline}. */
+export interface NextTaskDeadline {
+  task: TaskLifecycle;
+  /** The state whose deadline is the earliest — the task's current state, or any other non-terminal state in its SLA map. */
+  state: TaskState;
+  /** That state's deadline, as canonical ISO-8601 (as stored by the task). */
+  deadline: string;
+}
+
+/**
+ * Scheduler helper: from a batch of tasks, return the single earliest
+ * SLA deadline anywhere in any task's per-state SLA map — together with
+ * the task and the state it belongs to.
+ *
+ * This is the whole-map counterpart to {@link nextSlaDeadline}, which
+ * reads only each task's CURRENT state's deadline (the deadline that
+ * binds right now, the one the watchdog screens use). That helper is
+ * the right pick for "when does the next task actually become overdue".
+ * This one answers the planning question instead — "what is the
+ * earliest SLA date attached to any of these tasks, in any state" — so
+ * it scans every non-terminal state's deadline in each task's map:
+ * the winner may be the task's current state, a state it has not
+ * reached yet (a planned SLA for a later step), or a state it already
+ * left (the map is caller-managed planning data, so a stale entry
+ * still counts here — clear it with `clearSlaDeadline` when it no
+ * longer applies). A deadline attached to a terminal state
+ * (PAID/ABANDONED/EXPIRED) never counts: the task is done when it
+ * gets there, so nothing about that state schedules anything.
+ *
+ * Only non-terminal tasks qualify, and only deadlines strictly after
+ * `now`: a deadline exactly at `now` is overdue, not next, and
+ * belongs to `expiredTasks()`. A task whose deadlines are all at or
+ * before `now` — or that carries only terminal-state deadlines — has
+ * no candidate here. Ties keep input order: when two tasks share the
+ * earliest deadline, the first one in the input array wins; within
+ * one task, states are scanned in transition-table declaration order,
+ * so the first of two equally-early states wins. Returns undefined
+ * when no task qualifies (empty input, no deadlines, or every
+ * deadline at or before `now`).
+ *
+ * Pure: reads the tasks, never mutates or dispatches. The returned
+ * `task` is the same object from the input array, so the caller can
+ * act on it directly; the returned `deadline` is the canonical ISO
+ * string `getSlaDeadline()` already stores. This helper itself never
+ * dispatches — when the deadline arrives, expiry still goes through
+ * `expireOverdueTasks()`:
+ *
+ *   const next = nextTaskDeadline(allTasks, now);
+ *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
+ *
+ * An invalid `now` fails fast instead of silently returning undefined.
+ */
+export function nextTaskDeadline(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): NextTaskDeadline | undefined {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  let best: NextTaskDeadline | undefined;
+  for (const task of tasks) {
+    if (task.isTerminal) continue;
+    for (const state of Object.keys(TRANSITIONS) as TaskState[]) {
+      if (TERMINAL.has(state)) continue;
+      const deadline = task.getSlaDeadline(state);
+      if (deadline === undefined) continue;
+      // getSlaDeadline() only ever returns canonical ISO (setSlaDeadline
+      // normalizes on the way in, snapshot parsing rejects the rest),
+      // so this parse cannot fail on library-produced tasks; the
+      // finiteness guard is belt-and-braces against a hand-built one.
+      const deadlineMs = Date.parse(deadline);
+      if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) continue;
+      if (best !== undefined && deadlineMs >= Date.parse(best.deadline)) {
+        continue;
+      }
+      best = { task, state, deadline };
+    }
+  }
+  return best;
+}
+
 /**
  * Batch filter: from a batch of tasks, return the ones currently in the
  * given state, in input order.

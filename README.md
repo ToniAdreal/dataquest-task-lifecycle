@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1536 tests, all local
+npm test   # 1549 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -600,6 +600,23 @@ repeated polls over an unchanged batch are stable. It is pure — it
 never dispatches — so a scheduler uses it to pick the next wake-up
 time and still expires through `expireOverdueTasks()` when that time
 arrives; an invalid `now` fails fast.
+
+The whole-map counterpart is `nextTaskDeadline(tasks, now)` — it
+returns the single earliest SLA deadline anywhere in any task's
+per-state SLA map, as `{ task, state, deadline }`, or `undefined`
+when no task qualifies. It scans every non-terminal state's deadline
+in each task's map, so the winning `state` may be the task's current
+state, a state it has not reached yet (a planned SLA for a later
+step), or a state it already left (the map is caller-managed planning
+data, so a stale entry still counts here — clear it with
+`clearSlaDeadline` when it no longer applies). A deadline attached
+to a terminal state (`PAID`/`ABANDONED`/`EXPIRED`) never counts, and
+neither does a deadline at or before `now`. Ties keep input order
+across tasks (and transition-table declaration order within one
+task). Use `nextSlaDeadline` when you want only the deadline that
+binds right now; use `nextTaskDeadline` when you want the earliest
+date attached to a task in any state. Like its sibling it is pure
+and fails fast on an invalid `now`.
 
 ```ts
 import { expireOverdueTasks, TaskLifecycle } from "./src/index.js";
@@ -2483,7 +2500,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1536 tests covering the happy path, reject→resubmit
+`npm test` runs 1549 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

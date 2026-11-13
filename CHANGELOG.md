@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `nextTaskDeadline(tasks, now)` (2026-11-13, backlog #1114, the
+  whole-map counterpart to `nextSlaDeadline` and the dataquest-side
+  mirror of escrow's `nextEscrowDeadline`): from a batch of tasks it
+  returns the single earliest SLA deadline anywhere in any task's
+  per-state SLA map, as `{ task, state, deadline }` (the deadline is
+  the canonical ISO string), or `undefined` when no task qualifies.
+  It scans every non-terminal state's deadline in each task's map, so
+  the winning `state` may be the task's current state, a state it has
+  not reached yet, or a state it already left (the map is
+  caller-managed planning data, so a stale entry still counts here —
+  clear it with `clearSlaDeadline`; callers who want only the
+  deadline that binds right now keep using `nextSlaDeadline`).
+  Deadlines attached to terminal states (`PAID`/`ABANDONED`/`EXPIRED`)
+  never count, and neither does a deadline at or before `now`. Ties
+  keep input order across tasks (transition-table declaration order
+  within one task). Pure, and fails fast on an invalid `now`
+  (`invalid now: expected a valid Date`). 13 tests in
+  `test/nextTaskDeadline.test.ts`.
+
 - Demo settlement summary diff + rendering branch (2026-11-13,
   backlog #1108): `npm run demo` now summarizes the screened batch
   twice with `summarizeTaskSettlements` — as recorded (6 tasks, 4
