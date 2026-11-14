@@ -26,6 +26,7 @@ export {
   replay,
   SNAPSHOT_VERSION,
   staleTasks,
+  stateAtFromHistory,
   stateDiagram,
   summarizeTaskSettlements,
   tasksApproachingDeadline,

@@ -3976,6 +3976,70 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
 }
 
 /**
+ * Resolve a `stateAt` query time to epoch milliseconds. Accepts a Date
+ * or an ISO-8601 string — any parseable form, not just canonical: the
+ * query time is caller input, not audit data, so the canonical-ISO bar
+ * that `parseHistory` applies to stored entries does not apply here.
+ * Anything else, or an unparseable value, is a caller error, thrown
+ * before any history is read (mirroring how `parseHistory` validates
+ * its secret before touching the log).
+ */
+function resolveStateAtTime(time: Date | string): number {
+  if (time instanceof Date) {
+    const ms = time.getTime();
+    if (Number.isFinite(ms)) return ms;
+  } else if (typeof time === "string") {
+    const ms = Date.parse(time);
+    if (Number.isFinite(ms)) return ms;
+  }
+  throw new Error(
+    `invalid stateAt time: expected a valid Date or ISO-8601 string, got ${String(time)}`,
+  );
+}
+
+/**
+ * State at a moment, from already-validated entries: the `to` of the
+ * last entry whose `at` is at or before the query time. The boundary is
+ * inclusive — a query exactly on an entry's timestamp sees that entry's
+ * effect, the same boundary `isOverdue` uses (`now >= deadline`). No
+ * entry at or before the time means the task had not moved yet, so the
+ * answer is the initial state, "DRAFT". Entries are non-decreasing in
+ * `at` (`parseHistory` enforces it; `dispatch` writes canonical ISO),
+ * so the scan stops at the first entry past the query time.
+ */
+function stateAtFromEntries(
+  entries: readonly TaskHistoryEntry[],
+  timeMs: number,
+): TaskState {
+  let state: TaskState = "DRAFT";
+  for (const entry of entries) {
+    if (Date.parse(entry.at) > timeMs) break;
+    state = entry.to;
+  }
+  return state;
+}
+
+/**
+ * Time travel over a raw audit log: the state the task was in at a
+ * moment, without rebuilding the task. The log is validated with the
+ * same `parseHistory` checklist `replay`/`fromHistory` apply — a broken
+ * chain throws `invalid history: …` instead of returning a guessed
+ * state — and a keyed chain needs the same `opts.auditSecret` a
+ * rehydration would. Pure: reads the log, never mutates it.
+ *
+ *   stateAtFromHistory(log, "2026-03-01T15:00:00.000Z"); // => "ACCEPTED"
+ */
+export function stateAtFromHistory(
+  history: unknown,
+  time: Date | string,
+  opts?: AuditChainOptions,
+): TaskState {
+  const timeMs = resolveStateAtTime(time);
+  const entries = parseHistory(history, opts);
+  return stateAtFromEntries(entries, timeMs);
+}
+
+/**
  * Canonical JSON for snapshot MACing: object keys sorted
  * recursively (so a JSON round-trip that reorders keys still
  * verifies), array order preserved (reordering history entries would
@@ -4401,6 +4465,24 @@ export class TaskLifecycle {
    */
   get history(): readonly TaskHistoryEntry[] {
     return Object.freeze(this._history.map((e) => Object.freeze({ ...e })));
+  }
+
+  /**
+   * The state this task was in at a moment — a read-only "time travel"
+   * query over the append-only audit history, for audit and support
+   * questions ("what state was this task in yesterday at 15:00?") that
+   * do not need a full rebuild. Takes the `to` of the last entry whose
+   * `at` is at or before `time` (inclusive: a query exactly on an
+   * entry's timestamp sees that entry's effect); a time before the
+   * first entry returns the initial state, "DRAFT". Accepts a Date or
+   * an ISO-8601 string; anything else, or an unparseable value, throws
+   * `invalid stateAt time: …`. Pure read: the task's state and history
+   * are untouched, and dispatching afterwards continues at the next
+   * seq. The module-level {@link stateAtFromHistory} is the same query
+   * over a raw log, with no instance at all.
+   */
+  stateAt(time: Date | string): TaskState {
+    return stateAtFromEntries(this._history, resolveStateAtTime(time));
   }
 
   get isTerminal(): boolean {

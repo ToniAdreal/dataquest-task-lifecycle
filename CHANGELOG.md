@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Time-travel read-only API (2026-11-14, backlog #1130): instance
+  method `stateAt(time)` and pure function
+  `stateAtFromHistory(history, time, opts?)` answer "what state was
+  this task in at a moment?" over the append-only audit history,
+  without rebuilding the task. The answer is the `to` of the last
+  entry at or before the query time (inclusive boundary, the same one
+  `isOverdue` uses); a time before the first entry returns the
+  initial state, `"DRAFT"`. The query time accepts a Date or an
+  ISO-8601 string, and an invalid value throws `invalid stateAt
+  time: …` before any history is read. The pure form validates the
+  log with the same `parseHistory` checklist `replay` /
+  `fromHistory` apply — a broken chain throws `invalid history: …`
+  instead of a guessed state — and a keyed chain needs the same
+  `opts.auditSecret` a rehydration would. Pure reads: neither
+  function mutates state or history, and dispatching after a
+  `stateAt` query continues at the next seq. 12 tests in
+  `test/stateAt.test.ts`.
+
 - Budget-remaining read-only API (2026-11-14, backlog #1127): public
   `remainingResubmits` / `remainingDisputes` getters and
   `remainingVisits(state)` expose how much budget is left — each is

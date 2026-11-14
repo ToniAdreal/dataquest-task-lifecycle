@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1583 tests, all local
+npm test   # 1595 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -952,6 +952,26 @@ replay(log); // => "PAID" (pure: just the final state)
 const task = TaskLifecycle.fromHistory("task-042", log);
 task.dispatch("ACCEPT"); // history continues at the next seq, no gaps
 ```
+
+The same log also answers "what state was this task in at a moment?"
+without a rebuild — a read-only time-travel query over the audit
+history, for audit and support questions:
+
+```ts
+task.stateAt("2026-03-01T15:00:00.000Z"); // => "ACCEPTED"
+// The pure form works on a raw log, with the same parseHistory checks:
+stateAtFromHistory(log, new Date("2026-03-01T15:00:00.000Z"));
+```
+
+The answer is the `to` of the last entry at or before the query time
+(inclusive: a query exactly on an entry's timestamp sees that entry's
+effect, the same boundary `isOverdue` uses); a time before the first
+entry returns the initial state, `"DRAFT"`. A broken log throws
+`invalid history: …` instead of a guessed state, a keyed chain needs
+its `auditSecret`, and an invalid query time throws
+`invalid stateAt time: …`. The query never mutates the task — its
+state and history are untouched, and dispatching afterwards continues
+at the next seq.
 
 ### NDJSON history export
 
@@ -2548,7 +2568,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1583 tests covering the happy path, reject→resubmit
+`npm test` runs 1595 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
