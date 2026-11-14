@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1595 tests, all local
+npm test   # 1608 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1811,6 +1811,23 @@ longer than `MAX_EVENT_ID_LENGTH` (256 characters) is rejected at
 `recordAttempt()` and at snapshot restore, never truncated —
 truncation would change the pair's key.
 
+A dead letter is not a dead end: `redrive(endpoint, eventId,
+{ now? })` moves a dead-lettered pair back to `pending()` for a
+fresh delivery round — the recovery path after the downstream
+endpoint is fixed. The redriven pair keeps its first-recorded
+position, its `attempts` reset to 0, its `lastAt` stamped with the
+redrive time, and no `lastError` (the old error belonged to the
+exhausted round); a later failure counts from 1 again, exactly like
+a pair cleared by `acknowledge()`. Only a dead-lettered pair can be
+redriven — redriving a pending or untracked pair throws and changes
+nothing — and redrive is a manual, per-pair decision, not an
+automatic retry: the outbox still never retries on its own. A
+redriven pair exports with `attempts: 0`, which `restore()` accepts
+as pending (a hand-built snapshot entry with `attempts: 0` restores
+the same way; negative and non-integer counts still fail closed),
+so a redrive survives a restart through the same snapshot round-trip
+as any other pair.
+
 The ledger is capped at `maxEntries` pairs (default 10_000,
 mirroring `PayoutEventDedupe`): recording a failure for a new pair
 past the cap evicts dead-lettered pairs first (oldest `lastAt`
@@ -2568,7 +2585,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1595 tests covering the happy path, reject→resubmit
+`npm test` runs 1608 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

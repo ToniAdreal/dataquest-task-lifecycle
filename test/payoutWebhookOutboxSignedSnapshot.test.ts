@@ -428,7 +428,7 @@ test("MAC-valid envelope with a malformed snapshot still fails validation", () =
         SECRET,
         { now: () => 1_001_000 },
       ),
-    /invalid snapshot: entries\[0\]: attempts must be a positive integer/,
+    /invalid snapshot: entries\[0\]: attempts must be a non-negative integer/,
   );
 });
 

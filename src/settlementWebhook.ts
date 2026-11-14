@@ -1771,7 +1771,10 @@ export interface PayoutWebhookOutboxEntry {
  *   any other value (including a missing `v`) instead of guessing.
  * - `entries`: one object per tracked `(endpoint, eventId)` pair, in
  *   first-recorded order. `attempts` is the consecutive-failure count;
- *   whether an entry reads as pending or dead-lettered after restore
+ *   `0` is a pair redriven from the dead letter that has not failed
+ *   again yet (see `redrive()`), not a missing record — restore
+ *   accepts it and reads it as pending. Whether an entry reads as
+ *   pending or dead-lettered after restore
  *   is derived from `attempts` against the *restoring* outbox's
  *   `maxAttempts`, so a snapshot restored under a different
  *   `maxAttempts` re-derives the boundary honestly. `lastError` is
@@ -1982,6 +1985,10 @@ function computeOutboxSnapshotMac(
  *   pairs by `lastAt` instead;
  * - a successful attempt (`ok: true`, or `acknowledge()`) removes the
  *   pair entirely, so a later failure starts counting from 1 again;
+ * - a dead-lettered pair can be redriven (`redrive()`) back to pending
+ *   with `attempts` reset to 0 and `lastError` dropped — a new delivery
+ *   round, not a restore of the old count — so a redriven pair exports
+ *   with `attempts: 0`, which `restore()` accepts as pending;
  * - `pending()` lists pairs with `attempts < maxAttempts`,
  *   `deadLetter()` lists pairs with `attempts >= maxAttempts`; a pair
  *   is in exactly one of the two lists.
@@ -2214,6 +2221,78 @@ export class PayoutWebhookOutbox {
     return out;
   }
 
+  /**
+   * Move a dead-lettered `(endpoint, eventId)` pair back to pending
+   * for a fresh delivery round — the recovery path after the
+   * downstream endpoint is fixed. Only a dead-lettered pair can be
+   * redriven: redriving a pending pair throws (it still has retries
+   * left — wait for them, or let the retry runner spend them) and
+   * redriving an untracked pair throws (there is nothing to
+   * redrive). The redriven pair keeps its first-recorded position,
+   * its `attempts` reset to 0 and its `lastAt` stamped with
+   * `opts.now` (default the outbox clock), and it carries no
+   * `lastError` — the old error belonged to the exhausted round, and
+   * a fresh round has not failed yet. A later failure counts from 1
+   * again, exactly like a pair cleared by `acknowledge()`; a success
+   * clears it the same way.
+   *
+   * This is deliberately a manual, per-pair operation, not an
+   * automatic retry: the outbox never retries on its own, and a
+   * redriven pair re-enters `pending()` (and the
+   * `retryPayoutWebhookOutbox` runner's next pass) only because a
+   * human decided the endpoint is healthy again. Redrive is
+   * distinct from `restore()`: restore replays a persisted ledger
+   * with its failure counts intact, redrive starts a new round and
+   * discards the old count — so a redriven pair exports with
+   * `attempts: 0`, which `restore()` accepts (see
+   * {@link PayoutWebhookOutboxSnapshot}).
+   *
+   * Caller bugs fail fast before anything changes: an empty or
+   * non-string `endpoint`/`eventId`, or a non-finite `opts.now`.
+   */
+  redrive(
+    endpoint: string,
+    eventId: string,
+    opts?: { now?: number },
+  ): void {
+    if (typeof endpoint !== "string" || endpoint.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: endpoint must be a non-empty string",
+      );
+    }
+    if (typeof eventId !== "string" || eventId.length === 0) {
+      throw new Error(
+        "PayoutWebhookOutbox: eventId must be a non-empty string",
+      );
+    }
+    const now = opts?.now ?? this.clock();
+    if (typeof now !== "number" || !Number.isFinite(now)) {
+      throw new Error(
+        "PayoutWebhookOutbox: redrive now must be a finite number (milliseconds)",
+      );
+    }
+    const byEvent = this.records.get(endpoint);
+    if (byEvent === undefined) {
+      throw new Error(
+        "PayoutWebhookOutbox: cannot redrive an untracked pair",
+      );
+    }
+    const entry = byEvent.get(eventId);
+    if (entry === undefined) {
+      throw new Error(
+        "PayoutWebhookOutbox: cannot redrive an untracked pair",
+      );
+    }
+    if (entry.attempts < this.maxAttempts) {
+      throw new Error(
+        "PayoutWebhookOutbox: cannot redrive a pending pair (only dead-lettered pairs can be redriven)",
+      );
+    }
+    // Map.set on an existing key keeps its first-recorded position,
+    // so the redriven pair does not jump the queue.
+    byEvent.set(eventId, { endpoint, eventId, attempts: 0, lastAt: now });
+  }
+
   /** Number of tracked `(endpoint, eventId)` pairs (pending + dead-lettered). */
   get size(): number {
     let n = 0;
@@ -2328,7 +2407,7 @@ export class PayoutWebhookOutbox {
    * with exactly `endpoint`/`eventId`/`attempts`/`lastAt` plus an
    * optional `lastError`, an empty/non-string `endpoint`/`eventId`,
    * an `eventId` longer than {@link MAX_EVENT_ID_LENGTH} characters,
-   * a non-positive-integer `attempts`, a non-string `lastError`, a
+   * a negative or non-integer `attempts`, a non-string `lastError`, a
    * non-finite `lastAt`) throws — a corrupt snapshot fails loudly at
    * startup rather than silently clearing a dead letter. Duplicate
    * `(endpoint, eventId)` pairs collapse to their last occurrence.
@@ -2407,10 +2486,10 @@ export class PayoutWebhookOutbox {
       if (
         typeof attempts !== "number" ||
         !Number.isInteger(attempts) ||
-        attempts < 1
+        attempts < 0
       )
         fail(
-          `entries[${i}]: attempts must be a positive integer`,
+          `entries[${i}]: attempts must be a non-negative integer`,
         );
       if (lastError !== undefined && typeof lastError !== "string")
         fail(`entries[${i}]: lastError must be a string`);

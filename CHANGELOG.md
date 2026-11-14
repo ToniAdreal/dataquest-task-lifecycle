@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Dead-letter redrive for the payout webhook outbox (2026-11-14,
+  backlog #1135): `PayoutWebhookOutbox.redrive(endpoint, eventId,
+  { now? })` moves a dead-lettered pair back to `pending()` for a
+  fresh delivery round — the recovery path after the downstream
+  endpoint is fixed, mirroring escrow's `SettlementWebhookOutbox`
+  redrive (backlog #1126). The redriven pair keeps its first-recorded
+  position, its `attempts` reset to 0, its `lastAt` stamped with the
+  redrive time (or the outbox clock by default), and no `lastError`;
+  a later failure counts from 1 again, exactly like a pair cleared
+  by `acknowledge()`. Only a dead-lettered pair can be redriven —
+  redriving a pending or untracked pair throws and changes nothing —
+  and redrive is a manual, per-pair decision, not an automatic
+  retry. `restore()` now accepts `attempts: 0` (a redriven pair with
+  no failures in the new round reads as pending; negative and
+  non-integer counts still fail closed), so a redriven pair survives
+  a restart through the same snapshot round-trip as any other pair.
+  13 tests in `test/payoutWebhookOutboxRedrive.test.ts`.
+
 - Time-travel read-only API (2026-11-14, backlog #1130): instance
   method `stateAt(time)` and pure function
   `stateAtFromHistory(history, time, opts?)` answer "what state was

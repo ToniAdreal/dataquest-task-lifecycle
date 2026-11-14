@@ -305,7 +305,7 @@ test("malformed snapshots fail closed at restore", () => {
     { v: 1, entries: "nope" },
     { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: 1 }] },
     { v: 1, entries: [{ endpoint: "", eventId: EVT_1, attempts: 1, lastAt: 0 }] },
-    { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: 0, lastAt: 0 }] },
+    { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: -1, lastAt: 0 }] },
     { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: 1.5, lastAt: 0 }] },
     { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: 1, lastAt: "now" }] },
     { v: 1, entries: [{ endpoint: A, eventId: EVT_1, attempts: 1, lastAt: 0, lastError: 7 }] },
