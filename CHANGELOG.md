@@ -11,6 +11,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Budget-remaining read-only API (2026-11-14, backlog #1127): public
+  `remainingResubmits` / `remainingDisputes` getters and
+  `remainingVisits(state)` expose how much budget is left — each is
+  `Math.max(0, budget - used)` from the same history-derived counts
+  the three budget checks read (`maxResubmits`, `maxDisputes`,
+  `maxVisitsByState`), so 0 means the next dispatch of that kind is
+  rejected and the budget-exhausted error names the same numbers.
+  With no budget configured the answer is `Infinity` (unlimited is
+  not uncounted), a 0 budget reads 0 from the start, and a budget of
+  1 for a state the task already passed through — including its
+  starting state, whose initial visit already counts — reads 0.
+  `remainingVisits` throws `invalid remaining visits: unknown
+  state …` on an unknown state, the same fail-fast bar `visitCount`
+  applies. The values are pure reads and need no new snapshot
+  fields — `toJSON()` / `fromJSON()` and `fromHistory()` preserve
+  them automatically because they derive from the history and the
+  snapshot envelope. 12 tests in `test/remainingBudget.test.ts`.
+
 - `PayoutWebhookOutbox.stats()` (2026-11-14, backlog #1124, the
   dataquest-side mirror of escrow's `SettlementWebhookOutbox.stats()`,
   backlog #1120): returns `{ size, pending, deadLettered,

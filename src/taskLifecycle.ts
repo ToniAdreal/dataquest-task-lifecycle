@@ -4560,6 +4560,64 @@ export class TaskLifecycle {
   }
 
   /**
+   * How many RESUBMITs are left before the `maxResubmits` budget is
+   * spent — read-only, derived from the same history-derived count
+   * the budget check reads (`_maxResubmits - _resubmitCount`,
+   * clamped at 0), so it can never disagree with the
+   * `resubmit budget exhausted: …` error: when this reads 0 the next
+   * RESUBMIT is rejected, and the error text names the same used and
+   * budget numbers. With no budget configured the answer is
+   * `Infinity` (unlimited is not uncounted — `resubmitCount` still
+   * steps). A 0 budget reads 0 from the start. Pure read, like
+   * {@link resubmitCount}.
+   */
+  get remainingResubmits(): number {
+    return Math.max(0, this._maxResubmits - this._resubmitCount);
+  }
+
+  /**
+   * How many DISPUTE appeal rounds are left before the `maxDisputes`
+   * budget is spent — the dispute-side mirror of
+   * {@link remainingResubmits}: `Math.max(0, _maxDisputes -
+   * _disputeCount)`, `Infinity` with no budget configured, 0 when the
+   * budget is spent (and the `dispute budget exhausted: …` error
+   * names the same numbers). Pure read, like {@link disputeCount}.
+   */
+  get remainingDisputes(): number {
+    return Math.max(0, this._maxDisputes - this._disputeCount);
+  }
+
+  /**
+   * How many more times the task may enter a state before the
+   * `maxVisitsByState` budget for it is spent — read-only, derived
+   * from the same history-derived count the visit-budget check reads:
+   * `Math.max(0, budget - _stateVisitCount(state))`, so it reaches 0
+   * exactly when dispatch would throw
+   * `state visit budget exhausted: …` naming the same numbers. A
+   * state with no budget configured reads `Infinity` (unlimited is
+   * not uncounted — {@link visitCount} still steps). Note the
+   * initial visit already counts: a budget of 1 for a state the task
+   * already passed through — including its starting state — reads 0.
+   * Throws `invalid remaining visits: unknown state …` on an unknown
+   * state, with the same fail-fast bar {@link visitCount} applies —
+   * a misspelled state is a caller bug, not an infinite budget.
+   * Pure read, and needs no new snapshot field: the budget and the
+   * count both derive from the snapshot envelope and the history, so
+   * `toJSON()` / `fromJSON()` and `fromHistory()` preserve it
+   * automatically.
+   */
+  remainingVisits(state: TaskState): number {
+    if (!STATES.has(state)) {
+      throw new Error(
+        `invalid remaining visits: unknown state ${String(state)}`,
+      );
+    }
+    const budget = this._maxVisitsByState.get(state);
+    if (budget === undefined) return Infinity;
+    return Math.max(0, budget - this._stateVisitCount(state));
+  }
+
+  /**
    * Move the task to the next state via an event, appending the audit entry.
    *
    * `opts.actor` / `opts.note` are written into the entry verbatim, so they

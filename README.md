@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1571 tests, all local
+npm test   # 1583 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2265,9 +2265,9 @@ rounds and both pass.
 
 The three budgets' used counts used to be readable only by waiting for
 the budget-exhausted error text — a watchdog that wants to ask "how
-many RESUBMITs are left" before dispatching had no read path. Three
-read-only accessors expose the same history-derived counts the budget
-checks read, so they can never drift from the audit trail:
+many RESUBMITs are left" before dispatching had no read path. Read-only
+accessors expose the same history-derived counts the budget checks
+read, so they can never drift from the audit trail:
 
 ```ts
 task.resubmitCount; // RESUBMITs used so far
@@ -2275,13 +2275,33 @@ task.disputeCount; // DISPUTE rounds used so far
 task.visitCount("CAPTURING"); // visits to a state so far (1 for the initial state)
 ```
 
-All three are readable with or without a budget configured: unlimited
-is not uncounted. `visitCount` throws `invalid visit count: unknown
+The matching remaining values answer "how many are left" without
+recomputing `max - used` or hand-rolling the unconfigured-budget
+branch:
+
+```ts
+task.remainingResubmits; // RESUBMITs left (Infinity with no maxResubmits)
+task.remainingDisputes; // DISPUTE rounds left (Infinity with no maxDisputes)
+task.remainingVisits("CAPTURING"); // entries into a state left (Infinity with no budget for it)
+```
+
+Each remaining value is `Math.max(0, budget - used)` from the same
+history-derived counts the budget checks read, so 0 means the next
+dispatch of that kind is rejected and the budget-exhausted error names
+the same used and budget numbers. A 0 budget reads 0 from the start.
+A budget of 1 for a state the task already passed through — including
+its starting state, whose initial visit already counts — reads 0.
+
+All six are readable with or without a budget configured: unlimited
+is not uncounted — a remaining value with no budget is `Infinity`,
+never a guess. `visitCount` throws `invalid visit count: unknown
 state …` on a misspelled state — the same fail-fast bar
-`setSlaDeadline` applies — rather than returning a misleading 0.
-Counts are pure reads (no state or history mutation) and need no new
-snapshot fields: they are derived from the history, so `toJSON()` /
-`fromJSON()` and `fromHistory()` preserve them automatically.
+`setSlaDeadline` applies — rather than returning a misleading 0, and
+`remainingVisits` throws `invalid remaining visits: unknown state …`
+on the same bar. Counts and remaining values are pure reads (no state
+or history mutation) and need no new snapshot fields: they are derived
+from the history, so `toJSON()` / `fromJSON()` and `fromHistory()`
+preserve them automatically.
 
 ## Event-level RBAC
 
@@ -2528,7 +2548,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1571 tests covering the happy path, reject→resubmit
+`npm test` runs 1583 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2543,7 +2563,13 @@ malformed-envelope rejection), the budget-usage read-only API
 (`resubmitCount` / `disputeCount` / `visitCount(state)`: counts stepping
 with dispatch, agreement with the exhausted-error numbers, snapshot and
 `fromHistory` survival, unknown-state rejection for `visitCount`, and
-read purity),
+read purity) and the budget-remaining read-only API
+(`remainingResubmits` / `remainingDisputes` / `remainingVisits(state)`:
+remaining values stepping down to 0 exactly at the blocking point,
+agreement with the exhausted-error numbers, `Infinity` with no budget
+configured, a 0 budget reading 0 from the start, an already-spent
+budget of 1 for a passed-through state, unknown-state rejection for
+`remainingVisits`, and snapshot and `fromHistory` survival),
 dispute→arbitration (both outcomes, plus event-level RBAC: moderator-only
 arbitration, partial policies, exact actor matching, and policy
 persistence round-trips), abandonment, expiration, SLA
