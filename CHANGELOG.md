@@ -29,6 +29,24 @@ change type; no entry describes a feature that is not in the history.
   `stateAt` query continues at the next seq. 12 tests in
   `test/stateAt.test.ts`.
 
+- Benchmark rows: `nextTaskDeadline` + budget-usage reads (2026-11-14,
+  backlog #1133): `bench/bench.ts` gains two rows over fixed golden
+  fixtures (3000 timed iterations each after 200 warmup, self-checked
+  per iteration). `nextTaskDeadline` runs one whole-map scheduler pick
+  over a fixed 8-task batch — the earliest future deadline anywhere in
+  any task's SLA map wins, including deadlines on states not yet
+  reached, so the 6-hour ACCEPTED deadline on BENCH-NTD-03 wins over
+  the 12-hour tie (input order), the at-now and overdue deadlines, the
+  no-deadline task, a terminal-state deadline on a live task, and a
+  terminal task; the winner task also carries budgets, so the batch is
+  mixed deadline/budget configuration. The budget-usage row reads
+  `resubmitCount` / `disputeCount` / `visitCount("CAPTURING")` on one
+  fixed REJECTED task (12-entry history: one resubmit round and one
+  appeal round under budgets maxResubmits 2 / maxDisputes 1 /
+  maxVisitsByState { CAPTURING: 2 }), pinned per iteration to 1 / 1 /
+  2. README Benchmarks table, narrative, and run date refreshed from
+  a real `npm run bench` run (2026-11-14).
+
 - Budget-remaining read-only API (2026-11-14, backlog #1127): public
   `remainingResubmits` / `remainingDisputes` getters and
   `remainingVisits(state)` expose how much budget is left — each is
