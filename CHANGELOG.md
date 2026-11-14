@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo segment for the payout webhook outbox redrive (2026-11-14,
+  backlog #1145): `npm run demo` now shows the dead letter coming
+  back — `redrive()` at a fixed later clock (13:30) moves the
+  dead-lettered pair back to `pending()` with attempts reset to 0
+  and `lastAt` stamped with the redrive time, a second redrive
+  while pending is rejected with the pinned error, and one
+  scripted 200 after the fix clears the pair, so the ledger ends
+  pending 0, dead letter 0. Mirrors escrow's demo redrive segment
+  (backlog #1139). 2 tests in `test/demo.test.ts` (segment
+  assertions + determinism).
+
 - Dead-letter redrive for the payout webhook outbox (2026-11-14,
   backlog #1135): `PayoutWebhookOutbox.redrive(endpoint, eventId,
   { now? })` moves a dead-lettered pair back to `pending()` for a

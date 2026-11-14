@@ -500,7 +500,14 @@
  * one that needs a human; a second event fails
  * once and then delivers 200, so its success
  * clears its own pair and the ledger ends
- * pending 0, dead letter 1. The one deliberate
+ * pending 0, dead letter 1. The demo then shows
+ * the dead letter coming back: `redrive()` at a
+ * fixed later clock moves the pair back to pending
+ * with attempts reset to 0, a second redrive while
+ * pending is rejected with the pinned error, and
+ * one scripted 200 after the fix clears the pair,
+ * so the ledger ends pending 0, dead letter 0.
+ * The one deliberate
  * difference from the sibling escrow demo's
  * outbox segment: this repo's delivery reports
  * failures as a result instead of throwing, so
@@ -947,6 +954,12 @@ export const DEMO_HISTORY_BASE_AT = "2026-03-23T10:00:00.000Z";
  *   same task with the demo secret) fails once (pending,
  *   attempts 1) and then delivers 200, so the success record
  *   clears the pair — the ledger ends pending 0, dead letter 1.
+ * - the dead-lettered pair is then redriven (backlog #1145): once
+ *   the downstream is fixed, `redrive()` at a fixed later clock
+ *   (13:30) moves it back to pending with attempts reset to 0 and
+ *   `lastAt` stamped with the redrive time; redriving it again
+ *   while pending throws the pinned error, and one scripted 200
+ *   clears the pair — the ledger ends pending 0, dead letter 0.
  * All timestamps fixed; the printed lines carry the endpoint,
  * eventIds, and counts only, so no wall clock enters the output.
  */
@@ -959,6 +972,9 @@ export const DEMO_OUTBOX_DEAD_LAST_ERROR =
   "server responded with status 500";
 export const DEMO_OUTBOX_RECOVERED_EVENT_ID = "evt_demo_outbox_002";
 export const DEMO_OUTBOX_RECOVERED_AT = "2026-03-27T10:00:00.000Z";
+export const DEMO_OUTBOX_REDRIVE_NOW = "2026-03-27T13:30:00.000Z";
+export const DEMO_OUTBOX_REDRIVE_PENDING_ERROR =
+  "PayoutWebhookOutbox: cannot redrive a pending pair (only dead-lettered pairs can be redriven)";
 
 /**
  * Caller string length-limit segment (backlog #1068) — the
@@ -1686,7 +1702,10 @@ export interface DemoResult {
    * The payout webhook outbox ledger after the demo's dead-letter run:
    * the billing endpoint's failure record for the dead-lettered
    * eventId, after three scripted 500s. Exposed so tests can assert
-   * on the ledger itself, not just on the printed counts.
+   * on the ledger itself, not just on the printed counts. This is
+   * the live ledger, so the redrive segment that follows drains it —
+   * its final state is pending 0, dead letter 0 (see
+   * `outboxPendingAfterRedrive` / `outboxDeadAfterRedrive`).
    */
   outbox: PayoutWebhookOutbox;
   /**
@@ -1754,6 +1773,54 @@ export interface DemoResult {
    * pair, never the dead letter.
    */
   outboxDeadFinal: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` just before the redrive: exactly the
+   * one dead-lettered pair — attempts 3, capped at
+   * {@link DEMO_OUTBOX_MAX_ATTEMPTS}, `lastError` the exact
+   * delivery error {@link DEMO_OUTBOX_DEAD_LAST_ERROR}.
+   */
+  outboxRedriveDeadBefore: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.pending()` just after the redrive: exactly one entry
+   * — the same pair, `attempts` reset to 0, `lastAt` stamped with
+   * the redrive time {@link DEMO_OUTBOX_REDRIVE_NOW}, no
+   * `lastError` — the old error belonged to the exhausted round.
+   */
+  outboxRedrivePendingAfter: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` just after the redrive: empty — the
+   * pair left the dead letter.
+   */
+  outboxRedriveDeadAfter: PayoutWebhookOutboxEntry[];
+  /**
+   * The exact error redriving the just-redriven (now pending)
+   * pair threw ({@link DEMO_OUTBOX_REDRIVE_PENDING_ERROR}):
+   * only a dead-lettered pair can be redriven.
+   */
+  outboxRedrivePendingError: string;
+  /**
+   * `deliverPayoutWebhook` result for the redelivery after
+   * the fix: `{ ok: true, attempts: 1, status: 200 }` — the
+   * success the outbox records to clear the pair.
+   */
+  outboxRedriveDelivery: DeliverWebhookResult;
+  /**
+   * Scripted-fetch call count for the redrive segment: 1 call
+   * against the redriven pair (the single 200 redelivery, no
+   * retries).
+   */
+  outboxRedriveFetchCalls: number;
+  /**
+   * `outbox.pending()` at the end of the redrive segment: empty
+   * — the redriven pair was cleared by its successful
+   * redelivery.
+   */
+  outboxPendingAfterRedrive: PayoutWebhookOutboxEntry[];
+  /**
+   * `outbox.deadLetter()` at the end of the redrive segment:
+   * empty — the dead letter is fully drained.
+   */
+  outboxDeadAfterRedrive: PayoutWebhookOutboxEntry[];
   /** Task for the caller string length-limit segment's actor probe (DEMO-097). */
   limitActorTask: TaskLifecycle;
   /** Error from DEMO-097's 257-character actor PUBLISH ("" if accepted). */
@@ -9065,6 +9132,124 @@ export async function runDemo(): Promise<DemoResult> {
     `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
   );
 
+  // --- Payout webhook outbox redrive: a dead letter is not a dead end ---
+  // The outbox segment above ends with the main webhook's pair
+  // dead-lettered at attempts 3 — the one that needs a human.
+  // `redrive()` is that pair's only way back: once the downstream
+  // endpoint is fixed, a human moves it back to pending for a fresh
+  // delivery round. The redrive stamps `lastAt` with the injected
+  // redrive time (13:30, later than the outbox's fixed 10:00 clock)
+  // and resets `attempts` to 0, dropping the old `lastError`, so the
+  // pair re-enters `pending()` and the retry runner's next pass.
+  // Redriving it again while it is pending must fail fast (it still
+  // has retries left), and one scripted 200 through the same signed
+  // webhook clears the pair — the ledger ends pending 0, dead
+  // letter 0. Hand-pinned expectations (see the fixture comment
+  // above), asserted HERE, outside the printing: the dead-letter
+  // snapshot before the redrive, the pending snapshot after it
+  // (attempts 0, `lastAt` the redrive time, no `lastError`), the
+  // pinned rejection for the second redrive, and the redelivery's
+  // single POST carrying the byte-identical signed body. Zero
+  // network, zero real waiting, no wall clock.
+  const outboxRedriveNowMs = Date.parse(DEMO_OUTBOX_REDRIVE_NOW);
+  const outboxRedriveDeadBefore = outbox.deadLetter();
+  outbox.redrive(DEMO_OUTBOX_ENDPOINT, DEMO_OUTBOX_DEAD_EVENT_ID, {
+    now: outboxRedriveNowMs,
+  });
+  const outboxRedrivePendingAfter = outbox.pending();
+  const outboxRedriveDeadAfter = outbox.deadLetter();
+  // Redriving the just-redriven pair again must fail fast: it is
+  // pending now, with retries left — only a dead-lettered pair can
+  // be redriven.
+  let outboxRedrivePendingError: string | undefined;
+  try {
+    outbox.redrive(DEMO_OUTBOX_ENDPOINT, DEMO_OUTBOX_DEAD_EVENT_ID, {
+      now: outboxRedriveNowMs,
+    });
+  } catch (err) {
+    outboxRedrivePendingError =
+      err instanceof Error ? err.message : String(err);
+  }
+  if (outboxRedrivePendingError !== DEMO_OUTBOX_REDRIVE_PENDING_ERROR) {
+    throw new Error(
+      `demo fixture broken: redriving the pending pair did not throw the pinned pending-redrive error (got ${JSON.stringify(
+        outboxRedrivePendingError,
+      )})`,
+    );
+  }
+  const outboxRedriveCalls: FanoutCall[] = [];
+  const outboxRedriveFetch: PayoutWebhookFetchImpl = async (url, init) => {
+    outboxRedriveCalls.push({
+      url,
+      body: String(init.body ?? ""),
+      signature: String(
+        new Headers(init.headers).get("x-hub-signature-256") ?? "",
+      ),
+    });
+    return new Response("{}", { status: 200 });
+  };
+  const outboxRedriveDelivery = await deliverPayoutWebhook(
+    DEMO_OUTBOX_ENDPOINT,
+    outboxDeadWebhook,
+    {
+      maxAttempts: 1,
+      backoffMs: 0,
+      fetchImpl: outboxRedriveFetch,
+      sleepImpl: async () => {},
+    },
+  );
+  if (!outboxRedriveDelivery.ok) {
+    throw new Error(
+      "demo fixture broken: outbox redelivery unexpectedly failed (scripted 200, maxAttempts 1)",
+    );
+  }
+  outbox.recordAttempt({
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+    ok: true,
+    ...(outboxRedriveDelivery.status !== undefined
+      ? { status: outboxRedriveDelivery.status }
+      : {}),
+    at: outboxRedriveNowMs,
+  });
+  const outboxPendingAfterRedrive = outbox.pending();
+  const outboxDeadAfterRedrive = outbox.deadLetter();
+  if (
+    outboxRedriveDeadBefore.length !== 1 ||
+    outboxRedriveDeadBefore[0]?.endpoint !== DEMO_OUTBOX_ENDPOINT ||
+    outboxRedriveDeadBefore[0]?.eventId !== DEMO_OUTBOX_DEAD_EVENT_ID ||
+    outboxRedriveDeadBefore[0]?.attempts !== DEMO_OUTBOX_MAX_ATTEMPTS ||
+    outboxRedriveDeadBefore[0]?.lastError !== DEMO_OUTBOX_DEAD_LAST_ERROR ||
+    outboxRedriveDeadBefore[0]?.lastAt !== outboxNowMs ||
+    outboxRedrivePendingAfter.length !== 1 ||
+    outboxRedrivePendingAfter[0]?.endpoint !== DEMO_OUTBOX_ENDPOINT ||
+    outboxRedrivePendingAfter[0]?.eventId !== DEMO_OUTBOX_DEAD_EVENT_ID ||
+    outboxRedrivePendingAfter[0]?.attempts !== 0 ||
+    outboxRedrivePendingAfter[0]?.lastAt !== outboxRedriveNowMs ||
+    outboxRedrivePendingAfter[0]?.lastError !== undefined ||
+    outboxRedriveDeadAfter.length !== 0 ||
+    outboxRedriveDelivery.ok !== true ||
+    outboxRedriveDelivery.status !== 200 ||
+    outboxRedriveDelivery.attempts !== 1 ||
+    outboxRedriveCalls.length !== 1 ||
+    outboxRedriveCalls[0]?.url !== DEMO_OUTBOX_ENDPOINT ||
+    outboxRedriveCalls[0]?.body !== JSON.stringify(outboxDeadWebhook.payload) ||
+    outboxRedriveCalls[0]?.signature !== outboxDeadWebhook.signature ||
+    outboxPendingAfterRedrive.length !== 0 ||
+    outboxDeadAfterRedrive.length !== 0
+  ) {
+    throw new Error(
+      "demo fixture broken: payout webhook outbox redrive segment does not match the pinned shape (dead-lettered pair at attempts 3 before the redrive, back to pending at attempts 0 with lastAt the redrive time and no lastError after it, one scripted 200 carrying the byte-identical signed body clearing the pair, ledger ends pending 0, dead letter 0)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):",
+    `  ${DEMO_OUTBOX_ENDPOINT} — event ${DEMO_OUTBOX_DEAD_EVENT_ID}: dead-lettered at attempts 3, redriven at ${DEMO_OUTBOX_REDRIVE_NOW} — back to pending, attempts reset to 0, lastAt stamped with the redrive time`,
+    `  redriving the pending pair again rejected: ${DEMO_OUTBOX_REDRIVE_PENDING_ERROR}`,
+    `  redelivery after the fix: 200 on the first attempt — the success cleared the pair; ledger ends pending 0, dead letter 0`,
+  );
+
   // Caller string length limits (closing, backlog #1068): the
   // guard family landed in the library one item at a time
   // (#1057 dispatch actor, #1060 webhook eventId, #1062 task
@@ -9234,7 +9419,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
 }
 
 async function main(): Promise<void> {

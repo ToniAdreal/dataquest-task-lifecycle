@@ -29,6 +29,8 @@ import {
   DEMO_OUTBOX_NOW,
   DEMO_OUTBOX_RECOVERED_AT,
   DEMO_OUTBOX_RECOVERED_EVENT_ID,
+  DEMO_OUTBOX_REDRIVE_NOW,
+  DEMO_OUTBOX_REDRIVE_PENDING_ERROR,
   DEMO_IDEMPOTENCY_HEADER_EVENT_ID,
   DEMO_IDEMPOTENCY_HEADER_NOW,
   DEMO_IDEMPOTENCY_HEADER_TASK_ID,
@@ -1112,6 +1114,11 @@ Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then
   after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human
   recovered event evt_demo_outbox_002: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1
 
+Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):
+  https://billing.example.com/hooks/payout — event evt_demo_outbox_001: dead-lettered at attempts 3, redriven at <timestamp> — back to pending, attempts reset to 0, lastAt stamped with the redrive time
+  redriving the pending pair again rejected: PayoutWebhookOutbox: cannot redrive a pending pair (only dead-lettered pairs can be redriven)
+  redelivery after the fix: 200 on the first attempt — the success cleared the pair; ledger ends pending 0, dead letter 0
+
 Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):
   DEMO-097: actor of 257 characters rejected — invalid dispatch options: actor must be at most 256 characters, got 257 (state DRAFT, history 0)
   DEMO-097: actor of exactly 256 characters accepted verbatim — PUBLISH lands, state OPEN, history 1
@@ -1124,7 +1131,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 983);
+  assert.equal(lines.length, 988);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -4039,7 +4046,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 983);
+  assert.equal(out.trimEnd().split("\n").length, 988);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -9721,6 +9728,163 @@ test("demo shows the payout webhook outbox segment in-process: three 500s dead-l
   );
 });
 
+test("demo shows the payout webhook outbox redrive segment in-process: dead-lettered pair returns to pending, then a 200 clears it", async () => {
+  const {
+    outbox,
+    outboxRedriveDeadBefore,
+    outboxRedrivePendingAfter,
+    outboxRedriveDeadAfter,
+    outboxRedrivePendingError,
+    outboxRedriveDelivery,
+    outboxRedriveFetchCalls,
+    outboxPendingAfterRedrive,
+    outboxDeadAfterRedrive,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-pinned fixtures: the redrive happens at a fixed later
+  // clock than the outbox's 10:00 clock, and redriving a pending
+  // pair throws the exact error from `PayoutWebhookOutbox`.
+  assert.equal(DEMO_OUTBOX_REDRIVE_NOW, "2026-03-27T13:30:00.000Z");
+  assert.equal(
+    DEMO_OUTBOX_REDRIVE_PENDING_ERROR,
+    "PayoutWebhookOutbox: cannot redrive a pending pair (only dead-lettered pairs can be redriven)",
+  );
+
+  // Before the redrive the pair is still dead-lettered at the cap.
+  assert.deepEqual(outboxRedriveDeadBefore, [
+    {
+      endpoint: DEMO_OUTBOX_ENDPOINT,
+      eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+      attempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+      lastError: DEMO_OUTBOX_DEAD_LAST_ERROR,
+      lastAt: Date.parse(DEMO_OUTBOX_NOW),
+    },
+  ]);
+
+  // After the redrive the same pair is pending again: attempts
+  // reset to 0, `lastAt` stamped with the redrive time, and the
+  // old error dropped — the dead letter is empty.
+  assert.deepEqual(outboxRedrivePendingAfter, [
+    {
+      endpoint: DEMO_OUTBOX_ENDPOINT,
+      eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+      attempts: 0,
+      lastAt: Date.parse(DEMO_OUTBOX_REDRIVE_NOW),
+    },
+  ]);
+  assert.deepEqual(outboxRedriveDeadAfter, []);
+
+  // Redriving the just-redriven (now pending) pair is rejected.
+  assert.equal(
+    outboxRedrivePendingError,
+    DEMO_OUTBOX_REDRIVE_PENDING_ERROR,
+  );
+
+  // One scripted 200 after the fix clears the pair: the ledger
+  // ends pending 0, dead letter 0.
+  assert.deepEqual(outboxRedriveDelivery, {
+    ok: true,
+    attempts: 1,
+    status: 200,
+  });
+  assert.equal(outboxRedriveFetchCalls, 1);
+  assert.deepEqual(outboxPendingAfterRedrive, []);
+  assert.deepEqual(outboxDeadAfterRedrive, []);
+  // The exposed ledger is the live one the segment used — the
+  // redrive segment drains the dead letter, so the live ledger
+  // matches the post-redrive finals, not the pre-redrive ones.
+  assert.deepEqual(outbox.pending(), outboxPendingAfterRedrive);
+  assert.deepEqual(outbox.deadLetter(), outboxDeadAfterRedrive);
+
+  // Independent cross-check: a fresh outbox fed the same three
+  // failures, redriven at the same fixed clock, must show the
+  // identical pending entry — the segment is not self-certifying.
+  const independent = new PayoutWebhookOutbox({
+    maxAttempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+    now: () => Date.parse(DEMO_OUTBOX_NOW),
+  });
+  for (let i = 0; i < DEMO_OUTBOX_MAX_ATTEMPTS; i += 1) {
+    independent.recordAttempt({
+      endpoint: DEMO_OUTBOX_ENDPOINT,
+      eventId: DEMO_OUTBOX_DEAD_EVENT_ID,
+      ok: false,
+      status: 500,
+      error: DEMO_OUTBOX_DEAD_LAST_ERROR,
+      at: Date.parse(DEMO_OUTBOX_NOW),
+    });
+  }
+  independent.redrive(DEMO_OUTBOX_ENDPOINT, DEMO_OUTBOX_DEAD_EVENT_ID, {
+    now: Date.parse(DEMO_OUTBOX_REDRIVE_NOW),
+  });
+  assert.deepEqual(independent.pending(), outboxRedrivePendingAfter);
+  assert.deepEqual(independent.deadLetter(), []);
+
+  // The printed section follows the outbox segment and precedes
+  // the caller-string-length-limits segment that now closes the
+  // demo.
+  const header =
+    "Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):";
+  assert.ok(
+    text.indexOf(header) >
+      text.indexOf(
+        "Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then dead-letter):",
+      ),
+    "payout-webhook-outbox-redrive segment must follow the payout-webhook-outbox segment",
+  );
+  for (const line of [
+    `  ${DEMO_OUTBOX_ENDPOINT} — event ${DEMO_OUTBOX_DEAD_EVENT_ID}: dead-lettered at attempts 3, redriven at ${DEMO_OUTBOX_REDRIVE_NOW} — back to pending, attempts reset to 0, lastAt stamped with the redrive time`,
+    `  redriving the pending pair again rejected: ${DEMO_OUTBOX_REDRIVE_PENDING_ERROR}`,
+    `  redelivery after the fix: 200 on the first attempt — the success cleared the pair; ledger ends pending 0, dead letter 0`,
+  ]) {
+    assert.ok(text.includes(line), `missing outbox redrive line: ${line}`);
+  }
+  assert.ok(
+    text.indexOf(
+      "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):",
+    ) > text.indexOf(header),
+    "caller string length-limit segment must follow the payout webhook outbox redrive segment",
+  );
+});
+
+test("demo payout webhook outbox redrive segment is deterministic: two runs print byte-identical redrive lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):",
+      ),
+      // The slice ends before the blank line that opens the
+      // caller string length-limit segment (which now closes
+      // the demo); without the end bound the segment would
+      // swallow the length-limit lines.
+      ls.indexOf(
+        "Caller string length limits (dispatch actor, webhook eventId, task id, dispatch idempotencyKey — each capped at 256 characters, never truncated):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + 3 redrive lines; every value is a pinned literal,
+  // so no normalization is needed.
+  assert.equal(segA.length, 4);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.outboxRedriveDeadBefore, b.outboxRedriveDeadBefore);
+  assert.deepEqual(
+    a.outboxRedrivePendingAfter,
+    b.outboxRedrivePendingAfter,
+  );
+  assert.deepEqual(a.outboxRedriveDeadAfter, b.outboxRedriveDeadAfter);
+  assert.equal(a.outboxRedrivePendingError, b.outboxRedrivePendingError);
+  assert.deepEqual(a.outboxRedriveDelivery, b.outboxRedriveDelivery);
+  assert.equal(a.outboxRedriveFetchCalls, b.outboxRedriveFetchCalls);
+  assert.deepEqual(
+    a.outboxPendingAfterRedrive,
+    b.outboxPendingAfterRedrive,
+  );
+  assert.deepEqual(a.outboxDeadAfterRedrive, b.outboxDeadAfterRedrive);
+});
+
 test("demo payout webhook outbox segment is deterministic: two runs print byte-identical outbox lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
@@ -9738,10 +9902,11 @@ test("demo payout webhook outbox segment is deterministic: two runs print byte-i
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
-  // Header + endpoint + after-2 + after-3 + recovered lines;
-  // every value is a pinned literal, so no normalization is
-  // needed.
-  assert.equal(segA.length, 5);
+  // Header + endpoint + after-2 + after-3 + recovered lines,
+  // then the blank line and the redrive header + 3 redrive
+  // lines; every value is a pinned literal, so no
+  // normalization is needed.
+  assert.equal(segA.length, 10);
   assert.deepEqual(segA, segment(b.lines));
   assert.deepEqual(a.outboxPendingAfterTwo, b.outboxPendingAfterTwo);
   assert.deepEqual(a.outboxDeadAfterThree, b.outboxDeadAfterThree);
@@ -9750,6 +9915,20 @@ test("demo payout webhook outbox segment is deterministic: two runs print byte-i
   assert.deepEqual(a.outboxRecoveredDelivery, b.outboxRecoveredDelivery);
   assert.equal(a.outboxDeadFetchCalls, b.outboxDeadFetchCalls);
   assert.equal(a.outboxRecoveredFetchCalls, b.outboxRecoveredFetchCalls);
+  assert.deepEqual(a.outboxRedriveDeadBefore, b.outboxRedriveDeadBefore);
+  assert.deepEqual(
+    a.outboxRedrivePendingAfter,
+    b.outboxRedrivePendingAfter,
+  );
+  assert.deepEqual(a.outboxRedriveDeadAfter, b.outboxRedriveDeadAfter);
+  assert.equal(a.outboxRedrivePendingError, b.outboxRedrivePendingError);
+  assert.deepEqual(a.outboxRedriveDelivery, b.outboxRedriveDelivery);
+  assert.equal(a.outboxRedriveFetchCalls, b.outboxRedriveFetchCalls);
+  assert.deepEqual(
+    a.outboxPendingAfterRedrive,
+    b.outboxPendingAfterRedrive,
+  );
+  assert.deepEqual(a.outboxDeadAfterRedrive, b.outboxDeadAfterRedrive);
   assert.equal(
     a.outboxDeadWebhook.signature,
     b.outboxDeadWebhook.signature,
