@@ -11,6 +11,17 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `PayoutWebhookOutbox.stats()` (2026-11-14, backlog #1124, the
+  dataquest-side mirror of escrow's `SettlementWebhookOutbox.stats()`,
+  backlog #1120): returns `{ size, pending, deadLettered,
+  totalAttempts }` — the same populations as `pending()` /
+  `deadLetter()`, counted without materializing either list, with
+  `totalAttempts` summing `attempts` over every tracked pair
+  (dead-lettered pairs included) and `size` equal to the `size`
+  getter. Pure read: it records nothing, drops nothing, and returns
+  a fresh object. 10 tests in
+  `test/payoutWebhookOutboxStats.test.ts`.
+
 - Budget-usage read-only API (2026-11-13, backlog #1115): public
   `resubmitCount` / `disputeCount` getters and `visitCount(state)`
   expose the same history-derived used counts the three budget checks

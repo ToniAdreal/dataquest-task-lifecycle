@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1561 tests, all local
+npm test   # 1571 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1769,6 +1769,7 @@ if (result.ok) outbox.acknowledge(url, webhook.payload.eventId);
 else outbox.recordAttempt({ endpoint: url, eventId: webhook.payload.eventId, ok: false, error: result.error });
 outbox.pending();    // failed but not yet exhausted — still worth a retry
 outbox.deadLetter(); // 3 consecutive failures — needs a human, not another retry
+outbox.stats();      // { size, pending, deadLettered, totalAttempts } — the same counts, without materializing either list
 ```
 
 A failed attempt increments the pair's consecutive-failure count
@@ -1780,7 +1781,12 @@ at record time — a longer error keeps its prefix and ends with
 `…[truncated]`, so one oversized failure (a full HTML error page, a
 long stack trace) cannot bloat the ledger or the snapshot exported
 from it. The full error body belongs in the log where the delivery
-happened; the outbox keeps only the diagnostic hint. An `eventId`
+happened; the outbox keeps only the diagnostic hint. `stats()` is the
+cheap way to watch the ledger: it returns `{ size, pending,
+deadLettered, totalAttempts }` (the same populations as `pending()` /
+`deadLetter()`, counted without materializing either list, and
+`totalAttempts` sums `attempts` over every tracked pair, dead-lettered
+pairs included), is a pure read, and needs no list allocation. An `eventId`
 longer than `MAX_EVENT_ID_LENGTH` (256 characters) is rejected at
 `recordAttempt()` and at snapshot restore, never truncated —
 truncation would change the pair's key.
@@ -2522,7 +2528,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1561 tests covering the happy path, reject→resubmit
+`npm test` runs 1571 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

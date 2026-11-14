@@ -94,6 +94,7 @@ export type {
   PayoutWebhookOutboxRetrySummary,
   PayoutWebhookOutboxSignedSnapshotEnvelope,
   PayoutWebhookOutboxSnapshot,
+  PayoutWebhookOutboxStats,
   PayoutWebhookPayload,
   SignedSnapshotExportOptions,
   VerifyPayoutWebhookOptions,
