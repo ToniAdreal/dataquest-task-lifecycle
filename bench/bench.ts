@@ -1426,7 +1426,7 @@
  *      demo segment.
  *  68. payout webhook outbox — `PayoutWebhookOutbox` (the
  *      failure ledger a payout gateway keeps for its webhooks),
- *      seven rows over a fixed outbox (`maxAttempts: 3`, injected
+ *      eight rows over a fixed outbox (`maxAttempts: 3`, injected
  *      fixed clock — see the outbox fixture below): recording one
  *      failure per fresh `(endpoint, eventId)` pair (`recordAttempt`
  *      with the pinned 500 error), driving one pair through the
@@ -1440,7 +1440,10 @@
  *      fixed later clock and re-delivering its signed webhook
  *      through a fake fetch that answers 200 on the first attempt,
  *      the success clearing the pair so the ledger ends pending 0,
- *      dead letter 0 (`redrive`).
+ *      dead letter 0 (`redrive`), and truncating the dead-letter
+ *      error text (`truncateOutboxError` over a fixed 3-case
+ *      corpus: a short error, an exactly-at-cap error, and a
+ *      10 KB error — see the truncation fixture below).
  *      This is the bookkeeping cost every failed webhook delivery
  *      pays — the hot path a gateway hammers on every 500 — and it
  *      previously had unit tests only, no throughput baseline. The
@@ -1558,6 +1561,7 @@ import {
   GENESIS_PREV_HASH,
   historyFromNdjson,
   MAX_NOTE_LENGTH,
+  MAX_OUTBOX_ERROR_LENGTH,
   historyToNdjson,
   isOverdue,
   isTerminal,
@@ -1595,6 +1599,7 @@ import {
   transition,
   transitionTable,
   transitionTableJson,
+  truncateOutboxError,
   unreconciledPayouts,
   verifyHistoryChain,
   verifyPayoutWebhook,
@@ -6404,6 +6409,84 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: outbox redrive redelivery signature does not verify",
+  );
+}
+
+// Outbox error-truncation fixture (backlog #1160): a fixed 3-case
+// corpus for `truncateOutboxError`, the pure guard `recordAttempt`
+// runs before a `lastError` enters the failure ledger. Hand-written
+// expectations — written out here from `src/settlementWebhook.ts`
+// (the exported constant and the pure function) and cross-checked
+// against `test/outboxLastErrorCap.test.ts`
+// ("truncateOutboxError is the identity at or under the cap" and
+// "overlong error is truncated to the cap with a marker"), never
+// derived by calling `truncateOutboxError` itself:
+//   - `MAX_OUTBOX_ERROR_LENGTH` is 1024;
+//   - the marker is `…[truncated]` (12 characters);
+//   - a short error passes through byte-for-byte (the returned
+//     string is the input string);
+//   - an error of exactly 1024 characters passes through unchanged
+//     and carries no marker;
+//   - a 10 KB error (10240 characters) truncates to exactly 1024
+//     characters: its first 1012 characters kept, ending with the
+//     marker.
+// The corpus strings are built once, outside the timed loop, from
+// the hand-pinned cap below — a drift between that pin, the
+// exported constant, and the marker fails the bench itself. The
+// long error is presented only by length: neither filler string is
+// ever printed.
+const OUTBOX_ERROR_LIMIT_PINNED: number = 1024;
+const OUTBOX_ERROR_MARKER = "…[truncated]";
+const OUTBOX_ERROR_SHORT = "server responded with status 500";
+const OUTBOX_ERROR_AT_CAP = "e".repeat(OUTBOX_ERROR_LIMIT_PINNED);
+const OUTBOX_ERROR_LONG =
+  "upstream gateway returned 502 Bad Gateway: "
+    .repeat(256)
+    .slice(0, 10_240);
+function checkTruncateOutboxError(where: string): void {
+  if (
+    MAX_OUTBOX_ERROR_LENGTH !== OUTBOX_ERROR_LIMIT_PINNED ||
+    OUTBOX_ERROR_MARKER.length !== 12 ||
+    OUTBOX_ERROR_SHORT.length >= OUTBOX_ERROR_LIMIT_PINNED ||
+    OUTBOX_ERROR_AT_CAP.length !== OUTBOX_ERROR_LIMIT_PINNED ||
+    OUTBOX_ERROR_LONG.length !== 10_240
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+  const short = truncateOutboxError(OUTBOX_ERROR_SHORT);
+  const atCap = truncateOutboxError(OUTBOX_ERROR_AT_CAP);
+  const long = truncateOutboxError(OUTBOX_ERROR_LONG);
+  const expectedLong =
+    OUTBOX_ERROR_LONG.slice(
+      0,
+      OUTBOX_ERROR_LIMIT_PINNED - OUTBOX_ERROR_MARKER.length,
+    ) + OUTBOX_ERROR_MARKER;
+  if (
+    short !== OUTBOX_ERROR_SHORT ||
+    atCap !== OUTBOX_ERROR_AT_CAP ||
+    long !== expectedLong ||
+    long.length !== OUTBOX_ERROR_LIMIT_PINNED ||
+    !long.endsWith(OUTBOX_ERROR_MARKER)
+  ) {
+    throw new Error(`benchmark self-check failed: ${where}`);
+  }
+}
+// One-time validation (outside the timed loop): the 3 corpus cases
+// match their hand-written expectations, and the two boundary cases
+// the timed loop does not cover — the empty error passes through,
+// and an error one character over the cap truncates to exactly the
+// cap with the marker.
+checkTruncateOutboxError("truncateOutboxError fixture");
+if (
+  truncateOutboxError("") !== "" ||
+  truncateOutboxError("f".repeat(OUTBOX_ERROR_LIMIT_PINNED + 1)).length !==
+    OUTBOX_ERROR_LIMIT_PINNED ||
+  !truncateOutboxError("f".repeat(OUTBOX_ERROR_LIMIT_PINNED + 1)).endsWith(
+    OUTBOX_ERROR_MARKER,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: truncateOutboxError boundary cases",
   );
 }
 
@@ -12205,6 +12288,17 @@ async function benchPayoutWebhookOutboxRedrive(): Promise<number> {
   }, ITERATIONS);
 }
 
+function benchTruncateOutboxError(): number {
+  return measure(() => {
+    // Pure function over fixed strings: no rebuild, the same
+    // corpus serves every iteration. Per-iteration self-check:
+    // the short error passes through, the at-cap error passes
+    // through, and the 10 KB error truncates to exactly the cap
+    // with the marker (see the fixture above).
+    checkTruncateOutboxError("truncateOutboxError");
+  }, ITERATIONS);
+}
+
 function benchPayoutEventDedupeExportSignedSnapshot(): number {
   return measure(() => {
     // Per-iteration self-check against the hand-written
@@ -14122,6 +14216,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "PayoutWebhookOutbox exportSnapshot (1,000-pair ledger)", ops: benchPayoutWebhookOutboxExportSnapshot() },
   { path: "PayoutWebhookOutbox restore (1,000-pair snapshot, JSON round-trip)", ops: benchPayoutWebhookOutboxRestore() },
   { path: "PayoutWebhookOutbox redrive + redelivery (dead-lettered pair, fake fetch 200 first attempt)", ops: await benchPayoutWebhookOutboxRedrive() },
+  { path: "truncateOutboxError (short / at-cap / 10 KB error)", ops: benchTruncateOutboxError() },
   { path: "PayoutEventDedupe exportSignedSnapshot (1,000-entry snapshot)", ops: benchPayoutEventDedupeExportSignedSnapshot() },
   { path: "PayoutEventDedupe restoreSignedSnapshot (1,000-entry snapshot, JSON round-trip)", ops: benchPayoutEventDedupeRestoreSignedSnapshot() },
   { path: "TaskLifecycle exportSignedSnapshot (8-entry history)", ops: benchTaskLifecycleExportSignedSnapshot() },

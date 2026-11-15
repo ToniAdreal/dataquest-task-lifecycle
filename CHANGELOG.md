@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `truncateOutboxError` benchmark row (2026-11-15, backlog
+  #1160): `npm run bench` now measures the pure dead-letter error
+  guard over a fixed 3-case corpus — a short error, an exactly
+  at-cap (1024-character) error, and a 10 KB error. One timed pass
+  truncates all three, self-checking the short and at-cap errors
+  pass through byte-for-byte and the 10 KB error truncates to
+  exactly 1024 characters with the `…[truncated]` marker (its
+  first 1012 characters kept); outside the timed loop, the empty
+  error is pinned to pass through and a 1025-character error to
+  truncate to exactly the cap. This is the per-failure cost every
+  `recordAttempt` pays before a `lastError` enters the failure
+  ledger — previously unit tests only, no throughput baseline.
+
 - Settlement summary CSV/JSON round-trip benchmark rows (2026-11-15,
   backlog #1157): `npm run bench` now measures the two interchange
   round-trips over the same fixed 10-task mixed-batch summary the
