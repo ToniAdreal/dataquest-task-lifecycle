@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `stateAtFromHistory` benchmark row (2026-11-15, backlog
+  #1155): `npm run bench` now measures the module-level time-travel
+  query over a fixed 64-entry hash-chained history — fifteen
+  SUBMIT -> BEGIN_REVIEW -> REJECT -> RESUBMIT review cycles after
+  the PUBLISH -> ACCEPT -> START_CAPTURE opening, ending SUBMITTED.
+  Unlike the instance `stateAt` read, the query re-validates the
+  whole log with `parseHistory` on every call, so one timed pass is
+  one full chain re-validation plus the linear scan. Per-iteration
+  self-checks pin the mid-history query (BASE + 31.5s) to SUBMITTED
+  and the fixture to 64 entries; outside the timed loop, the
+  boundary queries are pinned (before the first entry DRAFT, exactly
+  on the first entry OPEN, exactly on and after the last entry
+  SUBMITTED) and a detached actor-tampered copy is pinned to be
+  rejected with the hash-chain error. Mirrors escrow's `stateAt`
+  row (backlog #1151) for the pure-function path.
+
 - Payout webhook outbox redrive benchmark row (2026-11-15,
   backlog #1154): `npm run bench` now measures `redrive` +
   redelivery — one dead-lettered pair (the paid task's own signed

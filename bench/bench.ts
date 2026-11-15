@@ -13,7 +13,13 @@
  *      task's id and state and its full history, entry for entry
  *      (hashes included), against the source history, and a detached
  *      tampered history is rejected once, outside the timed loop
- *      (see the fromHistory fidelity fixture below);
+ *      (see the fromHistory fidelity fixture below). The
+ *      `stateAtFromHistory(history, time)` time-travel query is the
+ *      same group over a fixed 64-entry chained history (fifteen
+ *      review/reject/resubmit cycles): its per-iteration self-check
+ *      pins the mid-history query, and the boundary queries plus a
+ *      detached tampered history are pinned once, outside the timed
+ *      loop (see the stateAtFromHistory fixture below);
  *   3. `verifyHistoryChain(history)` — full SHA-256 hash-chain
  *      re-verification of that same history. The path's
  *      per-iteration self-check pins the fixture's genesis
@@ -1563,6 +1569,7 @@ import {
   renderTaskSettlements,
   replay,
   staleTasks,
+  stateAtFromHistory,
   stateDiagram,
   summarizeTaskSettlements,
   TaskLifecycle,
@@ -10576,6 +10583,140 @@ checkFromHistory(
   "fromHistory fixture after tamper check",
 );
 
+// stateAtFromHistory fixture (backlog #1155): one fixed 64-entry
+// hash-chained history, built by driving a real task — the pure
+// `stateAtFromHistory` query re-validates the whole log (parseHistory
+// hash-chain check) on every call, so its cost is history-length
+// sensitive and the bench needs a realistic log size. Composition,
+// hand-counted (id BENCH-STATEAT-001; every dispatch at BASE + i
+// seconds, i = 0..63):
+//   seq 1      PUBLISH (researcher) -> OPEN
+//   seq 2      ACCEPT (contributor, quoted 125) -> ACCEPTED
+//   seq 3      START_CAPTURE (contributor) -> CAPTURING
+//   seq 4..63  fifteen SUBMIT -> BEGIN_REVIEW -> REJECT -> RESUBMIT
+//              review cycles (contributor / reviewer / reviewer /
+//              contributor), each returning the task to CAPTURING
+//   seq 64     SUBMIT (contributor) -> SUBMITTED (final state)
+// Hand-pinned expectations (NOT produced by the implementation):
+//   - mid query at BASE + 31.5s (between the seq-32 and seq-33 SUBMIT
+//     entries) -> SUBMITTED;
+//   - a query before the first entry (BASE - 1s) -> DRAFT;
+//   - a query exactly on the first entry (BASE) -> OPEN: the
+//     boundary is inclusive;
+//   - a query exactly on the last entry (BASE + 63s) -> SUBMITTED;
+//   - a query after the last entry (BASE + 64s) -> SUBMITTED.
+// The query is a pure read over detached plain copies (exactly what
+// a persisted audit log looks like), so the same history is
+// re-queried on every iteration; the fixture asserts the log is
+// untouched by the query.
+const STATE_AT_HISTORY_TASK_ID = "BENCH-STATEAT-001";
+const STATE_AT_REVIEW_CYCLES = 15;
+const STATE_AT_MID_MS = BASE_MS + 31_500;
+const STATE_AT_MID = new Date(STATE_AT_MID_MS);
+const stateAtHistoryFixture: TaskHistoryEntry[] = ((): TaskHistoryEntry[] => {
+  const task = new TaskLifecycle(STATE_AT_HISTORY_TASK_ID);
+  const steps: Array<{
+    event: TaskEvent;
+    actor: string;
+    extra?: { quotedAmount: number };
+  }> = [
+    { event: "PUBLISH", actor: "researcher" },
+    { event: "ACCEPT", actor: "contributor", extra: { quotedAmount: 125 } },
+    { event: "START_CAPTURE", actor: "contributor" },
+  ];
+  for (let k = 0; k < STATE_AT_REVIEW_CYCLES; k++) {
+    steps.push(
+      { event: "SUBMIT", actor: "contributor" },
+      { event: "BEGIN_REVIEW", actor: "reviewer" },
+      { event: "REJECT", actor: "reviewer" },
+      { event: "RESUBMIT", actor: "contributor" },
+    );
+  }
+  steps.push({ event: "SUBMIT", actor: "contributor" });
+  steps.forEach(({ event, actor, extra }, i) => {
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  if (task.state !== "SUBMITTED" || task.history.length !== 64) {
+    throw new Error(
+      "benchmark fixture failed: stateAtFromHistory history shape",
+    );
+  }
+  if (!verifyHistoryChain(task.history)) {
+    throw new Error(
+      "benchmark fixture failed: stateAtFromHistory history chain",
+    );
+  }
+  return task.history.map((e) => ({ ...e }));
+})();
+function checkStateAtFromHistory(
+  actual: TaskState,
+  expected: TaskState,
+  label: string,
+): void {
+  if (actual !== expected) {
+    throw new Error(
+      `benchmark self-check failed: stateAtFromHistory ${label}: expected ${expected}, got ${actual}`,
+    );
+  }
+}
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, STATE_AT_MID),
+  "SUBMITTED",
+  "mid-history query",
+);
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, new Date(BASE_MS - 1000)),
+  "DRAFT",
+  "before first entry",
+);
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, new Date(BASE_MS)),
+  "OPEN",
+  "on first entry (inclusive)",
+);
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, new Date(BASE_MS + 63_000)),
+  "SUBMITTED",
+  "on last entry (inclusive)",
+);
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, new Date(BASE_MS + 64_000)),
+  "SUBMITTED",
+  "after last entry",
+);
+// Tamper rejection (outside the timed loop): the actor-tampered copy
+// must be rejected with the hash-chain error — and the intact fixture
+// must still answer afterwards, proving the tamper copy was detached
+// and that the timed path really re-validates the chain (a bench that
+// skipped validation would answer the tampered log instead of
+// throwing).
+const stateAtTampered: TaskHistoryEntry[] = stateAtHistoryFixture.map(
+  (e) => ({ ...e }),
+);
+stateAtTampered[31] = { ...stateAtTampered[31], actor: "mallory" };
+let stateAtTamperRejected = false;
+try {
+  stateAtFromHistory(stateAtTampered, STATE_AT_MID);
+} catch (err) {
+  stateAtTamperRejected =
+    err instanceof Error &&
+    err.message.includes("history hash chain is broken");
+}
+if (!stateAtTamperRejected) {
+  throw new Error(
+    "benchmark fixture failed: stateAtFromHistory accepted a tampered history",
+  );
+}
+checkStateAtFromHistory(
+  stateAtFromHistory(stateAtHistoryFixture, STATE_AT_MID),
+  "SUBMITTED",
+  "mid-history query after tamper check",
+);
+
 // GetSlaDeadline fixture: one fixed task in ACCEPTED (PUBLISH at
 // BASE_MS, ACCEPT at BASE_MS + 1s, the same fixed timestamps the
 // isOverdue fixture uses), carrying an SLA deadline for exactly
@@ -11264,6 +11405,24 @@ function benchFromHistory(): number {
       TaskLifecycle.fromHistory("BENCH-001", historyFixture),
       "fromHistory",
     );
+  }, ITERATIONS);
+}
+
+function benchStateAtFromHistory(): number {
+  return measure(() => {
+    // Per-iteration self-check: the mid-history query returns the
+    // hand-pinned SUBMITTED state, and the pure read leaves the
+    // 64-entry fixture untouched (see the fixture above).
+    checkStateAtFromHistory(
+      stateAtFromHistory(stateAtHistoryFixture, STATE_AT_MID),
+      "SUBMITTED",
+      "mid-history query",
+    );
+    if (stateAtHistoryFixture.length !== 64) {
+      throw new Error(
+        "benchmark self-check failed: stateAtFromHistory query mutated the history",
+      );
+    }
   }, ITERATIONS);
 }
 
@@ -13829,6 +13988,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "dispatch {at} (explicit timestamp)", ops: benchDispatchAt() },
   { path: "replay (8-entry history)", ops: benchReplay() },
   { path: "fromHistory (8-entry history)", ops: benchFromHistory() },
+  { path: "stateAtFromHistory (64-entry history, mid-history query)", ops: benchStateAtFromHistory() },
   { path: "verifyHistoryChain (8 entries)", ops: benchVerifyHistoryChain() },
   { path: "verifyHistoryChain auditSecret (8 entries, keyed)", ops: benchVerifyHistoryChainAuditSecret() },
   { path: "buildPayoutWebhook (sign)", ops: benchBuildPayoutWebhook() },
