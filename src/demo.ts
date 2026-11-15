@@ -78,6 +78,14 @@
  * `historyFromNdjson()`, and replayed with
  * `TaskLifecycle.fromHistory()` — the history alone, as the single
  * source of truth, rebuilds the same PAID terminal state — and
+ * a time-travel segment: a dedicated task walks PUBLISH ->
+ * ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 / 12:00, and
+ * `stateAt()` is queried before the first entry (DRAFT), exactly
+ * on the PUBLISH timestamp (OPEN — the boundary is inclusive),
+ * between ACCEPT and START_CAPTURE (ACCEPTED), exactly on and
+ * after the START_CAPTURE timestamp (CAPTURING), with
+ * `stateAtFromHistory()` agreeing over the raw log and an
+ * unparseable query time rejected with the pinned error — and
  * finally an allowed-events listing segment: `allowedEvents(state)`
  * is run over all 13 states in transition-table order and printed
  * as a one-line-per-state overview — the query a task-list UI or a
@@ -676,6 +684,7 @@ import {
   replay,
   SNAPSHOT_VERSION,
   staleTasks,
+  stateAtFromHistory,
   stateDiagram,
   summarizeTaskSettlements,
   tasksApproachingDeadline,
@@ -990,6 +999,25 @@ export const DEMO_OUTBOX_REDRIVE_PENDING_ERROR =
 export const DEMO_LIMIT_ACTOR_TASK_ID = "DEMO-097";
 export const DEMO_LIMIT_IDEMPOTENCY_TASK_ID = "DEMO-098";
 export const DEMO_LIMIT_EVENT_ID_NOW = "2026-03-27T10:00:00.000Z";
+
+/**
+ * Time-travel segment (backlog #1146) — a dedicated task walks
+ * PUBLISH -> ACCEPT -> START_CAPTURE at fixed clocks, and
+ * `stateAt()` is queried at five moments around that chain. All
+ * timestamps fixed; no network, no randomness, no wall clock.
+ * The invalid query time and its pinned rejection are constants
+ * too, so the segment and its tests share one spelling.
+ */
+export const DEMO_STATE_AT_TASK_ID = "DEMO-099";
+export const DEMO_STATE_AT_PUBLISH = "2026-03-01T10:00:00.000Z";
+export const DEMO_STATE_AT_ACCEPT = "2026-03-01T11:00:00.000Z";
+export const DEMO_STATE_AT_CAPTURE = "2026-03-01T12:00:00.000Z";
+export const DEMO_STATE_AT_BEFORE = "2026-03-01T09:00:00.000Z";
+export const DEMO_STATE_AT_BETWEEN = "2026-03-01T11:30:00.000Z";
+export const DEMO_STATE_AT_AFTER = "2026-03-01T13:00:00.000Z";
+export const DEMO_STATE_AT_INVALID = "not-a-date";
+export const DEMO_STATE_AT_INVALID_ERROR =
+  "invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date";
 
 const steps: Array<{
   event: TaskEvent;
@@ -1514,6 +1542,22 @@ export interface DemoResult {
    * NDJSON round-tripped history — no instance, no snapshot envelope.
    */
   replayDerivedState: TaskState;
+  /** Dedicated task for the time-travel segment (DEMO-099). */
+  stateAtTask: TaskLifecycle;
+  /** `stateAt` one hour before the first entry (DRAFT). */
+  stateAtBeforeFirst: TaskState;
+  /** `stateAt` exactly on the PUBLISH timestamp (OPEN — inclusive boundary). */
+  stateAtAtPublish: TaskState;
+  /** `stateAt` between ACCEPT and START_CAPTURE (ACCEPTED). */
+  stateAtBetweenAcceptAndCapture: TaskState;
+  /** `stateAt` exactly on the START_CAPTURE timestamp (CAPTURING). */
+  stateAtAtCapture: TaskState;
+  /** `stateAt` one hour after the last entry (CAPTURING — the final state holds). */
+  stateAtAfterCapture: TaskState;
+  /** `stateAtFromHistory` over the raw log at the START_CAPTURE timestamp (CAPTURING). */
+  stateAtFromHistoryAtCapture: TaskState;
+  /** Error from `stateAt` on an unparseable query time ("" if it was accepted). */
+  stateAtInvalidError: string;
   /** `allowedEvents(state)` for every state, in transition-table order. */
   allowedEventsByState: Array<{ state: TaskState; events: TaskEvent[] }>;
   /** `allowedEvents` for the main task's PAID state — the empty list. */
@@ -4246,6 +4290,99 @@ export async function runDemo(): Promise<DemoResult> {
   const replayEmptyState = replay([]);
   lines.push(
     `  replay([]): empty history replays to the ${replayEmptyState} sentinel (no events yet)`,
+  );
+
+  // Time-travel segment (closing): the replay above rebuilds the
+  // task at its final state, but an auditor often asks what state
+  // the task was in at a moment — `stateAt()` answers that from
+  // the same append-only history, without rebuilding anything.
+  // A dedicated task (DEMO-099) walks PUBLISH -> ACCEPT ->
+  // START_CAPTURE at fixed 10:00 / 11:00 / 12:00 (no network, no
+  // randomness, no wall clock), and the query is run at five
+  // moments around that chain. Hand-written expectations —
+  // written out here from the stateAtFromEntries source and the
+  // stateAt tests, never derived by calling stateAt itself:
+  //   - one hour before the first entry (09:00): DRAFT — the
+  //     task had not moved yet;
+  //   - exactly on the PUBLISH timestamp (10:00): OPEN — the
+  //     boundary is inclusive, the same boundary `isOverdue`
+  //     uses;
+  //   - between ACCEPT (11:00) and START_CAPTURE (12:00):
+  //     ACCEPTED;
+  //   - exactly on the START_CAPTURE timestamp (12:00):
+  //     CAPTURING;
+  //   - one hour after the last entry (13:00): CAPTURING — the
+  //     final state holds;
+  //   - `stateAtFromHistory()` over the raw log at 12:00
+  //     agrees (CAPTURING) — the module-level query needs no
+  //     instance;
+  //   - an unparseable query time is rejected with exactly
+  //     "invalid stateAt time: expected a valid Date or
+  //     ISO-8601 string, got not-a-date", before any history
+  //     is read — and the task is untouched afterwards (still
+  //     CAPTURING, 3 entries).
+  // The segment asserts all of this here, outside the printed
+  // lines: a boundary that drifted would fail the demo itself,
+  // not just a test.
+  const stateAtTask = new TaskLifecycle(DEMO_STATE_AT_TASK_ID);
+  stateAtTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    note: "Researcher publishes the data-collection task",
+    at: DEMO_STATE_AT_PUBLISH,
+  });
+  stateAtTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    note: "Contributor picks up the task",
+    at: DEMO_STATE_AT_ACCEPT,
+  });
+  stateAtTask.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    note: "Data capture begins",
+    at: DEMO_STATE_AT_CAPTURE,
+  });
+  const stateAtBeforeFirst = stateAtTask.stateAt(DEMO_STATE_AT_BEFORE);
+  const stateAtAtPublish = stateAtTask.stateAt(DEMO_STATE_AT_PUBLISH);
+  const stateAtBetweenAcceptAndCapture = stateAtTask.stateAt(
+    DEMO_STATE_AT_BETWEEN,
+  );
+  const stateAtAtCapture = stateAtTask.stateAt(DEMO_STATE_AT_CAPTURE);
+  const stateAtAfterCapture = stateAtTask.stateAt(DEMO_STATE_AT_AFTER);
+  const stateAtFromHistoryAtCapture = stateAtFromHistory(
+    stateAtTask.history,
+    DEMO_STATE_AT_CAPTURE,
+  );
+  let stateAtInvalidError = "";
+  try {
+    stateAtTask.stateAt(DEMO_STATE_AT_INVALID);
+  } catch (err) {
+    stateAtInvalidError = err instanceof Error ? err.message : String(err);
+  }
+  if (
+    stateAtTask.state !== "CAPTURING" ||
+    stateAtTask.history.length !== 3 ||
+    stateAtBeforeFirst !== "DRAFT" ||
+    stateAtAtPublish !== "OPEN" ||
+    stateAtBetweenAcceptAndCapture !== "ACCEPTED" ||
+    stateAtAtCapture !== "CAPTURING" ||
+    stateAtAfterCapture !== "CAPTURING" ||
+    stateAtFromHistoryAtCapture !== "CAPTURING" ||
+    stateAtInvalidError !== DEMO_STATE_AT_INVALID_ERROR
+  ) {
+    throw new Error(
+      "demo fixture broken: stateAt time-travel does not match the hand-pinned contract (09:00 DRAFT, 10:00 OPEN, 11:30 ACCEPTED, 12:00 CAPTURING, 13:00 CAPTURING, stateAtFromHistory agrees at 12:00, and an unparseable query time is rejected with the pinned error leaving the task untouched)",
+    );
+  }
+  lines.push(
+    "",
+    "Time travel (stateAt over DEMO-099: PUBLISH -> ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 / 12:00):",
+    `  ${stateAtTask.id}: PUBLISH at ${DEMO_STATE_AT_PUBLISH}, ACCEPT at ${DEMO_STATE_AT_ACCEPT}, START_CAPTURE at ${DEMO_STATE_AT_CAPTURE} — final state ${stateAtTask.state}, history ${stateAtTask.history.length}`,
+    `  stateAt(${DEMO_STATE_AT_BEFORE}): ${stateAtBeforeFirst} — before the first entry, the task had not moved yet`,
+    `  stateAt(${DEMO_STATE_AT_PUBLISH}): ${stateAtAtPublish} — exactly on the PUBLISH timestamp (the boundary is inclusive)`,
+    `  stateAt(${DEMO_STATE_AT_BETWEEN}): ${stateAtBetweenAcceptAndCapture} — between ACCEPT (11:00) and START_CAPTURE (12:00)`,
+    `  stateAt(${DEMO_STATE_AT_CAPTURE}): ${stateAtAtCapture} — exactly on the START_CAPTURE timestamp`,
+    `  stateAt(${DEMO_STATE_AT_AFTER}): ${stateAtAfterCapture} — after the last entry, the final state holds`,
+    `  stateAtFromHistory(history, ${DEMO_STATE_AT_CAPTURE}): ${stateAtFromHistoryAtCapture} — the module-level query over the raw log agrees, no instance needed`,
+    `  stateAt("${DEMO_STATE_AT_INVALID}"): ${stateAtInvalidError} (an unparseable query time fails closed before any history is read)`,
   );
 
   // Allowed-events listing segment (closing): every segment above
@@ -9419,7 +9556,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
 }
 
 async function main(): Promise<void> {

@@ -89,6 +89,7 @@ import {
   payoutMismatch,
   renderTaskSettlements,
   staleTasks,
+  stateAtFromHistory,
   stateDiagram,
   summarizeTaskSettlements,
   tasksApproachingDeadline,
@@ -735,6 +736,16 @@ Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):
   replay(parsedEntries): pure function derives final state PAID — matches task.state (PAID) and fromHistory state (PAID): true
   replay([]): empty history replays to the DRAFT sentinel (no events yet)
 
+Time travel (stateAt over DEMO-099: PUBLISH -> ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 / 12:00):
+  DEMO-099: PUBLISH at <timestamp>, ACCEPT at <timestamp>, START_CAPTURE at <timestamp> — final state CAPTURING, history 3
+  stateAt(<timestamp>): DRAFT — before the first entry, the task had not moved yet
+  stateAt(<timestamp>): OPEN — exactly on the PUBLISH timestamp (the boundary is inclusive)
+  stateAt(<timestamp>): ACCEPTED — between ACCEPT (11:00) and START_CAPTURE (12:00)
+  stateAt(<timestamp>): CAPTURING — exactly on the START_CAPTURE timestamp
+  stateAt(<timestamp>): CAPTURING — after the last entry, the final state holds
+  stateAtFromHistory(history, <timestamp>): CAPTURING — the module-level query over the raw log agrees, no instance needed
+  stateAt("not-a-date"): invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date (an unparseable query time fails closed before any history is read)
+
 Allowed events by state (allowedEvents over all 13 states):
   DRAFT           -> PUBLISH
   OPEN            -> ACCEPT, EXPIRE
@@ -1131,7 +1142,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 988);
+  assert.equal(lines.length, 998);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -3345,6 +3356,138 @@ test("demo shows the pure replay() terminal-state derivation: the NDJSON round-t
   assert.match(text, /replay\(\[\]\): empty history replays to the DRAFT sentinel \(no events yet\)/);
 });
 
+test("demo shows the time-travel segment in-process: stateAt over DEMO-099 at five moments, stateAtFromHistory agrees, invalid time fails closed", async () => {
+  const {
+    stateAtTask,
+    stateAtBeforeFirst,
+    stateAtAtPublish,
+    stateAtBetweenAcceptAndCapture,
+    stateAtAtCapture,
+    stateAtAfterCapture,
+    stateAtFromHistoryAtCapture,
+    stateAtInvalidError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — the dedicated task walks
+  // PUBLISH -> ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 /
+  // 12:00, so each query moment has one pinned answer.
+  assert.equal(stateAtTask.id, "DEMO-099");
+  assert.equal(stateAtTask.state, "CAPTURING");
+  assert.equal(stateAtTask.history.length, 3);
+  assert.deepEqual(
+    stateAtTask.history.map((h) => [h.seq, h.event, h.from, h.to, h.at]),
+    [
+      [1, "PUBLISH", "DRAFT", "OPEN", "2026-03-01T10:00:00.000Z"],
+      [2, "ACCEPT", "OPEN", "ACCEPTED", "2026-03-01T11:00:00.000Z"],
+      [3, "START_CAPTURE", "ACCEPTED", "CAPTURING", "2026-03-01T12:00:00.000Z"],
+    ],
+  );
+  assert.equal(stateAtBeforeFirst, "DRAFT");
+  assert.equal(stateAtAtPublish, "OPEN");
+  assert.equal(stateAtBetweenAcceptAndCapture, "ACCEPTED");
+  assert.equal(stateAtAtCapture, "CAPTURING");
+  assert.equal(stateAtAfterCapture, "CAPTURING");
+  assert.equal(stateAtFromHistoryAtCapture, "CAPTURING");
+  assert.equal(
+    stateAtInvalidError,
+    "invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date",
+  );
+  // The rejected query left the task untouched — still
+  // CAPTURING with the same 3-entry history — and an
+  // independent re-query over the raw log agrees.
+  assert.equal(stateAtTask.state, "CAPTURING");
+  assert.equal(stateAtTask.history.length, 3);
+  assert.equal(
+    stateAtFromHistory(stateAtTask.history, "2026-03-01T12:00:00.000Z"),
+    "CAPTURING",
+  );
+  assert.equal(stateAtTask.stateAt("2026-03-01T09:00:00.000Z"), "DRAFT");
+  // The segment is printed after the replay segment and before
+  // the allowed-events listing, with every line verbatim.
+  const stateAtAt = text.indexOf(
+    "Time travel (stateAt over DEMO-099: PUBLISH -> ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 / 12:00):",
+  );
+  assert.ok(
+    stateAtAt >
+      text.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):"),
+    "time-travel segment must follow the replay segment",
+  );
+  assert.ok(
+    text.indexOf("Allowed events by state (allowedEvents over all 13 states):") > stateAtAt,
+    "allowed-events segment must follow the time-travel segment",
+  );
+  assert.ok(
+    lines.includes(
+      "  DEMO-099: PUBLISH at 2026-03-01T10:00:00.000Z, ACCEPT at 2026-03-01T11:00:00.000Z, START_CAPTURE at 2026-03-01T12:00:00.000Z — final state CAPTURING, history 3",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAt(2026-03-01T09:00:00.000Z): DRAFT — before the first entry, the task had not moved yet",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAt(2026-03-01T10:00:00.000Z): OPEN — exactly on the PUBLISH timestamp (the boundary is inclusive)",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAt(2026-03-01T11:30:00.000Z): ACCEPTED — between ACCEPT (11:00) and START_CAPTURE (12:00)",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAt(2026-03-01T12:00:00.000Z): CAPTURING — exactly on the START_CAPTURE timestamp",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAt(2026-03-01T13:00:00.000Z): CAPTURING — after the last entry, the final state holds",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      "  stateAtFromHistory(history, 2026-03-01T12:00:00.000Z): CAPTURING — the module-level query over the raw log agrees, no instance needed",
+    ),
+  );
+  assert.ok(
+    lines.includes(
+      '  stateAt("not-a-date"): invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date (an unparseable query time fails closed before any history is read)',
+    ),
+  );
+});
+
+test("demo time-travel segment is deterministic: two runs print byte-identical stateAt lines", async () => {
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Time travel (stateAt over DEMO-099: PUBLISH -> ACCEPT -> START_CAPTURE at fixed 10:00 / 11:00 / 12:00):",
+      ) - 1,
+      ls.indexOf("Allowed events by state (allowedEvents over all 13 states):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Blank separator + header + the chain line + 7 query lines;
+  // every timestamp is fixed, so no normalization is needed.
+  assert.equal(segA.length, 10);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.equal(a.stateAtBeforeFirst, b.stateAtBeforeFirst);
+  assert.equal(a.stateAtAtPublish, b.stateAtAtPublish);
+  assert.equal(a.stateAtBetweenAcceptAndCapture, b.stateAtBetweenAcceptAndCapture);
+  assert.equal(a.stateAtAtCapture, b.stateAtAtCapture);
+  assert.equal(a.stateAtAfterCapture, b.stateAtAfterCapture);
+  assert.equal(a.stateAtFromHistoryAtCapture, b.stateAtFromHistoryAtCapture);
+  assert.equal(a.stateAtInvalidError, b.stateAtInvalidError);
+  assert.deepEqual(
+    a.stateAtTask.history.map((h) => [h.event, h.at]),
+    b.stateAtTask.history.map((h) => [h.event, h.at]),
+  );
+});
+
 test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
@@ -3356,8 +3499,10 @@ test("demo event-sourcing segment agrees across two runs once the main task's ow
   const segA = segment(a.lines);
   // Blank separator + header + intro line + 12 NDJSON lines + the
   // parsed-count, fromHistory, match, replay-derivation, and
-  // replay-sentinel lines.
-  assert.equal(segA.length, 20);
+  // replay-sentinel lines (20), plus the time-travel segment that
+  // now follows the replay lines before the allowed-events
+  // listing: blank separator + header + 8 query lines (10).
+  assert.equal(segA.length, 30);
   // The only varying values are the ones the main task already
   // varied on between any two runs: its wall-clock history
   // timestamps and the hash-chain links derived from them, both
@@ -4046,7 +4191,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 988);
+  assert.equal(out.trimEnd().split("\n").length, 998);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

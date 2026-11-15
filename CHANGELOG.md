@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Demo segment for the `stateAt` time-travel query (2026-11-15,
+  backlog #1146): `npm run demo` now shows a dedicated task
+  (DEMO-099) walking PUBLISH -> ACCEPT -> START_CAPTURE at fixed
+  10:00 / 11:00 / 12:00, with `stateAt()` queried before the first
+  entry (DRAFT), exactly on the PUBLISH timestamp (OPEN — the
+  boundary is inclusive), between ACCEPT and START_CAPTURE
+  (ACCEPTED), exactly on and after the START_CAPTURE timestamp
+  (CAPTURING), cross-checked with `stateAtFromHistory()` over the
+  raw log, and an unparseable query time rejected with the pinned
+  error. 2 tests in `test/demo.test.ts` (segment assertions +
+  determinism).
+
 - Demo segment for the payout webhook outbox redrive (2026-11-14,
   backlog #1145): `npm run demo` now shows the dead letter coming
   back — `redrive()` at a fixed later clock (13:30) moves the

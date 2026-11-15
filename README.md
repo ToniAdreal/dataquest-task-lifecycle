@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1610 tests, all local
+npm test   # 1612 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -209,7 +209,15 @@ task's existing history), then derives the terminal state a second
 way with the pure `replay()` function over the same round-tripped
 entries (no instance, no snapshot envelope), cross-checking the
 derivation against the live task's state and the fromHistory task's
-state, and pins the empty-history `DRAFT` sentinel — and a closing allowed-events listing
+state, and pins the empty-history `DRAFT` sentinel — and a closing
+time-travel segment that runs `stateAt()` over a dedicated task's
+PUBLISH → ACCEPT → START_CAPTURE chain at fixed 10:00 / 11:00 /
+12:00, querying before the first entry (DRAFT), exactly on the
+PUBLISH timestamp (OPEN — the boundary is inclusive), between
+ACCEPT and START_CAPTURE (ACCEPTED), exactly on and after the
+START_CAPTURE timestamp (CAPTURING), cross-checking with
+`stateAtFromHistory()` over the raw log, and rejecting an
+unparseable query time with the pinned error — and a closing allowed-events listing
 segment that runs `allowedEvents()` over all 13 states in
 transition-table order and prints one line per state — the query
 a task-list UI or a watchdog consults to decide what a task can
@@ -2590,7 +2598,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1610 tests covering the happy path, reject→resubmit
+`npm test` runs 1612 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
