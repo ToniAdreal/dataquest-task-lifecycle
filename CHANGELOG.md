@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Settlement summary CSV/JSON round-trip benchmark rows (2026-11-15,
+  backlog #1157): `npm run bench` now measures the two interchange
+  round-trips over the same fixed 10-task mixed-batch summary the
+  `summarizeTaskSettlements` / `diffTaskSettlementsSummaries` /
+  `renderTaskSettlements` rows already pin — `renderTaskSettlementsCsv`
+  -> `parseTaskSettlementsCsv` and `renderTaskSettlementsJson` ->
+  `parseTaskSettlementsJson`. Each timed pass renders, parses back,
+  and re-renders, self-checking the parsed summary field for field
+  against the hand-computed expectation and the re-rendering
+  byte-identically against the hand-written CSV/JSON texts (pinned
+  once, outside the timed loop), so the rows measure a verified
+  closed loop — the bookkeeping and API/storage hops a reconciliation
+  export actually takes — not a render nobody ever reads back.
+
 - `stateAtFromHistory` benchmark row (2026-11-15, backlog
   #1155): `npm run bench` now measures the module-level time-travel
   query over a fixed 64-entry hash-chained history — fifteen

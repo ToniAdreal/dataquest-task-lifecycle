@@ -75,7 +75,13 @@
  *      `{}` once, outside the timed loop; `renderTaskSettlements`
  *      renders the fixed summary to its nine-line plain text,
  *      self-checked per iteration against the hand-written text,
- *      line for line;
+ *      line for line; two more rows cover the summary's interchange
+ *      round-trips over the same fixed summary —
+ *      `renderTaskSettlementsCsv` -> `parseTaskSettlementsCsv` and
+ *      `renderTaskSettlementsJson` -> `parseTaskSettlementsJson` —
+ *      self-checked per iteration for field-by-field identity plus
+ *      byte-identical re-rendering, with the hand-written CSV and
+ *      JSON texts pinned once, outside the timed loop;
  *   7. payout webhook fan-out delivery — `deliverPayoutWebhookToMany()`
  *      delivering one PAID task's settlement event to 4 endpoints at
  *      once (one shared `eventId`, one byte-identical body, each copy
@@ -1561,12 +1567,16 @@ import {
   parseHistory,
   parseMinorUnits,
   parsePayoutRetryAfter,
+  parseTaskSettlementsCsv,
+  parseTaskSettlementsJson,
   payoutAging,
   payoutMismatch,
   PayoutEventDedupe,
   PayoutWebhookOutbox,
   reconcilePayouts,
   renderTaskSettlements,
+  renderTaskSettlementsCsv,
+  renderTaskSettlementsJson,
   replay,
   staleTasks,
   stateAtFromHistory,
@@ -2421,6 +2431,47 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: renderTaskSettlements differs from the hand-written text",
+  );
+}
+
+// Settlement-summary interchange round-trip fixture: the same fixed
+// summary, rendered to its two interchange texts — hand-written here,
+// never derived by calling the renderers themselves, so a renderer
+// change that moves a column or reorders a JSON key fails at fixture
+// load instead of being timed as if it were the old shape:
+//   CSV: the canonical header plus one data row, all eight fields in
+//   canonical order, integer minor units, no quoting needed;
+//   JSON: the same eight fields in canonical order, numbers not
+//   strings, one line, no trailing newline.
+// The parse-back half is pinned too: each text parses to the fixed
+// summary field for field and re-renders byte-identically, so the
+// timed round-trip rows measure a verified closed loop, not a
+// render that nobody ever reads back.
+const EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV =
+  "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal\n" +
+  "10,8,117500,131500,-14000,2,2,15000";
+const EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON =
+  '{"tasks":10,"paid":8,"quotedTotal":117500,"paidTotal":131500,"gap":-14000,"mismatched":2,"unquotedPaid":2,"unquotedPaidTotal":15000}';
+if (
+  renderTaskSettlementsCsv(expectedTaskSettlementsSummary) !==
+    EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV ||
+  renderTaskSettlementsJson(expectedTaskSettlementsSummary) !==
+    EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON ||
+  !checkTaskSettlementsSummary(
+    parseTaskSettlementsCsv(EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV),
+  ) ||
+  !checkTaskSettlementsSummary(
+    parseTaskSettlementsJson(EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON),
+  ) ||
+  renderTaskSettlementsCsv(
+    parseTaskSettlementsCsv(EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV),
+  ) !== EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV ||
+  renderTaskSettlementsJson(
+    parseTaskSettlementsJson(EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON),
+  ) !== EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON
+) {
+  throw new Error(
+    "benchmark fixture failed: task settlements summary CSV/JSON round-trip differs from the hand-written texts",
   );
 }
 
@@ -12284,6 +12335,38 @@ function benchRenderTaskSettlements(): number {
   }, ITERATIONS);
 }
 
+function benchTaskSettlementsCsvRoundTrip(): number {
+  return measure(() => {
+    const text = renderTaskSettlementsCsv(expectedTaskSettlementsSummary);
+    if (
+      text !== EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV ||
+      !checkTaskSettlementsSummary(parseTaskSettlementsCsv(text)) ||
+      renderTaskSettlementsCsv(parseTaskSettlementsCsv(text)) !==
+        EXPECTED_TASK_SETTLEMENTS_SUMMARY_CSV
+    ) {
+      throw new Error(
+        "benchmark self-check failed: task settlements CSV round-trip",
+      );
+    }
+  }, ITERATIONS);
+}
+
+function benchTaskSettlementsJsonRoundTrip(): number {
+  return measure(() => {
+    const text = renderTaskSettlementsJson(expectedTaskSettlementsSummary);
+    if (
+      text !== EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON ||
+      !checkTaskSettlementsSummary(parseTaskSettlementsJson(text)) ||
+      renderTaskSettlementsJson(parseTaskSettlementsJson(text)) !==
+        EXPECTED_TASK_SETTLEMENTS_SUMMARY_JSON
+    ) {
+      throw new Error(
+        "benchmark self-check failed: task settlements JSON round-trip",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchExpiredTasks(): number {
   return measure(() => {
     const out = expiredTasks(watchdogBatch, WATCHDOG_NOW);
@@ -14009,6 +14092,8 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "summarizeTaskSettlements (10 mixed tasks)", ops: benchSummarizeTaskSettlements() },
   { path: "diffTaskSettlementsSummaries (10-task summaries, 4 fields moved)", ops: benchDiffTaskSettlementsSummaries() },
   { path: "renderTaskSettlements (10-task summary, 9-line text)", ops: benchRenderTaskSettlements() },
+  { path: "renderTaskSettlementsCsv -> parseTaskSettlementsCsv round-trip (10-task summary)", ops: benchTaskSettlementsCsvRoundTrip() },
+  { path: "renderTaskSettlementsJson -> parseTaskSettlementsJson round-trip (10-task summary)", ops: benchTaskSettlementsJsonRoundTrip() },
   { path: "deliverPayoutWebhookToMany (4 endpoints)", ops: await benchDeliverPayoutWebhookToMany() },
   { path: "deliverPayoutWebhookToMany x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyDedupe() },
   { path: "deliverPayoutWebhookToMany x resubmit payoutRef x PayoutEventDedupe fan-out receiver flow (4 endpoints)", ops: await benchDeliverPayoutWebhookToManyResubmitDedupe() },
