@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook outbox redrive benchmark row (2026-11-15,
+  backlog #1154): `npm run bench` now measures `redrive` +
+  redelivery — one dead-lettered pair (the paid task's own signed
+  webhook event, 3 failures) redriven back to pending at a fixed
+  later clock and re-delivered through a fake fetch answering 200 on
+  the first attempt, the success clearing the pair so the ledger ends
+  pending 0, dead letter 0. Mirrors escrow's redrive row (backlog
+  #1153). Per-iteration self-checks pin the redriven shape and the
+  delivered body and signature; outside the timed loop, redriving a
+  pending pair and an untracked pair are pinned to their fail-fast
+  errors and the redelivery signature is verified under the bench
+  secret. Also fixes a stale bench expectation the redrive feature
+  (backlog #1135) left behind: the malformed-snapshot table still
+  treated `attempts: 0` as malformed, but a redriven pair exports
+  with `attempts: 0` and `restore()` accepts it as pending — the
+  table now rejects a negative `attempts` instead, and a redriven
+  `attempts: 0` snapshot is pinned to restore as pending with its
+  first failure counting from 1 again. (Found because `npm run bench`
+  failed at fixture validation on a pristine HEAD checkout; `npm
+  test` was unaffected.)
+
 - Demo segment for the `stateAt` time-travel query (2026-11-15,
   backlog #1146): `npm run demo` now shows a dedicated task
   (DEMO-099) walking PUBLISH -> ACCEPT -> START_CAPTURE at fixed
