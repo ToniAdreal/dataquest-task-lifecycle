@@ -2814,7 +2814,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred thirteen hot
+`npm run bench` measures locally-observed throughput for the one hundred fourteen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -3568,6 +3568,20 @@ and beyond the window (the failure is signature-driven and
 skew-independent: no freshness window can rescue a signature that
 never matched); one timed pass is one rotation x future-skew
 verification of the fixed webhook. The
+`verifyPayoutWebhook` requireEventId gate path verifies the fixed
+webhook on every iteration under `{ requireEventId: true }` (no
+network, no randomness, no wall clock): the opt-in event-id presence
+gate every dedupe-keyed receiver pays after the signature matches —
+a legitimately-signed payload with no `eventId` fails closed even
+though its signature alone would verify forever — previously
+invisible inside the plain, rotation, and freshness verify rows,
+whose options never set the gate. Its per-iteration self-check pins
+the verdict to exactly `true`; outside the timed loop, a signed
+payload with `eventId` stripped before signing is pinned to return
+`false` under the gate (a verified signature with no dedupe key is
+refused) and to still verify without the option (the legacy
+signature-only behavior is unchanged); one timed pass is one
+requireEventId-gated verification of the fixed webhook. The
 `deliverPayoutWebhook` `maxRetryDelayMs` cap path delivers the fixed
 webhook on every iteration through an injected fake fetch that
 answers 429 with a pinned `Retry-After: 30` hint (30000 ms) on the
@@ -3992,6 +4006,7 @@ See the throughput row below. One real run on 2026-11-16:
 | verifyPayoutWebhook maxAgeMs freshness window | ~149,964 ops/sec (6.67 µs/op) |
 | verifyPayoutWebhook maxFutureSkewMs future-skew window | ~139,163 ops/sec (7.19 µs/op) |
 | verifyPayoutWebhook (secrets rotation x maxFutureSkewMs) | ~88,213 ops/sec (11.34 µs/op) |
+| verifyPayoutWebhook (requireEventId gate) | ~115,416 ops/sec (8.66 µs/op) |
 | verifyPayoutWebhook x PayoutEventDedupe receiver flow | ~45,951 ops/sec (21.76 µs/op) |
 | verifyPayoutWebhook freshness x PayoutEventDedupe receiver flow | ~34,830 ops/sec (28.71 µs/op) |
 | historyToNdjson (8 entries) | ~21,952 ops/sec (45.55 µs/op) |

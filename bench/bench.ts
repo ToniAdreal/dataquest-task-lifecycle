@@ -1540,6 +1540,26 @@
  *      unknown-state fail-fast. No network, no randomness,
  *      and no wall clock: every dispatch timestamp is fixed.
  *
+ *  72. payout webhook requireEventId gate — `verifyPayoutWebhook`
+ *      with `{ requireEventId: true }` over the fixed webhook
+ *      fixture (signed at the fixed `WEBHOOK_NOW` with the fixed
+ *      `WEBHOOK_EVENT_ID`, so the payload carries a usable dedupe
+ *      key) on every iteration, checked to return exactly `true`
+ *      on every iteration. This is the steady-state receiver cost
+ *      of the opt-in event-id presence gate: the signature is
+ *      checked first and the payload's `eventId` is read only
+ *      after a match (a string body is JSON-parsed for it), a cost
+ *      the plain, rotation, and freshness verify rows never
+ *      exercise (none sets the gate). Outside the timed loop, a
+ *      signed payload built the same way but with `eventId`
+ *      stripped before signing is pinned to return `false` under
+ *      the gate (fail-closed: a verified signature with no dedupe
+ *      key is refused) and to still return `true` without the
+ *      option (the legacy signature-only behavior is unchanged).
+ *      No network, no randomness, and no wall clock: the signed
+ *      fixtures are built once from pinned secret / timestamp /
+ *      eventId.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -1549,6 +1569,7 @@
  *
  * Run: `npm run bench`
  */
+import { createHmac } from "node:crypto";
 import { cpus } from "node:os";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -1672,6 +1693,9 @@ const WEBHOOK_MAX_FUTURE_SKEW_BEYOND_NOW = new Date(
 );
 const WEBHOOK_MAX_FUTURE_SKEW_ILLEGAL_ERROR =
   "cannot verify payout webhook: maxFutureSkewMs must be a finite non-negative number, got -1";
+const WEBHOOK_REQUIRE_EVENT_ID_OPTS = {
+  requireEventId: true,
+};
 
 const LIFECYCLE: Array<{
   event: TaskEvent;
@@ -2038,6 +2062,55 @@ if (
 ) {
   throw new Error(
     "benchmark fixture failed: webhook rotation x maxFutureSkewMs all-mismatch must be false",
+  );
+}
+// RequireEventId gate fixture checks, outside the timed loop: the main
+// webhook above was built at WEBHOOK_NOW with WEBHOOK_EVENT_ID, so
+// under { requireEventId: true } it must verify. A second fixture is
+// the same payload with `eventId` stripped and re-signed over the
+// keyless bytes (bench-side signer, same "sha256=" HMAC form as the
+// library): it must return false under the gate — a verified signature
+// with no dedupe key is refused — and still verify without the option,
+// pinning the legacy signature-only behavior unchanged.
+if (
+  !verifyPayoutWebhook(
+    webhookBody,
+    webhook.signature,
+    WEBHOOK_SECRET,
+    WEBHOOK_REQUIRE_EVENT_ID_OPTS,
+  )
+) {
+  throw new Error("benchmark fixture failed: webhook requireEventId verify");
+}
+const { eventId: _benchDroppedEventId, ...webhookPayloadNoEventId } =
+  webhook.payload;
+const webhookKeylessBody = JSON.stringify(webhookPayloadNoEventId);
+const webhookKeylessSignature =
+  "sha256=" +
+  createHmac("sha256", WEBHOOK_SECRET)
+    .update(webhookKeylessBody, "utf8")
+    .digest("hex");
+if (
+  verifyPayoutWebhook(
+    webhookKeylessBody,
+    webhookKeylessSignature,
+    WEBHOOK_SECRET,
+    WEBHOOK_REQUIRE_EVENT_ID_OPTS,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook requireEventId keyless must be false",
+  );
+}
+if (
+  !verifyPayoutWebhook(
+    webhookKeylessBody,
+    webhookKeylessSignature,
+    WEBHOOK_SECRET,
+  )
+) {
+  throw new Error(
+    "benchmark fixture failed: webhook keyless without requireEventId must verify",
   );
 }
 const ndjsonFixture = historyToNdjson(historyFixture);
@@ -11778,6 +11851,23 @@ function benchVerifyPayoutWebhookRotationFutureSkew(): number {
   }, ITERATIONS);
 }
 
+function benchVerifyPayoutWebhookRequireEventId(): number {
+  return measure(() => {
+    if (
+      verifyPayoutWebhook(
+        webhookBody,
+        webhook.signature,
+        WEBHOOK_SECRET,
+        WEBHOOK_REQUIRE_EVENT_ID_OPTS,
+      ) !== true
+    ) {
+      throw new Error(
+        "benchmark self-check failed: verifyPayoutWebhook requireEventId",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchVerifyPayoutWebhookDedupe(): number {
   return measure(() => {
     const n = receiverDedupeCounter++;
@@ -14285,6 +14375,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "verifyPayoutWebhook maxAgeMs freshness window", ops: benchVerifyPayoutWebhookMaxAge() },
   { path: "verifyPayoutWebhook maxFutureSkewMs future-skew window", ops: benchVerifyPayoutWebhookMaxFutureSkew() },
   { path: "verifyPayoutWebhook (secrets rotation x maxFutureSkewMs)", ops: benchVerifyPayoutWebhookRotationFutureSkew() },
+  { path: "verifyPayoutWebhook (requireEventId gate)", ops: benchVerifyPayoutWebhookRequireEventId() },
   { path: "verifyPayoutWebhook x PayoutEventDedupe receiver flow", ops: benchVerifyPayoutWebhookDedupe() },
   { path: "verifyPayoutWebhook freshness x PayoutEventDedupe receiver flow", ops: benchVerifyPayoutWebhookFreshnessDedupe() },
   { path: "historyToNdjson (8 entries)", ops: benchHistoryToNdjson() },
