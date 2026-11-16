@@ -867,6 +867,14 @@ Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore a
   restored dedupe: eventId evt_demo_payout_001 — checkAndRecord: true (duplicate — the restart did not reopen the dedupe window); eventId evt_demo_payout_002 — checkAndRecord: true (duplicate); eventId evt_demo_payout_003 — checkAndRecord: false (new event, recorded)
   tampered snapshot rejected: a detached copy with v changed to 2 throws "PayoutEventDedupe: invalid snapshot: unsupported snapshot version 2 (expected 1)" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication
 
+Payout dedupe signed snapshot (PayoutEventDedupe exportSignedSnapshot / restoreSignedSnapshot across a restart):
+  source dedupe (fixed clock <timestamp>, TTL 60000 ms): eventId evt_demo_signed_001 — checkAndRecord: false (new event), again: true (duplicate); eventId evt_demo_signed_002 — checkAndRecord: false (new event), again: true (duplicate)
+  exportSignedSnapshot(): v 1, mac 70fe5facb48f6505… (64 lowercase hex chars, HMAC-SHA256 over the canonical snapshot under the demo secret — the secret is never printed or persisted), 2 entries
+  tampered envelope rejected: one byte changed in the first entry's seenAtMs (1774515600000 -> 1774515600001) throws "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong" — a rewritten entry fails before any snapshot parsing
+  after JSON round-trip + PayoutEventDedupe.restoreSignedSnapshot(): stats size 2, hits 0, misses 0, evictions 0 — counters restart at zero, the recorded ids do not
+  restored dedupe: has(evt_demo_signed_001): true, has(evt_demo_signed_002): true, has(evt_demo_signed_003): false — probes record nothing, stats still size 2, hits 0, misses 0, evictions 0
+  restored dedupe: eventId evt_demo_signed_001 — checkAndRecord: true (duplicate — the signed restore did not reopen the dedupe window); eventId evt_demo_signed_002 — checkAndRecord: true (duplicate); eventId evt_demo_signed_003 — checkAndRecord: false (new event, recorded)
+
 Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):
   dedupe (fixed clock <timestamp>, TTL 60000 ms, maxEntries 3): initial stats size 0, hits 0, misses 0, evictions 0 — no delivery seen yet
   eventId evt_demo_stats_001 — checkAndRecord: false (new event) -> stats size 1, hits 0, misses 1, evictions 0; again: true (duplicate) -> stats size 1, hits 1, misses 1, evictions 0
@@ -1142,7 +1150,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 998);
+  assert.equal(lines.length, 1006);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -4191,7 +4199,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 998);
+  assert.equal(out.trimEnd().split("\n").length, 1006);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -5685,11 +5693,180 @@ test("demo shows the payout dedupe snapshot persistence segment in-process: ids 
   );
 });
 
+test("demo shows the payout dedupe signed snapshot segment in-process: HMAC envelope seals the ids, one-byte tamper refused, has probes record nothing", async () => {
+  const {
+    dedupeSignedSnapshotSource,
+    dedupeSignedSnapshotFirst,
+    dedupeSignedSnapshotDuplicate,
+    dedupeSignedSnapshot,
+    dedupeSignedSnapshotTamperedError,
+    dedupeSignedSnapshotRestored,
+    dedupeSignedSnapshotStatsAfterRestore,
+    dedupeSignedSnapshotHasSeen,
+    dedupeSignedSnapshotHasUnseen,
+    dedupeSignedSnapshotStatsAfterHas,
+    dedupeSignedSnapshotRestoredSeen,
+    dedupeSignedSnapshotRestoredUnseen,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the signed
+  // snapshot docs in src/settlementWebhook.ts and the
+  // payoutEventDedupeSignedSnapshot tests, never derived by calling
+  // the signed snapshot pair itself.
+  const START_MS = Date.parse("2026-03-26T09:00:00.000Z");
+  assert.deepEqual(dedupeSignedSnapshotFirst, [false, false]);
+  assert.deepEqual(dedupeSignedSnapshotDuplicate, [true, true]);
+  assert.deepEqual(dedupeSignedSnapshotSource.stats(), {
+    size: 2,
+    hits: 2,
+    misses: 2,
+    evictions: 0,
+  });
+  assert.equal(dedupeSignedSnapshot.v, 1);
+  assert.match(dedupeSignedSnapshot.mac, /^[0-9a-f]{64}$/);
+  assert.equal(dedupeSignedSnapshot.mac.slice(0, 16), "70fe5facb48f6505");
+  assert.deepEqual(dedupeSignedSnapshot.snapshot, {
+    v: 1,
+    entries: [
+      ["evt_demo_signed_001", START_MS],
+      ["evt_demo_signed_002", START_MS],
+    ],
+  });
+  assert.equal(
+    dedupeSignedSnapshotTamperedError,
+    "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong",
+  );
+  // Counters do not travel with the envelope: the restored
+  // store's stats were read before any probe ran.
+  assert.deepEqual(dedupeSignedSnapshotStatsAfterRestore, {
+    size: 2,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeSignedSnapshotHasSeen, [true, true]);
+  assert.equal(dedupeSignedSnapshotHasUnseen, false);
+  // The has probes recorded nothing: stats unmoved.
+  assert.deepEqual(dedupeSignedSnapshotStatsAfterHas, {
+    size: 2,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+  });
+  assert.deepEqual(dedupeSignedSnapshotRestoredSeen, [true, true]);
+  assert.equal(dedupeSignedSnapshotRestoredUnseen, false);
+  assert.equal(dedupeSignedSnapshotRestored.size, 3);
+  assert.deepEqual(dedupeSignedSnapshotRestored.stats(), {
+    size: 3,
+    hits: 2,
+    misses: 1,
+    evictions: 0,
+  });
+  // Independent checks built in the test — the demo segment is
+  // not self-certifying: a fresh dedupe reproduces the signed
+  // round-trip and the tamper refusal on its own.
+  const independent = new PayoutEventDedupe({
+    ttlMs: 60_000,
+    now: () => START_MS,
+  });
+  assert.equal(independent.checkAndRecord("evt-independent-signed-1"), false);
+  const envelope = independent.exportSignedSnapshot("independent-secret");
+  const revived = PayoutEventDedupe.restoreSignedSnapshot(
+    JSON.parse(JSON.stringify(envelope)) as unknown,
+    "independent-secret",
+    { ttlMs: 60_000, now: () => START_MS },
+  );
+  assert.equal(revived.has("evt-independent-signed-1"), true);
+  assert.equal(revived.checkAndRecord("evt-independent-signed-1"), true);
+  const tampered = JSON.parse(JSON.stringify(envelope)) as {
+    snapshot: { entries: Array<[string, number]> };
+  };
+  tampered.snapshot.entries[0][1] = START_MS + 1;
+  assert.throws(
+    () =>
+      PayoutEventDedupe.restoreSignedSnapshot(tampered, "independent-secret", {
+        ttlMs: 60_000,
+        now: () => START_MS,
+      }),
+    /^Error: PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong$/,
+  );
+  assert.throws(
+    () =>
+      PayoutEventDedupe.restoreSignedSnapshot(
+        JSON.parse(JSON.stringify(envelope)) as unknown,
+        "wrong-secret",
+        { ttlMs: 60_000, now: () => START_MS },
+      ),
+    /^Error: PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong$/,
+  );
+  // The segment follows the unsigned snapshot segment and
+  // precedes the stats segment, and prints its lines verbatim.
+  const signedAt = text.indexOf(
+    "Payout dedupe signed snapshot (PayoutEventDedupe exportSignedSnapshot / restoreSignedSnapshot across a restart):",
+  );
+  assert.ok(
+    signedAt >
+      text.indexOf(
+        "Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):",
+      ),
+    "payout dedupe signed snapshot segment must follow the unsigned snapshot segment",
+  );
+  assert.ok(
+    text.indexOf(
+      "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+    ) > signedAt,
+    "payout dedupe stats segment must follow the payout dedupe signed snapshot segment",
+  );
+  for (const line of [
+    "  source dedupe (fixed clock 2026-03-26T09:00:00.000Z, TTL 60000 ms): eventId evt_demo_signed_001 — checkAndRecord: false (new event), again: true (duplicate); eventId evt_demo_signed_002 — checkAndRecord: false (new event), again: true (duplicate)",
+    "  exportSignedSnapshot(): v 1, mac 70fe5facb48f6505… (64 lowercase hex chars, HMAC-SHA256 over the canonical snapshot under the demo secret — the secret is never printed or persisted), 2 entries",
+    '  tampered envelope rejected: one byte changed in the first entry\'s seenAtMs (1774515600000 -> 1774515600001) throws "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong" — a rewritten entry fails before any snapshot parsing',
+    "  after JSON round-trip + PayoutEventDedupe.restoreSignedSnapshot(): stats size 2, hits 0, misses 0, evictions 0 — counters restart at zero, the recorded ids do not",
+    "  restored dedupe: has(evt_demo_signed_001): true, has(evt_demo_signed_002): true, has(evt_demo_signed_003): false — probes record nothing, stats still size 2, hits 0, misses 0, evictions 0",
+    "  restored dedupe: eventId evt_demo_signed_001 — checkAndRecord: true (duplicate — the signed restore did not reopen the dedupe window); eventId evt_demo_signed_002 — checkAndRecord: true (duplicate); eventId evt_demo_signed_003 — checkAndRecord: false (new event, recorded)",
+  ]) {
+    assert.ok(
+      text.includes(line),
+      `missing payout dedupe signed snapshot line: ${line}`,
+    );
+  }
+  // Determinism: two runs print byte-identical signed lines.
+  const segment = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Payout dedupe signed snapshot (PayoutEventDedupe exportSignedSnapshot / restoreSignedSnapshot across a restart):",
+      ),
+      ls.indexOf(
+        "Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):",
+      ) - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = segment(a.lines);
+  // Header + source / export / tampered / restore-stats /
+  // has-probe / restored lines; every value in the segment is a
+  // fixed literal (fixed clock, fixed eventIds, fixed TTL, fixed
+  // secret), so no normalization is needed.
+  assert.equal(segA.length, 7);
+  assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.dedupeSignedSnapshot, b.dedupeSignedSnapshot);
+  assert.deepEqual(
+    a.dedupeSignedSnapshotStatsAfterRestore,
+    b.dedupeSignedSnapshotStatsAfterRestore,
+  );
+  assert.equal(
+    a.dedupeSignedSnapshotTamperedError,
+    b.dedupeSignedSnapshotTamperedError,
+  );
+});
+
 test("demo payout dedupe snapshot segment is deterministic: two runs print byte-identical persistence lines", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout dedupe snapshot persistence (PayoutEventDedupe exportSnapshot / restore across a restart):"),
-      ls.indexOf("Payout dedupe stats observability (PayoutEventDedupe.stats() counters over a pinned script):") - 1,
+      ls.indexOf("Payout dedupe signed snapshot (PayoutEventDedupe exportSignedSnapshot / restoreSignedSnapshot across a restart):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();

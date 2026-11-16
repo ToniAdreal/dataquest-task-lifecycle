@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1635 tests, all local
+npm test   # 1636 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -381,7 +381,19 @@ read as duplicates and an unseen id reads as new, and a
 detached copy of the snapshot with its version rewritten
 to 2 is rejected with the exact invalid-snapshot error —
 the receiver-restart persistence path, shown instead of
-only asserted by the dedupe snapshot tests. — and a payout dedupe stats
+only asserted by the dedupe snapshot tests. — and a payout dedupe signed
+snapshot segment that seals the same two fixed `eventId`s with
+`exportSignedSnapshot()` under a fixed demo-only secret (only the
+envelope version, the first 16 hex chars of the MAC, and the entry
+count are printed), refuses a detached copy with one byte changed
+in the first entry's `seenAtMs` with the exact MAC-mismatch error,
+and restores the untampered envelope with
+`restoreSignedSnapshot()`: the restored store's counters start at
+zero, the read-only `has` probe reads both ids as seen and an
+unseen id as new without recording anything, and a final
+`checkAndRecord` pass confirms the probes consumed nothing — the
+tamper-evident receiver-restart persistence path, shown instead of
+only asserted by the dedupe signed snapshot tests. — and a payout dedupe stats
 observability segment that runs a fresh
 `PayoutEventDedupe` under an injected fixed clock with a
 small `maxEntries` (3) through a pinned script — a new
@@ -2620,7 +2632,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1635 tests covering the happy path, reject→resubmit
+`npm test` runs 1636 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

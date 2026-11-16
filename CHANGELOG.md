@@ -11,6 +11,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout dedupe signed snapshot demo segment (2026-11-16, backlog
+  #1183): `npm run demo` now shows the tamper-evident form of the
+  dedupe restart path — a fresh `PayoutEventDedupe` under an injected
+  fixed clock records two fixed payout `eventId`s, seals them with
+  `exportSignedSnapshot()` under a fixed demo-only secret (only the
+  envelope version, the first 16 hex chars of the MAC, and the entry
+  count are printed), refuses a detached copy with one byte changed
+  in the first entry's `seenAtMs` with the exact MAC-mismatch error,
+  and restores the untampered envelope with
+  `restoreSignedSnapshot()`: the restored store's counters start at
+  zero, the read-only `has` probe reads both ids as seen and an
+  unseen id as new without recording anything, and a final
+  `checkAndRecord` pass confirms the probes consumed nothing. One
+  new demo test pins the envelope shape, the tamper refusal, the
+  `has`-probe/stats behaviour, the printed lines, and byte-identical
+  output across runs; the golden demo output grows by 8 lines.
+
 - `PayoutEventDedupe.has(eventId, now?)` read-only probe (2026-11-16,
   backlog #1180): returns `true` when the `eventId` was recorded
   within the TTL and `false` otherwise, without recording anything —

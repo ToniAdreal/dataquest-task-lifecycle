@@ -708,6 +708,7 @@ import {
   type LedgerPayout,
   type NextSlaDeadline,
   type PayoutAgingResult,
+  type PayoutEventDedupeSignedSnapshotEnvelope,
   type PayoutEventDedupeSnapshot,
   type PayoutEventDedupeStats,
   type PayoutMismatch,
@@ -1146,6 +1147,30 @@ export interface DemoResult {
   dedupeSnapshotRestoredUnseen: boolean;
   /** Rejection for the detached `v: 2` copy ("" if it was accepted). */
   dedupeSnapshotTamperedError: string;
+  /** Source dedupe for the closing signed snapshot segment. */
+  dedupeSignedSnapshotSource: PayoutEventDedupe;
+  /** First-sight `checkAndRecord` outcomes for the segment's two ids. */
+  dedupeSignedSnapshotFirst: boolean[];
+  /** Immediate-redelivery outcomes for the same two ids. */
+  dedupeSignedSnapshotDuplicate: boolean[];
+  /** Signed envelope exported by the source dedupe ({ v: 1, snapshot, mac }). */
+  dedupeSignedSnapshot: PayoutEventDedupeSignedSnapshotEnvelope;
+  /** Rejection for the one-byte-tampered envelope copy ("" if accepted). */
+  dedupeSignedSnapshotTamperedError: string;
+  /** Dedupe restored from the signed envelope after a JSON round-trip. */
+  dedupeSignedSnapshotRestored: PayoutEventDedupe;
+  /** Restored store's stats read before any probe (counters at zero). */
+  dedupeSignedSnapshotStatsAfterRestore: PayoutEventDedupeStats;
+  /** `has` probe outcomes for the two recorded ids (both true). */
+  dedupeSignedSnapshotHasSeen: boolean[];
+  /** `has` probe outcome for a never-recorded id (false). */
+  dedupeSignedSnapshotHasUnseen: boolean;
+  /** Stats after the `has` probes (unchanged: probes record nothing). */
+  dedupeSignedSnapshotStatsAfterHas: PayoutEventDedupeStats;
+  /** Restored store's outcomes for the two recorded ids (duplicates). */
+  dedupeSignedSnapshotRestoredSeen: boolean[];
+  /** Restored store's outcome for a never-recorded id (new). */
+  dedupeSignedSnapshotRestoredUnseen: boolean;
   /** Dedupe for the closing stats observability segment. */
   dedupeStatsDedupe: PayoutEventDedupe;
   /** `checkAndRecord` outcomes for the segment's pinned script. */
@@ -5569,6 +5594,173 @@ export async function runDemo(): Promise<DemoResult> {
     `  tampered snapshot rejected: a detached copy with v changed to 2 throws "${dedupeSnapshotTamperedError}" — a corrupt snapshot fails loudly at startup instead of silently disabling deduplication`,
   );
 
+  // Payout dedupe signed snapshot segment (closing): the
+  // unsigned snapshot above is trusted configuration — anyone
+  // who can rewrite the persisted file can delete a consumed id
+  // or inject a forged one, and the unsigned restore would
+  // install it without a word. Here the same two-id story is
+  // sealed instead: a FRESH dedupe under an injected fixed clock
+  // (2026-03-26T09:00:00.000Z, the same 60_000 ms demo TTL
+  // policy) records two fixed payout eventIds (each new on first
+  // sight, a duplicate on immediate redelivery), exports them
+  // with exportSignedSnapshot() under a fixed demo-only secret,
+  // and the envelope is round-tripped through JSON text — the
+  // persistence channel a real receiver writes before shutdown.
+  // A detached copy of the envelope with ONE byte changed in
+  // the first entry's seenAtMs is then refused by
+  // restoreSignedSnapshot() with the exact MAC-mismatch error,
+  // and the untampered envelope restores with
+  // restoreSignedSnapshot(): the restored store's observability
+  // counters start at zero, the read-only `has` probe (#1180)
+  // reads both ids as seen and an unseen id as new without
+  // recording anything (stats unmoved), and a final
+  // checkAndRecord pass confirms the probes consumed nothing —
+  // both ids still read as duplicates and the unseen id still
+  // reads as new. Hand-written expectations — written out here
+  // from the signed snapshot docs in src/settlementWebhook.ts
+  // and the payoutEventDedupeSignedSnapshot tests, never derived
+  // by calling the signed snapshot pair itself:
+  //   - each fixed id's first checkAndRecord is false (new
+  //     event) and its immediate second is true (duplicate);
+  //   - exportSignedSnapshot() is exactly
+  //     { v: 1, snapshot: { v: 1, entries: [[id1, startMs],
+  //     [id2, startMs]] }, mac } with mac a 64-character
+  //     lowercase hex HMAC-SHA256 digest;
+  //   - the one-byte-tampered copy throws exactly
+  //     "PayoutEventDedupe: signed snapshot MAC mismatch: the
+  //     snapshot was tampered with or the secret is wrong";
+  //   - the restored store's stats() read immediately after
+  //     restore is exactly { size: 2, hits: 0, misses: 0,
+  //     evictions: 0 } — counters do not travel with the
+  //     envelope;
+  //   - on the restored store `has` reads [true, true] for the
+  //     recorded ids and false for the unseen id, and stats()
+  //     after those probes is still { size: 2, hits: 0,
+  //     misses: 0, evictions: 0 };
+  //   - a final checkAndRecord pass on the restored store reads
+  //     [true, true] for the recorded ids and false for the
+  //     unseen id, leaving its size at 3.
+  // Only the envelope's version, the first 16 hex chars of its
+  // MAC, and the entry count are printed — never the secret,
+  // never the full MAC, never the full entries. The clock never
+  // advances, so zero network, zero randomness, and no wall clock
+  // enter the segment. The segment asserts all of this here,
+  // outside the printed lines: a tamper that slipped through, a
+  // restore that reopened the window, a probe that recorded an
+  // id, or counters that travelled with the envelope would fail
+  // the demo itself, not just a test.
+  const DEDUPE_SIGNED_SNAPSHOT_START_MS = Date.parse(
+    "2026-03-26T09:00:00.000Z",
+  );
+  const DEDUPE_SIGNED_SNAPSHOT_TTL_MS = 60_000;
+  const DEDUPE_SIGNED_SNAPSHOT_SECRET = "demo-signed-snapshot-secret";
+  const DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS = [
+    "evt_demo_signed_001",
+    "evt_demo_signed_002",
+  ];
+  const DEDUPE_SIGNED_SNAPSHOT_UNSEEN_EVENT_ID = "evt_demo_signed_003";
+  const dedupeSignedSnapshotSource = new PayoutEventDedupe({
+    ttlMs: DEDUPE_SIGNED_SNAPSHOT_TTL_MS,
+    now: () => DEDUPE_SIGNED_SNAPSHOT_START_MS,
+  });
+  const dedupeSignedSnapshotFirst = DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS.map(
+    (eventId) => dedupeSignedSnapshotSource.checkAndRecord(eventId),
+  );
+  const dedupeSignedSnapshotDuplicate =
+    DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS.map((eventId) =>
+      dedupeSignedSnapshotSource.checkAndRecord(eventId),
+    );
+  const dedupeSignedSnapshot =
+    dedupeSignedSnapshotSource.exportSignedSnapshot(
+      DEDUPE_SIGNED_SNAPSHOT_SECRET,
+    );
+  const dedupeSignedSnapshotTamperedEnvelope: PayoutEventDedupeSignedSnapshotEnvelope =
+    JSON.parse(JSON.stringify(dedupeSignedSnapshot)) as PayoutEventDedupeSignedSnapshotEnvelope;
+  dedupeSignedSnapshotTamperedEnvelope.snapshot.entries[0][1] =
+    DEDUPE_SIGNED_SNAPSHOT_START_MS + 1;
+  let dedupeSignedSnapshotTamperedError = "";
+  try {
+    PayoutEventDedupe.restoreSignedSnapshot(
+      dedupeSignedSnapshotTamperedEnvelope,
+      DEDUPE_SIGNED_SNAPSHOT_SECRET,
+      {
+        ttlMs: DEDUPE_SIGNED_SNAPSHOT_TTL_MS,
+        now: () => DEDUPE_SIGNED_SNAPSHOT_START_MS,
+      },
+    );
+  } catch (err) {
+    dedupeSignedSnapshotTamperedError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const dedupeSignedSnapshotRestored =
+    PayoutEventDedupe.restoreSignedSnapshot(
+      JSON.parse(JSON.stringify(dedupeSignedSnapshot)) as unknown,
+      DEDUPE_SIGNED_SNAPSHOT_SECRET,
+      {
+        ttlMs: DEDUPE_SIGNED_SNAPSHOT_TTL_MS,
+        now: () => DEDUPE_SIGNED_SNAPSHOT_START_MS,
+      },
+    );
+  const dedupeSignedSnapshotStatsAfterRestore =
+    dedupeSignedSnapshotRestored.stats();
+  const dedupeSignedSnapshotHasSeen = DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS.map(
+    (eventId) => dedupeSignedSnapshotRestored.has(eventId),
+  );
+  const dedupeSignedSnapshotHasUnseen =
+    dedupeSignedSnapshotRestored.has(DEDUPE_SIGNED_SNAPSHOT_UNSEEN_EVENT_ID);
+  const dedupeSignedSnapshotStatsAfterHas =
+    dedupeSignedSnapshotRestored.stats();
+  const dedupeSignedSnapshotRestoredSeen =
+    DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS.map((eventId) =>
+      dedupeSignedSnapshotRestored.checkAndRecord(eventId),
+    );
+  const dedupeSignedSnapshotRestoredUnseen =
+    dedupeSignedSnapshotRestored.checkAndRecord(
+      DEDUPE_SIGNED_SNAPSHOT_UNSEEN_EVENT_ID,
+    );
+  if (
+    JSON.stringify(dedupeSignedSnapshotFirst) !== JSON.stringify([false, false]) ||
+    JSON.stringify(dedupeSignedSnapshotDuplicate) !==
+      JSON.stringify([true, true]) ||
+    dedupeSignedSnapshot.v !== 1 ||
+    !/^[0-9a-f]{64}$/.test(dedupeSignedSnapshot.mac) ||
+    JSON.stringify(dedupeSignedSnapshot.snapshot) !==
+      JSON.stringify({
+        v: 1,
+        entries: [
+          [DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[0], DEDUPE_SIGNED_SNAPSHOT_START_MS],
+          [DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[1], DEDUPE_SIGNED_SNAPSHOT_START_MS],
+        ],
+      }) ||
+    dedupeSignedSnapshotTamperedError !==
+      "PayoutEventDedupe: signed snapshot MAC mismatch: the snapshot was tampered with or the secret is wrong" ||
+    JSON.stringify(dedupeSignedSnapshotStatsAfterRestore) !==
+      JSON.stringify({ size: 2, hits: 0, misses: 0, evictions: 0 }) ||
+    JSON.stringify(dedupeSignedSnapshotHasSeen) !==
+      JSON.stringify([true, true]) ||
+    dedupeSignedSnapshotHasUnseen !== false ||
+    JSON.stringify(dedupeSignedSnapshotStatsAfterHas) !==
+      JSON.stringify({ size: 2, hits: 0, misses: 0, evictions: 0 }) ||
+    JSON.stringify(dedupeSignedSnapshotRestoredSeen) !==
+      JSON.stringify([true, true]) ||
+    dedupeSignedSnapshotRestoredUnseen !== false ||
+    dedupeSignedSnapshotRestored.size !== 3
+  ) {
+    throw new Error(
+      "demo fixture broken: PayoutEventDedupe signed snapshot does not match the hand-pinned contract (two ids new then duplicate, envelope exactly the pinned v1 snapshot with a 64-hex MAC, one-byte tamper refused with the pinned MAC-mismatch error, restored counters at zero, has probes read both ids seen and the unseen id new without moving stats, final checkAndRecord confirms both ids still duplicates and the unseen id new after restore)",
+    );
+  }
+  lines.push(
+    "",
+    "Payout dedupe signed snapshot (PayoutEventDedupe exportSignedSnapshot / restoreSignedSnapshot across a restart):",
+    `  source dedupe (fixed clock ${new Date(DEDUPE_SIGNED_SNAPSHOT_START_MS).toISOString()}, TTL ${DEDUPE_SIGNED_SNAPSHOT_TTL_MS} ms): eventId ${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[0]} — checkAndRecord: ${dedupeSignedSnapshotFirst[0]} (new event), again: ${dedupeSignedSnapshotDuplicate[0]} (duplicate); eventId ${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[1]} — checkAndRecord: ${dedupeSignedSnapshotFirst[1]} (new event), again: ${dedupeSignedSnapshotDuplicate[1]} (duplicate)`,
+    `  exportSignedSnapshot(): v ${dedupeSignedSnapshot.v}, mac ${dedupeSignedSnapshot.mac.slice(0, 16)}… (64 lowercase hex chars, HMAC-SHA256 over the canonical snapshot under the demo secret — the secret is never printed or persisted), ${dedupeSignedSnapshot.snapshot.entries.length} entries`,
+    `  tampered envelope rejected: one byte changed in the first entry's seenAtMs (${DEDUPE_SIGNED_SNAPSHOT_START_MS} -> ${DEDUPE_SIGNED_SNAPSHOT_START_MS + 1}) throws "${dedupeSignedSnapshotTamperedError}" — a rewritten entry fails before any snapshot parsing`,
+    `  after JSON round-trip + PayoutEventDedupe.restoreSignedSnapshot(): stats size ${dedupeSignedSnapshotStatsAfterRestore.size}, hits ${dedupeSignedSnapshotStatsAfterRestore.hits}, misses ${dedupeSignedSnapshotStatsAfterRestore.misses}, evictions ${dedupeSignedSnapshotStatsAfterRestore.evictions} — counters restart at zero, the recorded ids do not`,
+    `  restored dedupe: has(${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[0]}): ${dedupeSignedSnapshotHasSeen[0]}, has(${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[1]}): ${dedupeSignedSnapshotHasSeen[1]}, has(${DEDUPE_SIGNED_SNAPSHOT_UNSEEN_EVENT_ID}): ${dedupeSignedSnapshotHasUnseen} — probes record nothing, stats still size ${dedupeSignedSnapshotStatsAfterHas.size}, hits ${dedupeSignedSnapshotStatsAfterHas.hits}, misses ${dedupeSignedSnapshotStatsAfterHas.misses}, evictions ${dedupeSignedSnapshotStatsAfterHas.evictions}`,
+    `  restored dedupe: eventId ${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[0]} — checkAndRecord: ${dedupeSignedSnapshotRestoredSeen[0]} (duplicate — the signed restore did not reopen the dedupe window); eventId ${DEDUPE_SIGNED_SNAPSHOT_EVENT_IDS[1]} — checkAndRecord: ${dedupeSignedSnapshotRestoredSeen[1]} (duplicate); eventId ${DEDUPE_SIGNED_SNAPSHOT_UNSEEN_EVENT_ID} — checkAndRecord: ${dedupeSignedSnapshotRestoredUnseen} (new event, recorded)`,
+  );
+
 
   // Payout dedupe stats observability segment (closing): the
   // receiver-side dedupe segment above showed the duplicate
@@ -9556,7 +9748,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeSignedSnapshotSource, dedupeSignedSnapshotFirst, dedupeSignedSnapshotDuplicate, dedupeSignedSnapshot, dedupeSignedSnapshotTamperedError, dedupeSignedSnapshotRestored, dedupeSignedSnapshotStatsAfterRestore, dedupeSignedSnapshotHasSeen, dedupeSignedSnapshotHasUnseen, dedupeSignedSnapshotStatsAfterHas, dedupeSignedSnapshotRestoredSeen, dedupeSignedSnapshotRestoredUnseen, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
 }
 
 async function main(): Promise<void> {
