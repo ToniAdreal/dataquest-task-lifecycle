@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout dedupe read-only probe demo segment (2026-11-16, backlog
+  #1190): `npm run demo` now shows the check-before-verify flow on
+  a fresh `PayoutEventDedupe` under an injected fixed clock — a
+  fixed probe `eventId` reads `has: false` before any recording,
+  reads `false` from `checkAndRecord` on first sighting, then reads
+  `has: true` twice with `stats()` identical before and after the
+  probes (size 1, hits 0, misses 1, evictions 0), and reads `has:
+  false` again once the clock advances by exactly the demo TTL
+  (60_000 ms) — the probe never records, never consumes, and never
+  revives an expired id. One new demo test pins the probe
+  outcomes, the printed lines, and byte-identical output across
+  runs; the golden demo output grows by 7 lines.
+
 - Payout dedupe signed snapshot demo segment (2026-11-16, backlog
   #1183): `npm run demo` now shows the tamper-evident form of the
   dedupe restart path — a fresh `PayoutEventDedupe` under an injected

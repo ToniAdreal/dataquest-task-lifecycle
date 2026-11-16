@@ -232,6 +232,13 @@ Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):
   delivery 2: same eventId redelivered -> checkAndRecord true (duplicate, skipped — no second booking)
   delivery 3: clock advanced by exactly the ttl to <timestamp> -> checkAndRecord false (record expired at the ttl boundary, accepted again)
 
+Dedupe read-only probe (PayoutEventDedupe.has(eventId) before verify):
+  probe dedupe (fixed clock <timestamp>, TTL 60000 ms): eventId evt_demo_probe_001 — has: false (unseen, records nothing)
+  checkAndRecord: false (first sighting, recorded) — stats size 1, hits 0, misses 1, evictions 0
+  has: true (seen — the probe moved nothing, stats still size 1, hits 0, misses 1, evictions 0)
+  has again: true (probing never consumes the record)
+  clock advanced by exactly the ttl to <timestamp> -> has: false (record expired at the ttl boundary, not revived)
+
 Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):
   shared now: <timestamp> (eventIds from a deterministic factory)
   DEMO-001: webhook eventId=evt_demo_batch_001 payoutRef=xfer-88f2 payoutAmount=10098.5 verifyPayoutWebhook: ok
@@ -1150,7 +1157,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1006);
+  assert.equal(lines.length, 1013);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1352,7 +1359,9 @@ test("demo dedupe segment is deterministic in outcome: two runs agree on all thr
   const dedupeLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):"),
-      ls.indexOf("Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):") - 1,
+      ls.indexOf(
+        "Dedupe read-only probe (PayoutEventDedupe.has(eventId) before verify):",
+      ) - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -1365,6 +1374,132 @@ test("demo dedupe segment is deterministic in outcome: two runs agree on all thr
   assert.deepEqual(
     [a.dedupeFirst, a.dedupeRedelivery, a.dedupeAfterTtl],
     [b.dedupeFirst, b.dedupeRedelivery, b.dedupeAfterTtl],
+  );
+});
+
+test("demo shows the dedupe read-only probe segment in-process: has is false before recording, true after, stats unmoved, false again at the TTL boundary", async () => {
+  const {
+    dedupeProbeHasUnseen,
+    dedupeProbeFirst,
+    dedupeProbeStatsAfterRecord,
+    dedupeProbeHasSeen,
+    dedupeProbeStatsAfterHas,
+    dedupeProbeHasAgain,
+    dedupeProbeHasExpired,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations for the probe contract: an unseen id
+  // probes false without being recorded (the following
+  // checkAndRecord still sees it as first-sighting), a seen id
+  // probes true, and an expired id probes false again.
+  assert.equal(dedupeProbeHasUnseen, false);
+  assert.equal(dedupeProbeFirst, false);
+  assert.deepEqual(dedupeProbeStatsAfterRecord, {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.equal(dedupeProbeHasSeen, true);
+  assert.equal(dedupeProbeHasAgain, true);
+  // The probes moved nothing: the stats snapshot after them is
+  // identical to the post-record snapshot.
+  assert.deepEqual(dedupeProbeStatsAfterHas, dedupeProbeStatsAfterRecord);
+  assert.equal(dedupeProbeHasExpired, false);
+  // An independent dedupe instance under the same fixed-clock /
+  // TTL setup reproduces the same probe outcomes — the demo
+  // segment is not self-certifying.
+  let nowMs = Date.parse("2026-03-18T09:02:00.000Z");
+  const replay = new PayoutEventDedupe({ ttlMs: 60_000, now: () => nowMs });
+  assert.equal(replay.has("evt_demo_probe_001"), false);
+  assert.equal(replay.checkAndRecord("evt_demo_probe_001"), false);
+  assert.deepEqual(replay.stats(), {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  assert.equal(replay.has("evt_demo_probe_001"), true);
+  assert.equal(replay.has("evt_demo_probe_001"), true);
+  assert.deepEqual(replay.stats(), {
+    size: 1,
+    hits: 0,
+    misses: 1,
+    evictions: 0,
+  });
+  nowMs += 60_000; // exactly the TTL: the record has expired
+  assert.equal(replay.has("evt_demo_probe_001"), false);
+  // The segment is printed after the receiver-side dedupe segment
+  // and before the batch section, with its lines verbatim (the
+  // fixed clock start and the TTL-advanced instant are fixed
+  // literals).
+  const probeAt = text.indexOf(
+    "Dedupe read-only probe (PayoutEventDedupe.has(eventId) before verify):",
+  );
+  assert.ok(
+    probeAt >
+      text.indexOf(
+        "Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):",
+      ),
+    "probe segment must follow the dedupe segment",
+  );
+  assert.ok(
+    text.indexOf(
+      "Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):",
+    ) > probeAt,
+    "batch section must follow the probe segment",
+  );
+  assert.match(
+    text,
+    /probe dedupe \(fixed clock 2026-03-18T09:02:00\.000Z, TTL 60000 ms\): eventId evt_demo_probe_001 — has: false \(unseen, records nothing\)/,
+  );
+  assert.match(
+    text,
+    /checkAndRecord: false \(first sighting, recorded\) — stats size 1, hits 0, misses 1, evictions 0/,
+  );
+  assert.match(
+    text,
+    /has: true \(seen — the probe moved nothing, stats still size 1, hits 0, misses 1, evictions 0\)/,
+  );
+  assert.match(text, /has again: true \(probing never consumes the record\)/);
+  assert.match(
+    text,
+    /clock advanced by exactly the ttl to 2026-03-18T09:03:00\.000Z -> has: false \(record expired at the ttl boundary, not revived\)/,
+  );
+  // Two runs agree on the segment lines and the probe outcomes.
+  const probeLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf(
+        "Dedupe read-only probe (PayoutEventDedupe.has(eventId) before verify):",
+      ),
+      ls.indexOf(
+        "Batch payout webhooks (buildPayoutWebhooks over all three demo tasks):",
+      ) - 1,
+    );
+  const b = await runDemo();
+  const segA = probeLines(lines);
+  assert.equal(segA.length, 6);
+  assert.equal(
+    normalize(segA.join("\n")),
+    normalize(probeLines(b.lines).join("\n")),
+  );
+  assert.deepEqual(
+    [
+      dedupeProbeHasUnseen,
+      dedupeProbeFirst,
+      dedupeProbeHasSeen,
+      dedupeProbeHasAgain,
+      dedupeProbeHasExpired,
+    ],
+    [
+      b.dedupeProbeHasUnseen,
+      b.dedupeProbeFirst,
+      b.dedupeProbeHasSeen,
+      b.dedupeProbeHasAgain,
+      b.dedupeProbeHasExpired,
+    ],
   );
 });
 
@@ -4199,7 +4334,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1006);
+  assert.equal(out.trimEnd().split("\n").length, 1013);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

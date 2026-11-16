@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1636 tests, all local
+npm test   # 1637 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -45,7 +45,11 @@ feeds the webhook's `eventId` through a `PayoutEventDedupe` under an
 injected fixed clock (the first delivery is booked, a redelivery of
 the same `eventId` is skipped as a duplicate, and the same id is
 accepted again once the demo TTL — 60 seconds, against the library
-default of one hour — lapses at exactly its boundary), a batch
+default of one hour — lapses at exactly its boundary), a read-only
+probe segment that asks `has(eventId)` on a fixed probe id before any
+recording (unseen), records it once, and shows both probes leaving
+`stats()` unmoved and the id unseen again once the demo TTL lapses at
+exactly its boundary, a batch
 segment that runs `buildPayoutWebhooks` over all three demo tasks
 under one shared fixed `now` and a deterministic `eventId` factory (the PAID task builds and
 verifies; each non-PAID task lands as `{ taskId, error }` only and
@@ -2632,7 +2636,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1636 tests covering the happy path, reject→resubmit
+`npm test` runs 1637 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
