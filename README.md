@@ -2828,7 +2828,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred fourteen hot
+`npm run bench` measures locally-observed throughput for the one hundred fifteen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2984,7 +2984,10 @@ hits, `PayoutEventDedupe.restore` snapshot restore,
 `PayoutEventDedupe.clear` window reset,
 `PayoutEventDedupe.stats` observability snapshot, and
 `PayoutEventDedupe.checkAndRecord` first-sighting misses with
-LRU eviction), payout webhook outbox (`PayoutWebhookOutbox.recordAttempt` failure recording, `PayoutWebhookOutbox.pending()` / `PayoutWebhookOutbox.deadLetter()` listing over a fixed 1,000-pair ledger of 700 pending and 300 dead-lettered pairs, `PayoutWebhookOutbox.acknowledge` clearing, `PayoutWebhookOutbox.exportSnapshot` export, `PayoutWebhookOutbox.restore` from the JSON-round-tripped snapshot, and `PayoutWebhookOutbox.redrive` moving one dead-lettered pair (3 failures, the paid task's own webhook event) back to pending at a fixed later clock and re-delivering its signed webhook through a fake fetch that answers 200 on the first attempt, the success clearing the pair so the ledger ends pending 0, dead letter 0, with the redriven shape and the delivered body and signature pinned on every iteration, and `truncateOutboxError` error truncation over a fixed 3-case corpus (a short error, an exactly-at-cap error, and a 10 KB error -- one measured op truncates all three, pinning the short and at-cap pass-throughs and the 10 KB truncation to exactly 1024 characters with the `…[truncated]` marker) -- the failure ledger a payout gateway keeps for its webhooks, previously unit tests only with no throughput baseline), signed-snapshot envelopes
+LRU eviction, and `PayoutEventDedupe.has` read-only probe (hit /
+unseen / expired rotation over a fixed capacity-3 dedupe with 2
+pre-recorded ids, self-checked per iteration for the verdict, with
+non-consumption and unmoved stats pinned outside the timed loop), payout webhook outbox (`PayoutWebhookOutbox.recordAttempt` failure recording, `PayoutWebhookOutbox.pending()` / `PayoutWebhookOutbox.deadLetter()` listing over a fixed 1,000-pair ledger of 700 pending and 300 dead-lettered pairs, `PayoutWebhookOutbox.acknowledge` clearing, `PayoutWebhookOutbox.exportSnapshot` export, `PayoutWebhookOutbox.restore` from the JSON-round-tripped snapshot, and `PayoutWebhookOutbox.redrive` moving one dead-lettered pair (3 failures, the paid task's own webhook event) back to pending at a fixed later clock and re-delivering its signed webhook through a fake fetch that answers 200 on the first attempt, the success clearing the pair so the ledger ends pending 0, dead letter 0, with the redriven shape and the delivered body and signature pinned on every iteration, and `truncateOutboxError` error truncation over a fixed 3-case corpus (a short error, an exactly-at-cap error, and a 10 KB error -- one measured op truncates all three, pinning the short and at-cap pass-throughs and the 10 KB truncation to exactly 1024 characters with the `…[truncated]` marker) -- the failure ledger a payout gateway keeps for its webhooks, previously unit tests only with no throughput baseline), signed-snapshot envelopes
 (`exportSignedSnapshot` / `restoreSignedSnapshot` on all three
 HMAC-SHA256 signed snapshot envelopes — `PayoutEventDedupe`
 #1011, `TaskLifecycle` #1018, `PayoutWebhookOutbox` #1031 — six
@@ -4051,6 +4054,7 @@ See the throughput row below. One real run on 2026-11-16:
 | deliverPayoutWebhook timeoutMs timeout | ~97.3 ops/sec (10278.66 µs/op) |
 | deliverPayoutWebhook delivery headers (loopback, 500 then 200) | ~1,329 ops/sec (752.53 µs/op) |
 | PayoutEventDedupe checkAndRecord (hit, 1,000 recorded ids) | ~3,811,789 ops/sec (0.26 µs/op) |
+| PayoutEventDedupe.has (hit / unseen / expired, 2 recorded ids) | ~2,311,342 ops/sec (0.43 µs/op) |
 | PayoutEventDedupe.restore (1,000-entry snapshot) | ~4,654 ops/sec (214.86 µs/op) |
 | PayoutEventDedupe.exportSnapshot (5 live entries, 1 expired) | ~1,109,460 ops/sec (0.90 µs/op) |
 | PayoutEventDedupe.clear (1,000 recorded ids, fresh fixture) | ~7,340 ops/sec (136.24 µs/op) |
