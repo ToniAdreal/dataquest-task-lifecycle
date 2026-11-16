@@ -11,6 +11,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `verifyPayoutWebhook` opt-in `requireEventId` (2026-11-16, backlog
+  #1177): `VerifyPayoutWebhookOptions.requireEventId` (default
+  `false`) refuses a payload whose signature verifies but whose
+  `eventId` is missing, not a string, or an empty string — a
+  signed-but-keyless notification would otherwise leave a receiver
+  that deduplicates on `eventId` (`PayoutEventDedupe`) with no key,
+  silently defeating replay detection. The signature is checked
+  first, so a forged signature still fails on the signature
+  comparison and never reaches the gate; an unparseable string body
+  fails the gate as `false`, never throws; a non-boolean value is a
+  caller configuration error. The gate composes with secret rotation
+  and the freshness window, and mirrors escrow's
+  `verifySettlementWebhook` `requireEventId` (#1174) — including the
+  deliberate `null`-throws behavior (a `null` option is a caller
+  mistake, not an omitted one).
+
 - `truncateOutboxError` benchmark row (2026-11-15, backlog
   #1160): `npm run bench` now measures the pure dead-letter error
   guard over a fixed 3-case corpus — a short error, an exactly

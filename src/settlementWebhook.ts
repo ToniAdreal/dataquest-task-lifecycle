@@ -556,6 +556,21 @@ export interface VerifyPayoutWebhookOptions {
    */
   maxFutureSkewMs?: number;
   /**
+   * Require the payload to carry a non-empty `eventId` (opt-in). When
+   * `true`, a payload whose signature verifies but whose `eventId` is
+   * missing, not a string, or an empty string returns `false`
+   * (fail-closed): a receiver that deduplicates on `eventId`
+   * (`PayoutEventDedupe`) has no key to deduplicate on otherwise,
+   * and a signed-but-keyless notification would silently defeat replay
+   * detection. A string body that does not parse as JSON fails the
+   * same way, never throws. The check runs only after the signature
+   * matches, so a forged signature still fails on the signature
+   * comparison and never reaches this gate. Defaults to `false`
+   * (legacy behavior: a keyless payload verifies on its signature
+   * alone).
+   */
+  requireEventId?: boolean;
+  /**
    * "Now" for the freshness check. Defaults to the real clock; inject a
    * fixed value in tests for determinism. An invalid timestamp throws a
    * caller configuration error.
@@ -573,8 +588,23 @@ export interface VerifyPayoutWebhookOptions {
  * input can never turn verification into an unhandled exception. The
  * comparison runs in constant time (`timingSafeEqual`).
  *
- * Note: `eventId` is not validated separately — it is part of the signed
- * body, so any tampering with it breaks the signature check above.
+ * Note: `eventId` is not validated separately by default — it is part
+ * of the signed body, so any tampering with it breaks the signature
+ * check above. Pass `{ requireEventId: true }` to close the remaining
+ * gap: a payload signed without an `eventId` at all (a keyless body
+ * still verifies on its signature alone) would leave a receiver that
+ * deduplicates on `eventId` with no key, so a signed-but-keyless
+ * notification silently defeats replay detection.
+ *
+ * Event-id presence (opt-in): pass `{ requireEventId: true }` (with
+ * either the positional secret or `{ secrets }`). The signature is
+ * checked FIRST; only when it matches is the payload's `eventId` read
+ * (a string body is JSON-parsed for it) — a missing, non-string, or
+ * empty `eventId` then returns `false`, and an unparseable string body
+ * fails the same way, never throws. A forged signature still fails on
+ * the signature comparison, and never reaches this gate. Without the
+ * option, a signed-but-keyless payload verifies on its signature alone
+ * (legacy behavior).
  *
  * Freshness (opt-in replay bound): pass `{ maxAgeMs, now? }` as the
  * fourth argument. The signature is checked FIRST; only when it matches
@@ -679,6 +709,17 @@ export function verifyPayoutWebhook(
       )}`,
     );
   }
+  const requireEventId = opts.requireEventId;
+  if (
+    requireEventId !== undefined &&
+    typeof requireEventId !== "boolean"
+  ) {
+    throw new Error(
+      `cannot verify payout webhook: requireEventId must be a boolean, got ${String(
+        requireEventId,
+      )}`,
+    );
+  }
   let nowMs = Date.now();
   if (opts.now !== undefined) {
     nowMs = new Date(opts.now).getTime();
@@ -706,10 +747,40 @@ export function verifyPayoutWebhook(
     }
   }
   if (!signatureMatches) return false;
+  // The eventId gate is orthogonal to secret rotation and freshness and
+  // runs only after the signature matched: forgeries fail above, never here.
+  if (requireEventId && !payloadHasEventId(body)) return false;
   // Freshness runs only after the signature matched: forgeries fail above,
   // never here, and unauthenticated bodies are never timestamp-parsed.
   if (maxAgeMs === undefined && maxFutureSkewMs === undefined) return true;
   return payloadFreshEnough(body, maxAgeMs, maxFutureSkewMs, nowMs);
+}
+
+/**
+ * Fail-closed `eventId` presence gate for the opt-in `requireEventId`
+ * check.
+ *
+ * String bodies are JSON-parsed to read `eventId`; unparseable bodies,
+ * a missing key, a non-string value, or an empty string all return
+ * `false` (never throw). The signature is already verified by the
+ * caller, so this only answers "is there a usable dedupe key".
+ */
+function payloadHasEventId(body: string | PayoutWebhookPayload): boolean {
+  let eventId: unknown;
+  if (typeof body === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return false;
+    }
+    // A JSON string's `.eventId` is undefined; `typeof` below rejects
+    // it before anything else. Same for null/numbers.
+    eventId = (parsed as { eventId?: unknown } | null)?.eventId;
+  } else {
+    eventId = body.eventId;
+  }
+  return typeof eventId === "string" && eventId.length > 0;
 }
 
 /**

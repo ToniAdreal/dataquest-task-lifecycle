@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1612 tests, all local
+npm test   # 1624 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1556,7 +1556,17 @@ deduplicate on a short id. `verifyPayoutWebhook(rawBody, signature, secret)` che
 HMAC-SHA256 in constant time and returns a boolean; malformed signatures
 return `false` instead of throwing. Verify over the raw request body
 bytes — the object overload re-stringifies for in-process convenience,
-but bytes are the transport-safe path.
+but bytes are the transport-safe path. Opt-in gate: pass
+`{ requireEventId: true }` (fourth argument, with either the positional
+secret or `{ secrets }`) to refuse a payload whose signature verifies
+but whose `eventId` is missing, not a string, or an empty string — a
+signed-but-keyless notification would otherwise leave a receiver that
+deduplicates on `eventId` (`PayoutEventDedupe`) with no key, silently
+defeating replay detection. The signature is checked first, so a
+forged signature still fails on the signature comparison and never
+reaches this gate; an unparseable string body fails the gate as
+`false`, never throws. Default off, so legacy keyless payloads keep
+verifying on their signature alone.
 
 Verification is signature-only by default — and a signature has no
 expiry, so a captured webhook could otherwise be replayed forever. Pass
@@ -2598,7 +2608,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1612 tests covering the happy path, reject→resubmit
+`npm test` runs 1624 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
