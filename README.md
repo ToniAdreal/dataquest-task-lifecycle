@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1624 tests, all local
+npm test   # 1635 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1615,7 +1615,19 @@ characters) throws the same way, and a snapshot carrying one is
 rejected at restore — the dedupe key is never truncated, so a
 restored id still matches the deliveries it was recorded for.
 `size` and `stats()` (`{ size, hits, misses, evictions }`)
-expose observability, and `clear()` resets both. Honest limit: the
+expose observability, and `clear()` resets both. For a read-only question —
+"have I seen this `eventId`?" asked before the signature is verified,
+e.g. for logging or metrics — use `has(eventId, now?)`: it returns
+`true` when the id was recorded within the TTL and `false` otherwise,
+without recording anything, so a forged delivery probed before
+verification cannot make the later genuine delivery look like a
+duplicate. It never refreshes LRU recency, never reclaims expired
+entries, and never moves the `hits`/`misses`/`evictions` counters; an
+expired id reads `false` (the TTL boundary matches `checkAndRecord`),
+and an empty, non-string, or overlong `eventId` throws the same way.
+An explicit `now` (milliseconds since the epoch) overrides the
+injected clock for that one probe. It mirrors escrow's
+`SettlementEventDedupe.has`. Honest limit: the
 store is single-process and in-memory only — two receiver processes
 cannot see each other's records, so a multi-process receiver must
 deduplicate over shared storage (a database unique constraint,
@@ -2608,7 +2620,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1624 tests covering the happy path, reject→resubmit
+`npm test` runs 1635 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

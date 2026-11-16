@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `PayoutEventDedupe.has(eventId, now?)` read-only probe (2026-11-16,
+  backlog #1180): returns `true` when the `eventId` was recorded
+  within the TTL and `false` otherwise, without recording anything —
+  a receiver can ask "have I seen this `eventId`?" before verifying
+  the signature (e.g. for logging or metrics) without turning a
+  forged delivery into a recorded id that makes the later genuine
+  delivery look like a duplicate. It never refreshes LRU recency,
+  never reclaims expired entries, and never moves the
+  `hits`/`misses`/`evictions` counters; an expired id reads `false`
+  (the TTL boundary matches `checkAndRecord`), and an empty,
+  non-string, or overlong `eventId` throws the same way. An explicit
+  `now` (milliseconds since the epoch) overrides the injected clock
+  for that one probe. Mirrors escrow's `SettlementEventDedupe.has`
+  (#1176).
+
 - `stateAt` benchmark row (2026-11-16, backlog #1179): `npm run bench`
   now measures the instance `TaskLifecycle.stateAt(time)` time-travel
   read over one fixed live 3-entry task (PUBLISH -> ACCEPT ->

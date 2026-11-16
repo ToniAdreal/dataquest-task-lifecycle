@@ -1335,6 +1335,51 @@ export class PayoutEventDedupe {
   }
 
   /**
+   * Read-only probe: returns `true` when the `eventId` was already
+   * recorded within the TTL, `false` otherwise — without recording
+   * anything.
+   *
+   * Unlike `checkAndRecord`, this never mutates the store: an unseen
+   * id is not recorded (a later `checkAndRecord` still sees it as
+   * first-seen), a seen id's LRU recency is not refreshed, expired
+   * entries are treated as unseen without triggering reclamation (an
+   * expired entry is left in place for the next recording call to
+   * reclaim, exactly as the sibling rfc9421 `ReplayCache.has()`
+   * leaves it), and the observability counters (`hits`/`misses`/
+   * `evictions`) are untouched. Use it for the check-before-verify
+   * flow — e.g. logging or metrics on whether an `eventId` was seen
+   * before spending the signature verification — where the probe
+   * itself must not turn an unverified delivery into a recorded id
+   * (a forged delivery probed through `checkAndRecord` would make
+   * the later genuine delivery look like a duplicate).
+   *
+   * Accepts an explicit `now` (milliseconds since the epoch) like
+   * the injected clock; defaults to the dedupe's clock. The TTL
+   * boundary matches `checkAndRecord`: an id seen exactly `ttlMs`
+   * ago counts as expired. An empty, non-string, or overlong
+   * (longer than {@link MAX_EVENT_ID_LENGTH}) `eventId` throws a
+   * configuration `Error`, the same caliber as `checkAndRecord`.
+   *
+   * Mirrors escrow's `SettlementEventDedupe.has` (backlog #1176).
+   */
+  has(eventId: string, now?: number): boolean {
+    if (typeof eventId !== "string" || eventId.length === 0) {
+      throw new Error(
+        "PayoutEventDedupe: eventId must be a non-empty string",
+      );
+    }
+    if (eventId.length > MAX_EVENT_ID_LENGTH) {
+      throw new Error(
+        `PayoutEventDedupe: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
+      );
+    }
+    const t = now ?? this.clock();
+    const prev = this.seenAt.get(eventId);
+    if (prev === undefined) return false;
+    return t - prev < this.ttlMs;
+  }
+
+  /**
    * Number of live (unexpired) entries tracked, computed against the
    * dedupe's injected clock.
    */
