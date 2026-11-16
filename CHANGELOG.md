@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `stateAt` benchmark row (2026-11-16, backlog #1179): `npm run bench`
+  now measures the instance `TaskLifecycle.stateAt(time)` time-travel
+  read over one fixed live 3-entry task (PUBLISH -> ACCEPT ->
+  START_CAPTURE with injected timestamps). One timed pass runs three
+  queries — between ACCEPT and START_CAPTURE (ACCEPTED), exactly on the
+  START_CAPTURE entry (CAPTURING), and before the first entry (DRAFT) —
+  self-checked per iteration, with the task pinned to CAPTURING and 3
+  entries afterwards. Unlike the `stateAtFromHistory` row, the instance
+  read scans the already-trusted in-memory history with no hash-chain
+  re-validation, so the gap between the two rows isolates the
+  validation cost of the bare-log path.
+
 - `verifyPayoutWebhook` opt-in `requireEventId` (2026-11-16, backlog
   #1177): `VerifyPayoutWebhookOptions.requireEventId` (default
   `false`) refuses a payload whose signature verifies but whose

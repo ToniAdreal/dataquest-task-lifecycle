@@ -19,7 +19,14 @@
  *      review/reject/resubmit cycles): its per-iteration self-check
  *      pins the mid-history query, and the boundary queries plus a
  *      detached tampered history are pinned once, outside the timed
- *      loop (see the stateAtFromHistory fixture below);
+ *      loop (see the stateAtFromHistory fixture below). The instance
+ *      `TaskLifecycle.stateAt(time)` time-travel read is the same
+ *      group over one fixed live 3-entry task (PUBLISH -> ACCEPT ->
+ *      START_CAPTURE with injected timestamps): its per-iteration
+ *      self-check pins three queries per pass (the mid-chain,
+ *      on-last-entry, and before-first-entry moments), isolating the
+ *      bare in-memory scan from the pure function's chain
+ *      re-validation (see the stateAt fixture below);
  *   3. `verifyHistoryChain(history)` — full SHA-256 hash-chain
  *      re-verification of that same history. The path's
  *      per-iteration self-check pins the fixture's genesis
@@ -10851,6 +10858,76 @@ checkStateAtFromHistory(
   "mid-history query after tamper check",
 );
 
+// Instance `stateAt` fixture (backlog #1179): one fixed live task driven
+// PUBLISH -> ACCEPT -> START_CAPTURE with injected timestamps — the
+// instance read the #1155 pure-function row has no counterpart for.
+// Unlike `stateAtFromHistory`, the instance method scans the
+// already-trusted in-memory history (`this._history`) with no
+// hash-chain re-validation, so its cost is the bare scan plus one
+// method dispatch, and the two rows over the same opening isolate the
+// validation cost of the bare-log path. Hand-pinned expectations (NOT
+// produced by the implementation):
+//   - a query between ACCEPT and START_CAPTURE (BASE + 1.5s) -> ACCEPTED;
+//   - a query exactly on the START_CAPTURE entry (BASE + 2s) -> CAPTURING:
+//     the boundary is inclusive;
+//   - a query before the first entry (BASE - 1s) -> DRAFT.
+// The query is a pure read, so the same task is re-queried on every
+// iteration; the fixture asserts the task's state and history are
+// untouched by the query.
+const STATE_AT_TASK_ID = "BENCH-STATEAT-002";
+const STATE_AT_INSTANCE_MID = new Date(BASE_MS + 1500);
+const STATE_AT_INSTANCE_LAST = new Date(BASE_MS + 2000);
+const STATE_AT_INSTANCE_BEFORE = new Date(BASE_MS - 1000);
+const stateAtTask: TaskLifecycle = ((): TaskLifecycle => {
+  const task = new TaskLifecycle(STATE_AT_TASK_ID);
+  task.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: new Date(BASE_MS).toISOString(),
+  });
+  task.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 1000).toISOString(),
+    quotedAmount: 125,
+  });
+  task.dispatch("START_CAPTURE", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 2000).toISOString(),
+  });
+  if (task.state !== "CAPTURING" || task.history.length !== 3) {
+    throw new Error("benchmark fixture failed: stateAt history shape");
+  }
+  if (!verifyHistoryChain(task.history)) {
+    throw new Error("benchmark fixture failed: stateAt history chain");
+  }
+  return task;
+})();
+function checkStateAt(
+  actual: TaskState,
+  expected: TaskState,
+  label: string,
+): void {
+  if (actual !== expected) {
+    throw new Error(
+      `benchmark self-check failed: stateAt ${label}: expected ${expected}, got ${actual}`,
+    );
+  }
+}
+checkStateAt(
+  stateAtTask.stateAt(STATE_AT_INSTANCE_MID),
+  "ACCEPTED",
+  "mid-chain query",
+);
+checkStateAt(
+  stateAtTask.stateAt(STATE_AT_INSTANCE_LAST),
+  "CAPTURING",
+  "on last entry (inclusive)",
+);
+checkStateAt(
+  stateAtTask.stateAt(STATE_AT_INSTANCE_BEFORE),
+  "DRAFT",
+  "before first entry",
+);
+
 // GetSlaDeadline fixture: one fixed task in ACCEPTED (PUBLISH at
 // BASE_MS, ACCEPT at BASE_MS + 1s, the same fixed timestamps the
 // isOverdue fixture uses), carrying an SLA deadline for exactly
@@ -11555,6 +11632,39 @@ function benchStateAtFromHistory(): number {
     if (stateAtHistoryFixture.length !== 64) {
       throw new Error(
         "benchmark self-check failed: stateAtFromHistory query mutated the history",
+      );
+    }
+  }, ITERATIONS);
+}
+
+function benchStateAt(): number {
+  return measure(() => {
+    // Per-iteration self-check: the three pinned moments — the
+    // mid-chain query (ACCEPTED), the on-last-entry query
+    // (CAPTURING), and the before-first-entry query (DRAFT) — and
+    // the pure read leaves the task's state and 3-entry history
+    // untouched (see the fixture above).
+    checkStateAt(
+      stateAtTask.stateAt(STATE_AT_INSTANCE_MID),
+      "ACCEPTED",
+      "mid-chain query",
+    );
+    checkStateAt(
+      stateAtTask.stateAt(STATE_AT_INSTANCE_LAST),
+      "CAPTURING",
+      "on last entry (inclusive)",
+    );
+    checkStateAt(
+      stateAtTask.stateAt(STATE_AT_INSTANCE_BEFORE),
+      "DRAFT",
+      "before first entry",
+    );
+    if (
+      stateAtTask.state !== "CAPTURING" ||
+      stateAtTask.history.length !== 3
+    ) {
+      throw new Error(
+        "benchmark self-check failed: stateAt query mutated the task",
       );
     }
   }, ITERATIONS);
@@ -14165,6 +14275,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "dispatch {at} (explicit timestamp)", ops: benchDispatchAt() },
   { path: "replay (8-entry history)", ops: benchReplay() },
   { path: "fromHistory (8-entry history)", ops: benchFromHistory() },
+  { path: "stateAt (3-entry history, 3 time-travel queries)", ops: benchStateAt() },
   { path: "stateAtFromHistory (64-entry history, mid-history query)", ops: benchStateAtFromHistory() },
   { path: "verifyHistoryChain (8 entries)", ops: benchVerifyHistoryChain() },
   { path: "verifyHistoryChain auditSecret (8 entries, keyed)", ops: benchVerifyHistoryChainAuditSecret() },
