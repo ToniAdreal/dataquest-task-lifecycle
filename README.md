@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1637 tests, all local
+npm test   # 1638 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -470,7 +470,17 @@ verifies, and a payload lying further ahead of the
 receiver than `maxFutureSkewMs` (3600000 ms) allows
 also fails closed — the replay bound, shown instead of
 only asserted by the payout webhook freshness and
-future-skew tests. — and a closing payout reference enforcement
+future-skew tests. — and a payout webhook event-id gate
+segment that builds two fixed notifications from the
+main task at a pinned signing time — one carrying a
+fixed `eventId`, one the same payload with `eventId`
+dropped and re-signed over its own bytes — and verifies
+both with `verifyPayoutWebhook`: the keyed notification
+verifies with and without the opt-in `requireEventId`
+gate, the keyless one fails closed under the gate and
+still verifies without it (the legacy default) — the
+dedupe-key guard, shown instead of only asserted by the
+requireEventId tests. — and a closing payout reference enforcement
 segment that drives a dedicated task constructed with
 `requirePayoutRef: true` to PAYOUT_PENDING under fixed
 timestamps: its `PAYOUT_COMPLETE` without a `payoutRef`
@@ -2636,7 +2646,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1637 tests covering the happy path, reject→resubmit
+`npm test` runs 1638 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

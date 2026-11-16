@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
@@ -917,6 +918,11 @@ Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a
   stale replay fails closed: receiver now <timestamp> (2 hours after signing, same body and signature) -> verifies: false (the signature alone still verifies: true — only the freshness gate rejects it, bounding replays of a legitimately signed old notification)
   future skew fails closed: receiver now <timestamp> (the payload at lies 2 hours ahead of the receiver) with maxFutureSkewMs 3600000 -> verifies: false (a sender clock set too far ahead gains no unbounded replay window — maxAgeMs alone never bounds the future direction)
 
+Payout webhook event-id gate (verifyPayoutWebhook with { requireEventId: true } rejects a validly signed notification that carries no eventId):
+  keyed notification (main task DEMO-001, fixed signing time <timestamp>): eventId evt_demo_require_event_id signed with the demo secret; the keyless copy drops eventId and is signed over its own bytes — the secret itself is never printed
+  with the gate: keyed verifies: true; keyless verifies: false (fail-closed — a signed-but-keyless notification would leave a receiver that deduplicates on eventId with no key, silently defeating replay detection)
+  without the gate (legacy default): keyed verifies: true; keyless verifies: true (the gate is opt-in — a keyless payload still verifies on its signature alone)
+
 Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):
   enforced task DEMO-024 (constructed with requirePayoutRef: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutRef -> rejected: "payout reference required: PAYOUT_COMPLETE must carry a non-empty payoutRef when requirePayoutRef is enabled"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
   enforced task with the reference: PAYOUT_COMPLETE with payoutRef "xfer-demo-require-ref" at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutRef=xfer-demo-require-ref (the audit trail now names the transfer the settlement claims)
@@ -1157,7 +1163,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1013);
+  assert.equal(lines.length, 1018);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -4334,7 +4340,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1013);
+  assert.equal(out.trimEnd().split("\n").length, 1018);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -6802,10 +6808,11 @@ test("demo shows the payout webhook freshness window segment in-process: inside 
   );
   // The segment follows the payout webhook AbortSignal
   // segment and prints its lines verbatim (the payout
-  // reference enforcement segment follows it, and the
-  // dispatch idempotency key segment follows that, with
-  // the keyed audit hash chain segment now closing the
-  // demo after it).
+  // webhook event-id gate segment follows it, and the
+  // payout reference enforcement segment follows that,
+  // with the dispatch idempotency key segment after it
+  // and the keyed audit hash chain segment now closing
+  // the demo after that).
   const freshnessAt = text.indexOf(
     "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
   );
@@ -6836,7 +6843,7 @@ test("demo payout webhook freshness window segment is deterministic: two runs pr
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):"),
-      ls.indexOf("Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):") - 1,
+      ls.indexOf("Payout webhook event-id gate (verifyPayoutWebhook with { requireEventId: true } rejects a validly signed notification that carries no eventId):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -6860,6 +6867,118 @@ test("demo payout webhook freshness window segment is deterministic: two runs pr
     b.freshnessBeyondWindowSignatureOnly,
   );
   assert.equal(a.freshnessFutureBeyondSkew, b.freshnessFutureBeyondSkew);
+});
+
+test("demo shows the payout webhook event-id gate segment in-process: keyed verifies with and without the gate, keyless fails closed only under the gate", async () => {
+  const {
+    task,
+    requireEventIdWebhook,
+    requireEventIdKeyedWithGate,
+    requireEventIdKeyedWithoutGate,
+    requireEventIdKeylessWithGate,
+    requireEventIdKeylessWithoutGate,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // VerifyPayoutWebhookOptions docs in
+  // src/settlementWebhook.ts and
+  // test/verifyPayoutWebhookRequireEventId.test.ts, never
+  // derived by calling verifyPayoutWebhook itself.
+  assert.equal(requireEventIdWebhook.payload.taskId, "DEMO-001");
+  assert.equal(requireEventIdWebhook.payload.event, "PAYOUT_COMPLETE");
+  assert.equal(
+    requireEventIdWebhook.payload.eventId,
+    "evt_demo_require_event_id",
+  );
+  assert.equal(requireEventIdWebhook.payload.at, "2026-03-28T10:00:00.000Z");
+  assert.equal(requireEventIdWebhook.payload.payoutRef, "xfer-88f2");
+  assert.equal(requireEventIdWebhook.payload.payoutAmount, 10098.5);
+  assert.equal(requireEventIdKeyedWithGate, true);
+  assert.equal(requireEventIdKeyedWithoutGate, true);
+  assert.equal(requireEventIdKeylessWithGate, false);
+  assert.equal(requireEventIdKeylessWithoutGate, true);
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: a fresh keyed notification and
+  // its keyless copy built here from the demo's PAID task
+  // under the same pinned time reproduce every verdict on
+  // their own (the scripts from the requireEventId tests).
+  const independent = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET, {
+    eventId: "evt-test-require-event-id",
+    now: new Date("2026-03-28T10:00:00.000Z"),
+  });
+  const independentKeyedBody = JSON.stringify(independent.payload);
+  const { eventId: _dropped, ...independentKeylessPayload } =
+    independent.payload;
+  const independentKeylessBody = JSON.stringify(independentKeylessPayload);
+  const independentKeylessSignature =
+    "sha256=" +
+    createHmac("sha256", DEMO_WEBHOOK_SECRET)
+      .update(independentKeylessBody, "utf8")
+      .digest("hex");
+  assert.equal(
+    verifyPayoutWebhook(
+      independentKeyedBody,
+      independent.signature,
+      DEMO_WEBHOOK_SECRET,
+      { requireEventId: true },
+    ),
+    true,
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      independentKeyedBody,
+      independent.signature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    true,
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      independentKeylessBody,
+      independentKeylessSignature,
+      DEMO_WEBHOOK_SECRET,
+      { requireEventId: true },
+    ),
+    false,
+    "signed-but-keyless fails closed under the gate",
+  );
+  assert.equal(
+    verifyPayoutWebhook(
+      independentKeylessBody,
+      independentKeylessSignature,
+      DEMO_WEBHOOK_SECRET,
+    ),
+    true,
+    "without the gate the same keyless signature still verifies",
+  );
+  // The segment follows the payout webhook freshness
+  // window segment and prints its lines verbatim (the
+  // payout reference enforcement segment follows it).
+  const gateAt = text.indexOf(
+    "Payout webhook event-id gate (verifyPayoutWebhook with { requireEventId: true } rejects a validly signed notification that carries no eventId):",
+  );
+  assert.ok(
+    gateAt >
+      text.indexOf(
+        "Payout webhook freshness window (verifyPayoutWebhook with { maxAgeMs } rejects a validly signed but stale notification):",
+      ),
+    "payout webhook event-id gate segment must follow the payout webhook freshness window segment",
+  );
+  for (const line of [
+    "  keyed notification (main task DEMO-001, fixed signing time 2026-03-28T10:00:00.000Z): eventId evt_demo_require_event_id signed with the demo secret; the keyless copy drops eventId and is signed over its own bytes — the secret itself is never printed",
+    "  with the gate: keyed verifies: true; keyless verifies: false (fail-closed — a signed-but-keyless notification would leave a receiver that deduplicates on eventId with no key, silently defeating replay detection)",
+    "  without the gate (legacy default): keyed verifies: true; keyless verifies: true (the gate is opt-in — a keyless payload still verifies on its signature alone)",
+  ]) {
+    assert.ok(text.includes(line), `missing event-id gate line: ${line}`);
+  }
+  assert.ok(
+    text.indexOf(
+      "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+    ) > gateAt,
+    "payout reference enforcement segment must follow the payout webhook event-id gate segment",
+  );
 });
 
 test("demo shows the payout reference enforcement segment in-process: ref-less completion rejected, referenced completion settles, default stays advisory", async () => {

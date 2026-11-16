@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Payout webhook event-id gate demo segment (2026-11-16, backlog
+  #1192): `npm run demo` now shows the opt-in `requireEventId`
+  gate of `verifyPayoutWebhook` — two fixed notifications built
+  from the main task at a pinned signing time, one carrying a
+  fixed `eventId` and one the same payload with `eventId` dropped
+  and re-signed over its own bytes: the keyed notification
+  verifies with and without the gate, the keyless one fails
+  closed under the gate and still verifies without it (the
+  legacy default). One new demo test pins the gate verdicts,
+  the printed lines, and the segment order; the golden demo
+  output grows by 5 lines.
+
 - Payout dedupe read-only probe demo segment (2026-11-16, backlog
   #1190): `npm run demo` now shows the check-before-verify flow on
   a fresh `PayoutEventDedupe` under an injected fixed clock — a
