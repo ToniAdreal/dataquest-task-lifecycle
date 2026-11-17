@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1639 tests, all local
+npm test   # 1641 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2409,7 +2409,13 @@ state …` on a misspelled state — the same fail-fast bar
 on the same bar. Counts and remaining values are pure reads (no state
 or history mutation) and need no new snapshot fields: they are derived
 from the history, so `toJSON()` / `fromJSON()` and `fromHistory()`
-preserve them automatically.
+preserve them automatically. The CLI demo shows the read side end to
+end (`npm run demo`, budget-remaining branch): DEMO-100 with
+`maxResubmits: 1`, `maxDisputes: 1` and `maxVisitsByState: { CAPTURING: 2 }`
+reads 1 / 1 / 2 at construction, 0 / 1 / 0 after one RESUBMIT round and
+0 / 0 / 0 after one DISPUTE round, with each exhaustion's error naming
+the same numbers, while the unbudgeted DEMO-101 reads Infinity for all
+three.
 
 ## Event-level RBAC
 
@@ -2656,7 +2662,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1639 tests covering the happy path, reject→resubmit
+`npm test` runs 1641 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

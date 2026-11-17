@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo adds a budget-remaining read-only API segment (2026-11-17,
+  backlog #1210): `npm run demo` now shows the read side of the
+  three budgets on DEMO-100 (`maxResubmits: 1`, `maxDisputes: 1`,
+  `maxVisitsByState: { CAPTURING: 2 }`) — the remaining values read
+  1 / 1 / 2 at construction, 1 / 1 / 1 in REJECTED after the first
+  pass, 0 / 1 / 0 after one RESUBMIT round (the CAPTURING second
+  visit spent, 2 of 2 used — the same numbers the visit-budget
+  rejection above names) and 0 / 0 / 0 after one DISPUTE round, with
+  a second RESUBMIT and a second DISPUTE each rejected by the pinned
+  budget error naming the same 1-of-1 numbers; the unbudgeted
+  DEMO-101 reads Infinity for all three after the same drive to
+  REJECTED. One new demo test pins the readings, the cross-checks
+  against the error texts, the printed lines, and byte-identical
+  output across two runs; the golden demo output grows by 29 lines.
+
 - `retryPayoutWebhookOutbox` benchmark row (2026-11-17, backlog
   #1208): `npm run bench` now measures the opt-in retry loop over
   a fresh outbox with three pending pairs (one recorded 500

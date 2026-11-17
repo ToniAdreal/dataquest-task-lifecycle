@@ -679,6 +679,35 @@ Task DEMO-084: DRAFT
   REJECT          IN_REVIEW    -> REJECTED  (reviewer)
   default task DEMO-084 (no maxVisitsByState — the library default is unlimited): 2 RESUBMIT rounds both pass, state REJECTED, history entries: 14
 
+Budget-remaining read-only API branch (remainingResubmits / remainingDisputes / remainingVisits(state) — the read side of the three budgets):
+Task DEMO-100: DRAFT
+  remaining at construction: resubmits 1, disputes 1, CAPTURING visits 2 (budgets: maxResubmits 1, maxDisputes 1, maxVisitsByState { CAPTURING: 2 })
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  remaining in REJECTED: resubmits 1, disputes 1, CAPTURING visits 1 (the first pass spent 1 of the 2 CAPTURING visits)
+  RESUBMIT        REJECTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  remaining after one RESUBMIT round: resubmits 0, disputes 1, CAPTURING visits 0 (CAPTURING visits used: 2 of 2 — the same numbers the visit-budget rejection above names)
+  second RESUBMIT -> rejected: "resubmit budget exhausted: 1 of 1 RESUBMITs already used"; state after rejection: REJECTED, history entries: 10 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
+  DISPUTE         REJECTED     -> DISPUTED  (contributor)
+  ARBITRATE_REJECT DISPUTED     -> REJECTED  (moderator)
+  remaining after one DISPUTE round: resubmits 0, disputes 0, CAPTURING visits 0 (appeal rejected — back in REJECTED, the other two budgets untouched)
+  second DISPUTE -> rejected: "dispute budget exhausted: 1 of 1 DISPUTEs already used"; state after rejection: REJECTED, history entries: 12 (nothing was appended)
+Task DEMO-101: DRAFT
+  PUBLISH         DRAFT        -> OPEN  (researcher)
+  ACCEPT          OPEN         -> ACCEPTED  (contributor)
+  START_CAPTURE   ACCEPTED     -> CAPTURING  (contributor)
+  SUBMIT          CAPTURING    -> SUBMITTED  (contributor)
+  BEGIN_REVIEW    SUBMITTED    -> IN_REVIEW  (reviewer)
+  REJECT          IN_REVIEW    -> REJECTED  (reviewer)
+  default task DEMO-101 (no maxResubmits / maxDisputes / maxVisitsByState — the library defaults are unlimited): remaining resubmits Infinity, disputes Infinity, CAPTURING visits Infinity
+
 Stale-task batch execution branch (actOnStaleTasks over four more tasks):
   executed at: <timestamp> (fixed now; no wall clock)
   budgets: ACCEPTED 604800000 ms (7 days), CAPTURING 604800000 ms (7 days), SUBMITTED 604800000 ms (7 days) — action dispatches ABANDON with the fixed execution instant as its audit timestamp
@@ -1171,7 +1200,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1023);
+  assert.equal(lines.length, 1052);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -3411,7 +3440,7 @@ test("demo state visit budget segment is deterministic: two runs print byte-iden
   const budgetLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):"),
-      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+      ls.indexOf("Budget-remaining read-only API branch (remainingResubmits / remainingDisputes / remainingVisits(state) — the read side of the three budgets):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -3428,6 +3457,202 @@ test("demo state visit budget segment is deterministic: two runs print byte-iden
     a.visitBudgetTask.history.map((h) => h.seq),
     b.visitBudgetTask.history.map((h) => h.seq),
   );
+});
+
+test("demo shows the budget-remaining read-only API branch in-process: readings step 1/1/2 to 0/1/0 to 0/0/0, rejections name the same numbers, unbudgeted reads Infinity", async () => {
+  const {
+    remainingBudgetTask,
+    remainingBudgetInitial,
+    remainingBudgetInRejected,
+    remainingBudgetAfterResubmit,
+    remainingBudgetResubmitError,
+    remainingBudgetStateAfterResubmitReject,
+    remainingBudgetHistoryLengthAfterResubmitReject,
+    remainingBudgetAfterDispute,
+    remainingBudgetDisputeError,
+    remainingBudgetStateAfterDisputeReject,
+    remainingBudgetHistoryLengthAfterDisputeReject,
+    remainingBudgetDefaultTask,
+    remainingBudgetDefaultReadings,
+    visitBudgetError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // The budgeted task ends REJECTED with the pinned shape: 6
+  // entries to REJECTED, 4 more for the one RESUBMIT round
+  // inside the budget, 2 more for the one DISPUTE round, and
+  // nothing appended by either rejected second attempt.
+  assert.equal(remainingBudgetTask.id, "DEMO-100");
+  assert.deepEqual(remainingBudgetInitial, {
+    resubmits: 1,
+    disputes: 1,
+    capturingVisits: 2,
+  });
+  assert.deepEqual(remainingBudgetInRejected, {
+    resubmits: 1,
+    disputes: 1,
+    capturingVisits: 1,
+  });
+  assert.deepEqual(remainingBudgetAfterResubmit, {
+    resubmits: 0,
+    disputes: 1,
+    capturingVisits: 0,
+  });
+  assert.deepEqual(remainingBudgetAfterDispute, {
+    resubmits: 0,
+    disputes: 0,
+    capturingVisits: 0,
+  });
+  assert.equal(remainingBudgetTask.state, "REJECTED");
+  assert.equal(remainingBudgetTask.history.length, 12);
+  assert.equal(remainingBudgetTask.visitCount("CAPTURING"), 2);
+  // Exhaustion points and error texts name the same numbers:
+  // 0 remaining resubmits with "1 of 1" used, 0 remaining
+  // disputes with "1 of 1" used, and the CAPTURING visit count
+  // (2 of 2) matches the visit-budget rejection above.
+  assert.equal(
+    remainingBudgetResubmitError,
+    "resubmit budget exhausted: 1 of 1 RESUBMITs already used",
+  );
+  assert.equal(remainingBudgetStateAfterResubmitReject, "REJECTED");
+  assert.equal(remainingBudgetHistoryLengthAfterResubmitReject, 10);
+  assert.equal(
+    remainingBudgetDisputeError,
+    "dispute budget exhausted: 1 of 1 DISPUTEs already used",
+  );
+  assert.equal(remainingBudgetStateAfterDisputeReject, "REJECTED");
+  assert.equal(remainingBudgetHistoryLengthAfterDisputeReject, 12);
+  assert.match(visitBudgetError, /CAPTURING already visited 2 of 2 times/);
+  // The unbudgeted control reads Infinity for all three even
+  // after being driven to REJECTED: 6 entries, still REJECTED.
+  assert.equal(remainingBudgetDefaultTask.id, "DEMO-101");
+  assert.equal(remainingBudgetDefaultTask.state, "REJECTED");
+  assert.equal(remainingBudgetDefaultTask.history.length, 6);
+  assert.deepEqual(remainingBudgetDefaultReadings, {
+    resubmits: Infinity,
+    disputes: Infinity,
+    capturingVisits: Infinity,
+  });
+  // An independent re-drive of the same budgets steps the same
+  // way outside the demo — the segment is not self-certifying.
+  const crossCheck = new TaskLifecycle("cross-check", {
+    maxResubmits: 1,
+    maxDisputes: 1,
+    maxVisitsByState: { CAPTURING: 2 },
+  });
+  const crossReadings = () => ({
+    resubmits: crossCheck.remainingResubmits,
+    disputes: crossCheck.remainingDisputes,
+    capturingVisits: crossCheck.remainingVisits("CAPTURING"),
+  });
+  assert.deepEqual(crossReadings(), {
+    resubmits: 1,
+    disputes: 1,
+    capturingVisits: 2,
+  });
+  for (const event of [
+    "PUBLISH",
+    "ACCEPT",
+    "START_CAPTURE",
+    "SUBMIT",
+    "BEGIN_REVIEW",
+    "REJECT",
+    "RESUBMIT",
+    "SUBMIT",
+    "BEGIN_REVIEW",
+    "REJECT",
+  ] as const) {
+    crossCheck.dispatch(event);
+  }
+  assert.deepEqual(crossReadings(), {
+    resubmits: 0,
+    disputes: 1,
+    capturingVisits: 0,
+  });
+  assert.throws(
+    () => crossCheck.dispatch("RESUBMIT"),
+    (err: unknown) =>
+      err instanceof Error && err.message === remainingBudgetResubmitError,
+    "the same budget rejects the same second RESUBMIT outside the demo",
+  );
+  crossCheck.dispatch("DISPUTE");
+  crossCheck.dispatch("ARBITRATE_REJECT");
+  assert.equal(crossCheck.remainingDisputes, 0);
+  assert.throws(
+    () => crossCheck.dispatch("DISPUTE"),
+    (err: unknown) =>
+      err instanceof Error && err.message === remainingBudgetDisputeError,
+    "the same budget rejects the same second DISPUTE outside the demo",
+  );
+  // The branch is printed after the state visit budget branch
+  // and before the stale-task batch execution branch, with its
+  // lines verbatim.
+  const remainingAt = text.indexOf(
+    "Budget-remaining read-only API branch (remainingResubmits / remainingDisputes / remainingVisits(state) — the read side of the three budgets):",
+  );
+  assert.ok(
+    remainingAt >
+      text.indexOf("State visit budget branch (maxVisitsByState caps re-entries into a state — the budget counts total visits, not re-entries):"),
+    "budget-remaining branch must follow the state visit budget branch",
+  );
+  assert.ok(
+    text.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") >
+      remainingAt,
+    "batch execution branch must follow the budget-remaining branch",
+  );
+  assert.match(
+    text,
+    /remaining at construction: resubmits 1, disputes 1, CAPTURING visits 2 \(budgets: maxResubmits 1, maxDisputes 1, maxVisitsByState \{ CAPTURING: 2 \}\)/,
+  );
+  assert.match(
+    text,
+    /remaining in REJECTED: resubmits 1, disputes 1, CAPTURING visits 1 \(the first pass spent 1 of the 2 CAPTURING visits\)/,
+  );
+  assert.match(
+    text,
+    /remaining after one RESUBMIT round: resubmits 0, disputes 1, CAPTURING visits 0 \(CAPTURING visits used: 2 of 2 — the same numbers the visit-budget rejection above names\)/,
+  );
+  assert.match(
+    text,
+    /second RESUBMIT -> rejected: "resubmit budget exhausted: 1 of 1 RESUBMITs already used"; state after rejection: REJECTED, history entries: 10/,
+  );
+  assert.match(
+    text,
+    /remaining after one DISPUTE round: resubmits 0, disputes 0, CAPTURING visits 0 \(appeal rejected — back in REJECTED, the other two budgets untouched\)/,
+  );
+  assert.match(
+    text,
+    /second DISPUTE -> rejected: "dispute budget exhausted: 1 of 1 DISPUTEs already used"; state after rejection: REJECTED, history entries: 12/,
+  );
+  assert.match(
+    text,
+    /default task DEMO-101 \(no maxResubmits \/ maxDisputes \/ maxVisitsByState — the library defaults are unlimited\): remaining resubmits Infinity, disputes Infinity, CAPTURING visits Infinity/,
+  );
+});
+
+test("demo budget-remaining segment is deterministic: two runs print byte-identical remaining lines", async () => {
+  const remainingLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Budget-remaining read-only API branch (remainingResubmits / remainingDisputes / remainingVisits(state) — the read side of the three budgets):"),
+      ls.indexOf("Stale-task batch execution branch (actOnStaleTasks over four more tasks):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = remainingLines(a.lines);
+  // Header + (task header + initial line + 6 steps + in-REJECTED
+  // line + 4 RESUBMIT steps + after-RESUBMIT line + rejection
+  // line + 2 DISPUTE steps + after-DISPUTE line + rejection
+  // line) for DEMO-100 + (task header + 6 steps + default line)
+  // for DEMO-101; every timestamp in the segment is a fixed
+  // literal, so no normalization is needed.
+  assert.equal(segA.length, 28);
+  assert.deepEqual(segA, remainingLines(b.lines));
+  assert.deepEqual(a.remainingBudgetInitial, b.remainingBudgetInitial);
+  assert.deepEqual(a.remainingBudgetAfterResubmit, b.remainingBudgetAfterResubmit);
+  assert.deepEqual(a.remainingBudgetAfterDispute, b.remainingBudgetAfterDispute);
+  assert.equal(a.remainingBudgetResubmitError, b.remainingBudgetResubmitError);
+  assert.equal(a.remainingBudgetDisputeError, b.remainingBudgetDisputeError);
 });
 
 test("demo shows the event-sourcing replay segment in-process: NDJSON export parses back and fromHistory rebuilds the same PAID task", async () => {
@@ -4348,7 +4573,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1023);
+  assert.equal(out.trimEnd().split("\n").length, 1052);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
