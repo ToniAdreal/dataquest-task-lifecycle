@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `retryPayoutWebhookOutbox` benchmark row (2026-11-17, backlog
+  #1208): `npm run bench` now measures the opt-in retry loop over
+  a fresh outbox with three pending pairs (one recorded 500
+  failure each) and a stub `deliverOne` answering 500 on a pair's
+  first re-delivery and 200 on its second (`maxRounds: 2,
+  backoffMs: 0, jitterMs: 0`, fixed clock), so one measured op
+  runs the whole two-round loop and self-checks the summary
+  (attempted 6, acknowledged 3, still pending 0, dead letter 0),
+  the stub's six calls in order, and the empty ledger afterwards.
+  Outside the timed loop, a `dryRun: true` rehearsal is pinned to
+  leave the ledger untouched and a dead-lettered pair is pinned
+  to never be re-delivered. Measured at ~839.5 ops/sec (1191.18
+  µs/op) on Node v24.22.1, linux/x64. Mirrors escrow's
+  `retrySettlementWebhookOutbox` row (backlog #1206).
+
 - CLI demo adds a payout webhook outbox retry segment (2026-11-17,
   backlog #1207): on a fresh outbox with one pair pending at
   attempts 1, `retryPayoutWebhookOutbox` runs with a stub

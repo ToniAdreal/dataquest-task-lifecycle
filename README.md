@@ -2838,7 +2838,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred fifteen hot
+`npm run bench` measures locally-observed throughput for the one hundred sixteen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2997,7 +2997,7 @@ hits, `PayoutEventDedupe.restore` snapshot restore,
 LRU eviction, and `PayoutEventDedupe.has` read-only probe (hit /
 unseen / expired rotation over a fixed capacity-3 dedupe with 2
 pre-recorded ids, self-checked per iteration for the verdict, with
-non-consumption and unmoved stats pinned outside the timed loop), payout webhook outbox (`PayoutWebhookOutbox.recordAttempt` failure recording, `PayoutWebhookOutbox.pending()` / `PayoutWebhookOutbox.deadLetter()` listing over a fixed 1,000-pair ledger of 700 pending and 300 dead-lettered pairs, `PayoutWebhookOutbox.acknowledge` clearing, `PayoutWebhookOutbox.exportSnapshot` export, `PayoutWebhookOutbox.restore` from the JSON-round-tripped snapshot, and `PayoutWebhookOutbox.redrive` moving one dead-lettered pair (3 failures, the paid task's own webhook event) back to pending at a fixed later clock and re-delivering its signed webhook through a fake fetch that answers 200 on the first attempt, the success clearing the pair so the ledger ends pending 0, dead letter 0, with the redriven shape and the delivered body and signature pinned on every iteration, and `truncateOutboxError` error truncation over a fixed 3-case corpus (a short error, an exactly-at-cap error, and a 10 KB error -- one measured op truncates all three, pinning the short and at-cap pass-throughs and the 10 KB truncation to exactly 1024 characters with the `…[truncated]` marker) -- the failure ledger a payout gateway keeps for its webhooks, previously unit tests only with no throughput baseline), signed-snapshot envelopes
+non-consumption and unmoved stats pinned outside the timed loop), payout webhook outbox (`PayoutWebhookOutbox.recordAttempt` failure recording, `PayoutWebhookOutbox.pending()` / `PayoutWebhookOutbox.deadLetter()` listing over a fixed 1,000-pair ledger of 700 pending and 300 dead-lettered pairs, `PayoutWebhookOutbox.acknowledge` clearing, `PayoutWebhookOutbox.exportSnapshot` export, `PayoutWebhookOutbox.restore` from the JSON-round-tripped snapshot, and `PayoutWebhookOutbox.redrive` moving one dead-lettered pair (3 failures, the paid task's own webhook event) back to pending at a fixed later clock and re-delivering its signed webhook through a fake fetch that answers 200 on the first attempt, the success clearing the pair so the ledger ends pending 0, dead letter 0, with the redriven shape and the delivered body and signature pinned on every iteration, `retryPayoutWebhookOutbox` re-delivering three pending pairs (one recorded 500 failure each) through a stub that answers 500 on a pair's first re-delivery and 200 on its second, with `maxRounds: 2, backoffMs: 0, jitterMs: 0`, the summary pinned to attempted 6, acknowledged 3, still pending 0, dead letter 0, and the stub's six calls in order, on every iteration, with a `dryRun: true` rehearsal and a dead letter that is never re-delivered pinned once outside the timed loop, and `truncateOutboxError` error truncation over a fixed 3-case corpus (a short error, an exactly-at-cap error, and a 10 KB error -- one measured op truncates all three, pinning the short and at-cap pass-throughs and the 10 KB truncation to exactly 1024 characters with the `…[truncated]` marker) -- the failure ledger a payout gateway keeps for its webhooks, previously unit tests only with no throughput baseline), signed-snapshot envelopes
 (`exportSignedSnapshot` / `restoreSignedSnapshot` on all three
 HMAC-SHA256 signed snapshot envelopes — `PayoutEventDedupe`
 #1011, `TaskLifecycle` #1018, `PayoutWebhookOutbox` #1031 — six
@@ -4077,6 +4077,7 @@ See the throughput row below. One real run on 2026-11-16:
 | PayoutWebhookOutbox exportSnapshot (1,000-pair ledger) | ~18,801 ops/sec (53.19 µs/op) |
 | PayoutWebhookOutbox restore (1,000-pair snapshot, JSON round-trip) | ~4,299 ops/sec (232.61 µs/op) |
 | PayoutWebhookOutbox redrive + redelivery (dead-lettered pair, fake fetch 200 first attempt) | ~78,821 ops/sec (12.69 µs/op) |
+| retryPayoutWebhookOutbox (3 pending pairs, 500→200, maxRounds 2) | ~839.5 ops/sec (1191.18 µs/op) |
 | truncateOutboxError (short / at-cap / 10 KB error) | ~1,775,730 ops/sec (0.56 µs/op) |
 | PayoutEventDedupe exportSignedSnapshot (1,000-entry snapshot) | ~1,884 ops/sec (530.90 µs/op) |
 | PayoutEventDedupe restoreSignedSnapshot (1,000-entry snapshot, JSON round-trip) | ~795.9 ops/sec (1256.51 µs/op) |
@@ -4129,7 +4130,9 @@ See the throughput row below. One real run on 2026-11-16:
 Environment: Node v24.22.1, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host under load, so numbers vary run to run — several paths
 swing widely between runs on this host, so treat each figure as an
-order of magnitude, not a precise rate). Machine-local
+order of magnitude, not a precise rate). The
+retryPayoutWebhookOutbox row above was measured on a 2026-11-17 run;
+the rest of the table is the 2026-11-16 run. Machine-local
 measurements for capacity planning, not guaranteed throughput —
 run `npm run bench` on your own hardware.
 

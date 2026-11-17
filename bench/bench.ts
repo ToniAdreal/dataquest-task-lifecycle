@@ -1581,6 +1581,24 @@
  *      seen id still reports a duplicate. No network, no
  *      randomness, and no wall clock: the probe clock is fixed.
  *
+ *  74. payout webhook outbox retry — `retryPayoutWebhookOutbox`
+ *      over a fresh outbox with three fixed pending pairs (one recorded
+ *      500 failure each, `maxAttempts: 3`, injected fixed clock): the
+ *      stub `deliverOne` answers 500 on a pair's first re-delivery and
+ *      200 on its second, so with `maxRounds: 2, backoffMs: 0,
+ *      jitterMs: 0` one measured op runs the whole two-round loop
+ *      (the rebuild cost is inside the timed region, as in the
+ *      dead-letter and redrive rows) and self-checks the summary
+ *      (attempted 6, acknowledged 3, still pending 0, dead letter 0),
+ *      the stub's six calls in order (500, 500, 500, then 200, 200,
+ *      200), and the empty ledger afterwards, on every iteration.
+ *      Outside the timed loop, a `dryRun: true` rehearsal is pinned
+ *      to report wouldRetry 1 with attempted 0 and acknowledged 0
+ *      and leave the ledger untouched, and a dead-lettered pair is
+ *      pinned to never be re-delivered (only the pending pair is
+ *      retried, the dead letter stays at attempts 3). No network, no
+ *      randomness, and no wall clock: the clock is injected and fixed.
+ *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
  * timestamp and eventId. Nothing here reads the network, a random
@@ -1631,6 +1649,7 @@ import {
   renderTaskSettlementsCsv,
   renderTaskSettlementsJson,
   replay,
+  retryPayoutWebhookOutbox,
   staleTasks,
   stateAtFromHistory,
   stateDiagram,
@@ -6609,6 +6628,209 @@ if (
     "benchmark fixture failed: outbox redrive redelivery signature does not verify",
   );
 }
+
+// Retry fixture (backlog #1208): the opt-in retry loop over the
+// pending ledger. Three fixed pairs, each with one recorded
+// failure (attempts 1, pending), on the same endpoint and fixed
+// injected clock as the outbox rows above. Built fresh on every
+// timed iteration (see `checkOutboxRetry` below), so the reported
+// numbers include the rebuild cost — the same accounting the
+// dead-letter and redrive rows use. The stub `deliverOne` answers
+// 500 on a pair's first re-delivery and 200 on its second
+// (per-pair call count decides, as in the demo's retry segment),
+// so with `maxRounds: 2, backoffMs: 0, jitterMs: 0` round 1
+// records a second failure for each pair (attempts 2, still
+// retryable) and round 2's 200 acknowledges all three — the
+// summary reports attempted 6, acknowledged 3, still pending 0,
+// dead letter 0. Zero network, zero real waiting (`backoffMs: 0`,
+// and the runner's clock is the fixed outbox clock), no wall clock.
+// Mirrors the sibling escrow `retrySettlementWebhookOutbox` row
+// (backlog #1206).
+const OUTBOX_RETRY_EVENT_IDS: string[] = [
+  "bench-outbox-retry-001",
+  "bench-outbox-retry-002",
+  "bench-outbox-retry-003",
+];
+
+async function checkOutboxRetry(where: string): Promise<void> {
+  const fresh = new PayoutWebhookOutbox({
+    maxAttempts: OUTBOX_MAX_ATTEMPTS,
+    now: () => OUTBOX_NOW_MS,
+  });
+  for (const eventId of OUTBOX_RETRY_EVENT_IDS) {
+    fresh.recordAttempt({
+      endpoint: OUTBOX_ENDPOINT,
+      eventId,
+      ok: false,
+      status: 500,
+      error: OUTBOX_ERROR,
+    });
+  }
+  if (
+    fresh.size !== OUTBOX_RETRY_EVENT_IDS.length ||
+    fresh.pending().length !== OUTBOX_RETRY_EVENT_IDS.length ||
+    fresh.deadLetter().length !== 0
+  ) {
+    throw new Error(
+      `benchmark ${where} failed: PayoutWebhookOutbox retry fixture is not 3 pending pairs`,
+    );
+  }
+  const calls: Array<{ endpoint: string; eventId: string; ok: boolean }> =
+    [];
+  const deliverOne = async (
+    endpoint: string,
+    eventId: string,
+  ): Promise<boolean> => {
+    // A pair fails at most once per call, so the per-pair call
+    // count decides: first re-delivery 500, second 200.
+    const priorCalls = calls.filter(
+      (call) => call.eventId === eventId,
+    ).length;
+    const ok = priorCalls >= 1;
+    calls.push({ endpoint, eventId, ok });
+    return ok;
+  };
+  const summary = await retryPayoutWebhookOutbox(fresh, deliverOne, {
+    maxRounds: 2,
+    backoffMs: 0,
+    jitterMs: 0,
+    now: () => OUTBOX_NOW_MS,
+  });
+  if (
+    summary.attempted !== 6 ||
+    summary.acknowledged !== 3 ||
+    summary.stillPending !== 0 ||
+    summary.deadLettered !== 0 ||
+    summary.aborted !== false ||
+    summary.wouldRetry !== undefined ||
+    calls.length !== 6 ||
+    calls[0].endpoint !== OUTBOX_ENDPOINT ||
+    calls[0].eventId !== OUTBOX_RETRY_EVENT_IDS[0] ||
+    calls[0].ok !== false ||
+    calls[1].endpoint !== OUTBOX_ENDPOINT ||
+    calls[1].eventId !== OUTBOX_RETRY_EVENT_IDS[1] ||
+    calls[1].ok !== false ||
+    calls[2].endpoint !== OUTBOX_ENDPOINT ||
+    calls[2].eventId !== OUTBOX_RETRY_EVENT_IDS[2] ||
+    calls[2].ok !== false ||
+    calls[3].endpoint !== OUTBOX_ENDPOINT ||
+    calls[3].eventId !== OUTBOX_RETRY_EVENT_IDS[0] ||
+    calls[3].ok !== true ||
+    calls[4].endpoint !== OUTBOX_ENDPOINT ||
+    calls[4].eventId !== OUTBOX_RETRY_EVENT_IDS[1] ||
+    calls[4].ok !== true ||
+    calls[5].endpoint !== OUTBOX_ENDPOINT ||
+    calls[5].eventId !== OUTBOX_RETRY_EVENT_IDS[2] ||
+    calls[5].ok !== true ||
+    fresh.size !== 0 ||
+    fresh.pending().length !== 0 ||
+    fresh.deadLetter().length !== 0
+  ) {
+    throw new Error(
+      `benchmark ${where} failed: retryPayoutWebhookOutbox did not retry 3 pending pairs to acknowledged (attempted 6, acknowledged 3, still pending 0, dead letter 0)`,
+    );
+  }
+}
+
+// One-time validation (outside the timed loop): a `dryRun: true`
+// rehearsal reports what it would retry without calling
+// `deliverOne` or touching the ledger, and a dead-lettered pair
+// is never re-delivered — only the pending pair is retried.
+{
+  const dryRunOutbox = new PayoutWebhookOutbox({
+    maxAttempts: OUTBOX_MAX_ATTEMPTS,
+    now: () => OUTBOX_NOW_MS,
+  });
+  dryRunOutbox.recordAttempt({
+    endpoint: OUTBOX_ENDPOINT,
+    eventId: "bench-outbox-retry-dryrun",
+    ok: false,
+    status: 500,
+    error: OUTBOX_ERROR,
+  });
+  let dryRunCalls = 0;
+  const dryRunSummary = await retryPayoutWebhookOutbox(
+    dryRunOutbox,
+    async () => {
+      dryRunCalls += 1;
+      return true;
+    },
+    { dryRun: true, backoffMs: 0, jitterMs: 0, now: () => OUTBOX_NOW_MS },
+  );
+  const dryRunPending = dryRunOutbox.pending();
+  if (
+    dryRunSummary.attempted !== 0 ||
+    dryRunSummary.acknowledged !== 0 ||
+    dryRunSummary.stillPending !== 1 ||
+    dryRunSummary.deadLettered !== 0 ||
+    dryRunSummary.aborted !== false ||
+    dryRunSummary.wouldRetry?.length !== 1 ||
+    dryRunSummary.wouldRetry[0]?.endpoint !== OUTBOX_ENDPOINT ||
+    dryRunSummary.wouldRetry[0]?.eventId !== "bench-outbox-retry-dryrun" ||
+    dryRunSummary.wouldRetry[0]?.wouldRetry !== true ||
+    dryRunCalls !== 0 ||
+    dryRunPending.length !== 1 ||
+    dryRunPending[0].attempts !== 1 ||
+    dryRunPending[0].lastError !== OUTBOX_ERROR ||
+    dryRunPending[0].lastAt !== OUTBOX_NOW_MS
+  ) {
+    throw new Error(
+      "benchmark fixture failed: retryPayoutWebhookOutbox dry run changed the ledger or called deliverOne",
+    );
+  }
+
+  const deadLetterOutbox = new PayoutWebhookOutbox({
+    maxAttempts: OUTBOX_MAX_ATTEMPTS,
+    now: () => OUTBOX_NOW_MS,
+  });
+  for (let f = 0; f < OUTBOX_MAX_ATTEMPTS; f++) {
+    deadLetterOutbox.recordAttempt({
+      endpoint: OUTBOX_ENDPOINT,
+      eventId: "bench-outbox-retry-dead",
+      ok: false,
+      status: 500,
+      error: OUTBOX_ERROR,
+    });
+  }
+  deadLetterOutbox.recordAttempt({
+    endpoint: OUTBOX_ENDPOINT,
+    eventId: "bench-outbox-retry-live",
+    ok: false,
+    status: 500,
+    error: OUTBOX_ERROR,
+  });
+  const deadLetterCalls: string[] = [];
+  const deadLetterSummary = await retryPayoutWebhookOutbox(
+    deadLetterOutbox,
+    async (_endpoint, eventId) => {
+      deadLetterCalls.push(eventId);
+      return deadLetterCalls.filter((id) => id === eventId).length >= 2;
+    },
+    { maxRounds: 2, backoffMs: 0, jitterMs: 0, now: () => OUTBOX_NOW_MS },
+  );
+  const deadLettered = deadLetterOutbox.deadLetter();
+  if (
+    deadLetterSummary.attempted !== 2 ||
+    deadLetterSummary.acknowledged !== 1 ||
+    deadLetterSummary.stillPending !== 0 ||
+    deadLetterSummary.deadLettered !== 1 ||
+    deadLetterSummary.aborted !== false ||
+    deadLetterCalls.length !== 2 ||
+    deadLetterCalls[0] !== "bench-outbox-retry-live" ||
+    deadLetterCalls[1] !== "bench-outbox-retry-live" ||
+    deadLettered.length !== 1 ||
+    deadLettered[0].eventId !== "bench-outbox-retry-dead" ||
+    deadLettered[0].attempts !== OUTBOX_MAX_ATTEMPTS ||
+    deadLettered[0].lastError !== OUTBOX_ERROR ||
+    deadLetterOutbox.pending().length !== 0 ||
+    deadLetterOutbox.size !== 1
+  ) {
+    throw new Error(
+      "benchmark fixture failed: retryPayoutWebhookOutbox retried a dead-lettered pair",
+    );
+  }
+}
+await checkOutboxRetry("fixture");
 
 // Outbox error-truncation fixture (backlog #1160): a fixed 3-case
 // corpus for `truncateOutboxError`, the pure guard `recordAttempt`
@@ -12651,6 +12873,12 @@ async function benchPayoutWebhookOutboxRedrive(): Promise<number> {
   }, ITERATIONS);
 }
 
+async function benchRetryPayoutWebhookOutbox(): Promise<number> {
+  return measureAsync(async () => {
+    await checkOutboxRetry("self-check");
+  }, ITERATIONS);
+}
+
 function benchTruncateOutboxError(): number {
   return measure(() => {
     // Pure function over fixed strings: no rebuild, the same
@@ -14582,6 +14810,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "PayoutWebhookOutbox exportSnapshot (1,000-pair ledger)", ops: benchPayoutWebhookOutboxExportSnapshot() },
   { path: "PayoutWebhookOutbox restore (1,000-pair snapshot, JSON round-trip)", ops: benchPayoutWebhookOutboxRestore() },
   { path: "PayoutWebhookOutbox redrive + redelivery (dead-lettered pair, fake fetch 200 first attempt)", ops: await benchPayoutWebhookOutboxRedrive() },
+  { path: "retryPayoutWebhookOutbox (3 pending pairs, 500→200, maxRounds 2)", ops: await benchRetryPayoutWebhookOutbox() },
   { path: "truncateOutboxError (short / at-cap / 10 KB error)", ops: benchTruncateOutboxError() },
   { path: "PayoutEventDedupe exportSignedSnapshot (1,000-entry snapshot)", ops: benchPayoutEventDedupeExportSignedSnapshot() },
   { path: "PayoutEventDedupe restoreSignedSnapshot (1,000-entry snapshot, JSON round-trip)", ops: benchPayoutEventDedupeRestoreSignedSnapshot() },
