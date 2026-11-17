@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo adds a payout webhook outbox retry segment (2026-11-17,
+  backlog #1207): on a fresh outbox with one pair pending at
+  attempts 1, `retryPayoutWebhookOutbox` runs with a stub
+  `deliverOne` that answers 500 on the first re-delivery and 200
+  on the second (`maxRounds: 2, backoffMs: 0, jitterMs: 0`, fixed
+  clock), so the summary reports attempted 2, acknowledged 1,
+  still pending 0, dead letter 0; a `dryRun: true` rehearsal over
+  a second pending pair reports wouldRetry 1 with attempted 0 and
+  acknowledged 0 and leaves the ledger untouched (still pending at
+  attempts 1). The demo test asserts both summaries, the stub's
+  two calls in order, the empty ledger after the live run, the
+  printed lines, and byte-identical output across two runs.
+
 - Payout webhook event-id gate demo segment (2026-11-16, backlog
   #1192): `npm run demo` now shows the opt-in `requireEventId`
   gate of `verifyPayoutWebhook` — two fixed notifications built

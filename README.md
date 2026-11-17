@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1638 tests, all local
+npm test   # 1639 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1910,7 +1910,13 @@ dead letter 1. The demo then shows the dead letter coming back:
 pending with attempts reset to 0, a second redrive while pending is
 rejected with the pinned error, and one scripted 200 after the fix
 clears the pair, so the ledger ends pending 0, dead letter 0. The
-segment records each attempt from the
+demo then shows the retry loop over a fresh ledger:
+`retryPayoutWebhookOutbox` re-delivers the one pending pair — first
+attempt 500, second 200 — with `maxRounds: 2, backoffMs: 0, jitterMs: 0`,
+so the summary reports attempted 2, acknowledged 1, still pending 0,
+dead letter 0; a `dryRun: true` rehearsal over a second pending pair
+reports wouldRetry 1 with attempted 0 and acknowledged 0 and leaves
+the ledger unchanged. The segment records each attempt from the
 delivery result's `ok` branch — this repo's delivery reports a
 failure instead of throwing, so there is no try/catch in the
 loop. The demo closes with a caller string length-limit segment:
@@ -2007,7 +2013,11 @@ and then running the live retry still delivers every pair; an
 already-aborted signal reports `aborted: true` with an empty
 `wouldRetry` list. `wouldRetry` answers only "in the pending
 selection", never "would succeed": a pair whose delivery would fail
-is still listed, because the dry run never calls `deliverOne`. Honest
+is still listed, because the dry run never calls `deliverOne`. The
+CLI demo runs the runner over a scripted ledger (`npm run demo`,
+payout webhook outbox retry segment): one pending pair fails its
+first re-delivery (500) and succeeds on the second (200), and a dry
+run rehearses a second pair without touching the ledger. Honest
 limit: the runner is in-process only and persists nothing — a dead
 process loses the ledger unless it exported a snapshot first (see
 Limitations).
@@ -2646,7 +2656,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1638 tests covering the happy path, reject→resubmit
+`npm test` runs 1639 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
