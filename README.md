@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1645 tests, all local
+npm test   # 1647 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2415,7 +2415,15 @@ end (`npm run demo`, budget-remaining branch): DEMO-100 with
 reads 1 / 1 / 2 at construction, 0 / 1 / 0 after one RESUBMIT round and
 0 / 0 / 0 after one DISPUTE round, with each exhaustion's error naming
 the same numbers, while the unbudgeted DEMO-101 reads Infinity for all
-three.
+three. The matching budget-used branch (`npm run demo`, right after the
+remaining branch) shows the used side on DEMO-102 with the same budgets:
+used reads 0 / 0 / 0 at construction, 0 / 0 / 1 in REJECTED after the first
+pass, 1 / 0 / 2 after one RESUBMIT round — where used + remaining equals
+the budget on all three (1 + 0 = 1, 0 + 1 = 1, 2 + 0 = 2) — and 1 / 1 / 2
+after one DISPUTE round, the dispute count stepping while the other two
+stay put; the unbudgeted DEMO-103 reads 0 / 0 / 0 at construction and
+0 / 0 / 1 after the same drive to REJECTED — unlimited is not uncounted,
+the visit counter still steps.
 
 ## Event-level RBAC
 
@@ -2662,7 +2670,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1645 tests covering the happy path, reject→resubmit
+`npm test` runs 1647 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2676,8 +2684,11 @@ the budget and used count, `fromHistory` re-attachment, and
 malformed-envelope rejection), the budget-usage read-only API
 (`resubmitCount` / `disputeCount` / `visitCount(state)`: counts stepping
 with dispatch, agreement with the exhausted-error numbers, snapshot and
-`fromHistory` survival, unknown-state rejection for `visitCount`, and
-read purity) and the budget-remaining read-only API
+`fromHistory` survival, unknown-state rejection for `visitCount`,
+read purity, and the CLI demo's budget-used branch: used counts stepping
+0 / 0 / 0 to 1 / 1 / 2 with used + remaining equal to the budget at every
+checkpoint, and the unbudgeted control still counting its CAPTURING
+visit) and the budget-remaining read-only API
 (`remainingResubmits` / `remainingDisputes` / `remainingVisits(state)`:
 remaining values stepping down to 0 exactly at the blocking point,
 agreement with the exhausted-error numbers, `Infinity` with no budget

@@ -40,6 +40,23 @@ change type; no entry describes a feature that is not in the history.
   against the error texts, the printed lines, and byte-identical
   output across two runs; the golden demo output grows by 29 lines.
 
+- CLI demo adds a budget-used read-only API segment (2026-11-17,
+  backlog #1220): `npm run demo` now shows the used side of the
+  three budgets on DEMO-102 (`maxResubmits: 1`, `maxDisputes: 1`,
+  `maxVisitsByState: { CAPTURING: 2 }`), right after the
+  budget-remaining branch — the used values read 0 / 0 / 0 at
+  construction, 0 / 0 / 1 in REJECTED after the first pass, 1 / 0 / 2
+  after one RESUBMIT round (cross-checked against the remaining
+  values: used + remaining equals the budget on all three, 1 + 0 = 1,
+  0 + 1 = 1, 2 + 0 = 2) and 1 / 1 / 2 after one DISPUTE round, the
+  dispute count stepping while the other two stay put; the unbudgeted
+  DEMO-103 reads 0 / 0 / 0 at construction and 0 / 0 / 1 after the
+  same drive to REJECTED — unlimited is not uncounted, the visit
+  counter still steps, while the remaining values stay Infinity. Two
+  new demo tests pin the readings, the cross-checks against an
+  independent re-drive, the printed lines, and byte-identical output
+  across two runs; the golden demo output grows by 28 lines.
+
 - `retryPayoutWebhookOutbox` benchmark row (2026-11-17, backlog
   #1208): `npm run bench` now measures the opt-in retry loop over
   a fresh outbox with three pending pairs (one recorded 500

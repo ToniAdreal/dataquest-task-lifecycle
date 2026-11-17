@@ -1154,6 +1154,23 @@ export interface RemainingBudgetReadings {
   capturingVisits: number;
 }
 
+/**
+ * The three budget-used readings of the budget-used segment
+ * (DEMO-102/DEMO-103): RESUBMITs used, DISPUTE rounds used, and
+ * entries into CAPTURING used — the used side of the same three
+ * budgets the remaining readings mirror, so used + remaining
+ * always equals the configured budget (or Infinity remaining
+ * with no budget configured, where the used counts still step).
+ */
+export interface BudgetUsedReadings {
+  /** `resubmitCount` at the checkpoint. */
+  resubmits: number;
+  /** `disputeCount` at the checkpoint. */
+  disputes: number;
+  /** `visitCount("CAPTURING")` at the checkpoint. */
+  capturingVisits: number;
+}
+
 export interface DemoResult {
   task: TaskLifecycle;
   /** `verifyHistoryChain` verdict on the main task's intact history. */
@@ -1662,6 +1679,24 @@ export interface DemoResult {
   remainingBudgetDefaultTask: TaskLifecycle;
   /** The three remaining values of the unbudgeted task (Infinity, Infinity, Infinity). */
   remainingBudgetDefaultReadings: RemainingBudgetReadings;
+  /** Dedicated task for the budget-used read-only API segment (DEMO-102). */
+  budgetUsedTask: TaskLifecycle;
+  /** The three used values at construction (0 resubmits, 0 disputes, 0 CAPTURING visits). */
+  budgetUsedInitial: BudgetUsedReadings;
+  /** The three used values in REJECTED after the first pass (0, 0, 1). */
+  budgetUsedInRejected: BudgetUsedReadings;
+  /** The three used values after one RESUBMIT round (1, 0, 2). */
+  budgetUsedAfterResubmit: BudgetUsedReadings;
+  /** The three remaining values after one RESUBMIT round (0, 1, 0) — the cross-check side. */
+  budgetUsedAfterResubmitRemaining: RemainingBudgetReadings;
+  /** The three used values after one DISPUTE round (1, 1, 2). */
+  budgetUsedAfterDispute: BudgetUsedReadings;
+  /** Default task of the budget-used segment (DEMO-103). */
+  budgetUsedDefaultTask: TaskLifecycle;
+  /** The three used values of the unbudgeted task at construction (0, 0, 0). */
+  budgetUsedDefaultInitial: BudgetUsedReadings;
+  /** The three used values of the unbudgeted task in REJECTED (0, 0, 1). */
+  budgetUsedDefaultReadings: BudgetUsedReadings;
   staleActionTasks: TaskLifecycle[];
   staleActionResults: StaleActionResult[];
   expireExecutionTasks: TaskLifecycle[];
@@ -4446,6 +4481,186 @@ export async function runDemo(): Promise<DemoResult> {
   }
   lines.push(
     `  default task ${remainingBudgetDefaultTask.id} (no maxResubmits / maxDisputes / maxVisitsByState — the library defaults are unlimited): remaining resubmits ${remainingBudgetDefaultReadings.resubmits}, disputes ${remainingBudgetDefaultReadings.disputes}, CAPTURING visits ${remainingBudgetDefaultReadings.capturingVisits}`,
+  );
+
+  // The budget-used read-only API branch: the used side of the
+  // same three budgets — `resubmitCount` / `disputeCount` /
+  // `visitCount(state)` — read from the same history-derived
+  // counts the budget checks read, so used + remaining always
+  // equals the configured budget and a watchdog can ask "how
+  // much is spent" before dispatching instead of waiting for
+  // the budget-exhausted error. Same fixed task shape as the
+  // remaining branch above (2026-03-23, no network, no
+  // randomness, no wall clock):
+  //   DEMO-102 carries maxResubmits 1 + maxDisputes 1 +
+  //     maxVisitsByState { CAPTURING: 2 }: the three used
+  //     values start at 0 / 0 / 0, step to 0 / 0 / 1 in
+  //     REJECTED after the first pass (the CAPTURING visit),
+  //     to 1 / 0 / 2 after one RESUBMIT round — where the
+  //     cross-check pins used + remaining = budget on all
+  //     three (1 + 0 = 1, 0 + 1 = 1, 2 + 0 = 2) — and to
+  //     1 / 1 / 2 after one DISPUTE round, the dispute count
+  //     stepping while the other two stay put.
+  //   DEMO-103 carries no budget: the used values read 0 / 0 / 0
+  //     at construction and 0 / 0 / 1 after the same drive to
+  //     REJECTED — unlimited is not uncounted, the visit
+  //     counter still steps, while the remaining values stay
+  //     Infinity.
+  const budgetUsedTask = new TaskLifecycle("DEMO-102", {
+    maxResubmits: 1,
+    maxDisputes: 1,
+    maxVisitsByState: { CAPTURING: 2 },
+  });
+  const readBudgetUsed = (t: TaskLifecycle): BudgetUsedReadings => ({
+    resubmits: t.resubmitCount,
+    disputes: t.disputeCount,
+    capturingVisits: t.visitCount("CAPTURING"),
+  });
+  const budgetUsedInitial = readBudgetUsed(budgetUsedTask);
+  if (
+    budgetUsedInitial.resubmits !== 0 ||
+    budgetUsedInitial.disputes !== 0 ||
+    budgetUsedInitial.capturingVisits !== 0
+  ) {
+    throw new Error(
+      `demo fixture broken: budget-used task starts at ${budgetUsedInitial.resubmits}/${budgetUsedInitial.disputes}/${budgetUsedInitial.capturingVisits} (expected 0/0/0)`,
+    );
+  }
+  lines.push(
+    "",
+    "Budget-used read-only API branch (resubmitCount / disputeCount / visitCount(state) — the used side of the three budgets):",
+    `Task ${budgetUsedTask.id}: ${budgetUsedTask.state}`,
+    `  used at construction: resubmits ${budgetUsedInitial.resubmits}, disputes ${budgetUsedInitial.disputes}, CAPTURING visits ${budgetUsedInitial.capturingVisits} (budgets: maxResubmits 1, maxDisputes 1, maxVisitsByState { CAPTURING: 2 })`,
+  );
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-23T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-23T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-23T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-23T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-23T09:20:00.000Z"],
+    ["REJECT", "reviewer", "2026-03-23T09:25:00.000Z"],
+  ] as const) {
+    const from = budgetUsedTask.state;
+    const to = budgetUsedTask.dispatch(event, { actor, at });
+    lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  const budgetUsedInRejected = readBudgetUsed(budgetUsedTask);
+  const budgetUsedInRejectedRemaining = readRemainingBudget(budgetUsedTask);
+  if (
+    budgetUsedInRejected.resubmits !== 0 ||
+    budgetUsedInRejected.disputes !== 0 ||
+    budgetUsedInRejected.capturingVisits !== 1 ||
+    budgetUsedInRejectedRemaining.resubmits !== 1 ||
+    budgetUsedInRejectedRemaining.disputes !== 1 ||
+    budgetUsedInRejectedRemaining.capturingVisits !== 1
+  ) {
+    throw new Error(
+      `demo fixture broken: budget-used task in REJECTED reads used ${budgetUsedInRejected.resubmits}/${budgetUsedInRejected.disputes}/${budgetUsedInRejected.capturingVisits} with remaining ${budgetUsedInRejectedRemaining.resubmits}/${budgetUsedInRejectedRemaining.disputes}/${budgetUsedInRejectedRemaining.capturingVisits} (expected used 0/0/1 with remaining 1/1/1 — the first pass spent 1 of the 2 CAPTURING visits)`,
+    );
+  }
+  lines.push(
+    `  used in REJECTED: resubmits ${budgetUsedInRejected.resubmits}, disputes ${budgetUsedInRejected.disputes}, CAPTURING visits ${budgetUsedInRejected.capturingVisits} (the first pass spent 1 of the 2 CAPTURING visits — remaining reads 1 / 1 / 1, so used + remaining = budget on all three)`,
+  );
+  // One RESUBMIT round inside the resubmit budget: the resubmit
+  // count and the CAPTURING visit count step together, the
+  // dispute count stays at 0, and the cross-check pins used +
+  // remaining = budget on all three (1 + 0 = 1, 0 + 1 = 1,
+  // 2 + 0 = 2).
+  for (const [event, actor, at] of [
+    ["RESUBMIT", "contributor", "2026-03-23T10:00:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-23T10:05:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-23T10:10:00.000Z"],
+    ["REJECT", "reviewer", "2026-03-23T10:15:00.000Z"],
+  ] as const) {
+    const from = budgetUsedTask.state;
+    const to = budgetUsedTask.dispatch(event, { actor, at });
+    lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  const budgetUsedAfterResubmit = readBudgetUsed(budgetUsedTask);
+  const budgetUsedAfterResubmitRemaining = readRemainingBudget(budgetUsedTask);
+  if (
+    budgetUsedAfterResubmit.resubmits !== 1 ||
+    budgetUsedAfterResubmit.disputes !== 0 ||
+    budgetUsedAfterResubmit.capturingVisits !== 2 ||
+    budgetUsedAfterResubmitRemaining.resubmits !== 0 ||
+    budgetUsedAfterResubmitRemaining.disputes !== 1 ||
+    budgetUsedAfterResubmitRemaining.capturingVisits !== 0
+  ) {
+    throw new Error(
+      `demo fixture broken: budget-used task after one RESUBMIT round reads used ${budgetUsedAfterResubmit.resubmits}/${budgetUsedAfterResubmit.disputes}/${budgetUsedAfterResubmit.capturingVisits} with remaining ${budgetUsedAfterResubmitRemaining.resubmits}/${budgetUsedAfterResubmitRemaining.disputes}/${budgetUsedAfterResubmitRemaining.capturingVisits} (expected used 1/0/2 with remaining 0/1/0 — the round spent the resubmit budget and the second CAPTURING visit together)`,
+    );
+  }
+  lines.push(
+    `  used after one RESUBMIT round: resubmits ${budgetUsedAfterResubmit.resubmits}, disputes ${budgetUsedAfterResubmit.disputes}, CAPTURING visits ${budgetUsedAfterResubmit.capturingVisits} (used 1 + remaining 0 = budget 1; disputes 0 + remaining 1 = budget 1; CAPTURING visits used 2 + remaining 0 = budget 2)`,
+  );
+  // One DISPUTE round from REJECTED: DISPUTE -> DISPUTED, then
+  // ARBITRATE_REJECT back to REJECTED. Only the dispute count
+  // steps; the resubmit and visit counts stay put.
+  for (const [event, actor, at] of [
+    ["DISPUTE", "contributor", "2026-03-23T12:00:00.000Z"],
+    ["ARBITRATE_REJECT", "moderator", "2026-03-23T12:05:00.000Z"],
+  ] as const) {
+    const from = budgetUsedTask.state;
+    const to = budgetUsedTask.dispatch(event, { actor, at });
+    lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  const budgetUsedAfterDispute = readBudgetUsed(budgetUsedTask);
+  if (
+    budgetUsedAfterDispute.resubmits !== 1 ||
+    budgetUsedAfterDispute.disputes !== 1 ||
+    budgetUsedAfterDispute.capturingVisits !== 2
+  ) {
+    throw new Error(
+      `demo fixture broken: budget-used task after one DISPUTE round reads ${budgetUsedAfterDispute.resubmits}/${budgetUsedAfterDispute.disputes}/${budgetUsedAfterDispute.capturingVisits} (expected 1/1/2)`,
+    );
+  }
+  lines.push(
+    `  used after one DISPUTE round: resubmits ${budgetUsedAfterDispute.resubmits}, disputes ${budgetUsedAfterDispute.disputes}, CAPTURING visits ${budgetUsedAfterDispute.capturingVisits} (the dispute count stepped — the other two are untouched; remaining reads 0 / 0 / 0)`,
+  );
+  // The unbudgeted control: the same drive to REJECTED with no
+  // budgets configured reads 0 / 0 / 0 at construction and
+  // 0 / 0 / 1 afterwards — unlimited is not uncounted (the
+  // visit counter still steps), while the remaining values
+  // stay Infinity, as the branch above shows.
+  const budgetUsedDefaultTask = new TaskLifecycle("DEMO-103");
+  const budgetUsedDefaultInitial = readBudgetUsed(budgetUsedDefaultTask);
+  if (
+    budgetUsedDefaultInitial.resubmits !== 0 ||
+    budgetUsedDefaultInitial.disputes !== 0 ||
+    budgetUsedDefaultInitial.capturingVisits !== 0
+  ) {
+    throw new Error(
+      `demo fixture broken: unbudgeted task starts at ${budgetUsedDefaultInitial.resubmits}/${budgetUsedDefaultInitial.disputes}/${budgetUsedDefaultInitial.capturingVisits} (expected 0/0/0)`,
+    );
+  }
+  lines.push(
+    `Task ${budgetUsedDefaultTask.id}: ${budgetUsedDefaultTask.state}`,
+    `  used at construction: resubmits ${budgetUsedDefaultInitial.resubmits}, disputes ${budgetUsedDefaultInitial.disputes}, CAPTURING visits ${budgetUsedDefaultInitial.capturingVisits} (no maxResubmits / maxDisputes / maxVisitsByState — the library defaults are unlimited)`,
+  );
+  for (const [event, actor, at] of [
+    ["PUBLISH", "researcher", "2026-03-23T09:00:00.000Z"],
+    ["ACCEPT", "contributor", "2026-03-23T09:05:00.000Z"],
+    ["START_CAPTURE", "contributor", "2026-03-23T09:10:00.000Z"],
+    ["SUBMIT", "contributor", "2026-03-23T09:15:00.000Z"],
+    ["BEGIN_REVIEW", "reviewer", "2026-03-23T09:20:00.000Z"],
+    ["REJECT", "reviewer", "2026-03-23T09:25:00.000Z"],
+  ] as const) {
+    const from = budgetUsedDefaultTask.state;
+    const to = budgetUsedDefaultTask.dispatch(event, { actor, at });
+    lines.push(`  ${event.padEnd(15)} ${from.padEnd(12)} -> ${to}  (${actor})`);
+  }
+  const budgetUsedDefaultReadings = readBudgetUsed(budgetUsedDefaultTask);
+  if (
+    budgetUsedDefaultReadings.resubmits !== 0 ||
+    budgetUsedDefaultReadings.disputes !== 0 ||
+    budgetUsedDefaultReadings.capturingVisits !== 1
+  ) {
+    throw new Error(
+      `demo fixture broken: unbudgeted task in REJECTED reads ${budgetUsedDefaultReadings.resubmits}/${budgetUsedDefaultReadings.disputes}/${budgetUsedDefaultReadings.capturingVisits} (expected 0/0/1 — the first pass spent 1 CAPTURING visit, and unlimited is not uncounted)`,
+    );
+  }
+  lines.push(
+    `  default task ${budgetUsedDefaultTask.id} (no budget configured): used resubmits ${budgetUsedDefaultReadings.resubmits}, disputes ${budgetUsedDefaultReadings.disputes}, CAPTURING visits ${budgetUsedDefaultReadings.capturingVisits} (unlimited is not uncounted — the visit counter still steps; remaining reads Infinity for all three)`,
   );
 
   // Stale-task batch execution branch: screening alone does not
@@ -10412,7 +10627,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, dedupeProbeHasUnseen, dedupeProbeFirst, dedupeProbeStatsAfterRecord, dedupeProbeHasSeen, dedupeProbeStatsAfterHas, dedupeProbeHasAgain, dedupeProbeHasExpired, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeSignedSnapshotSource, dedupeSignedSnapshotFirst, dedupeSignedSnapshotDuplicate, dedupeSignedSnapshot, dedupeSignedSnapshotTamperedError, dedupeSignedSnapshotRestored, dedupeSignedSnapshotStatsAfterRestore, dedupeSignedSnapshotHasSeen, dedupeSignedSnapshotHasUnseen, dedupeSignedSnapshotStatsAfterHas, dedupeSignedSnapshotRestoredSeen, dedupeSignedSnapshotRestoredUnseen, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requireEventIdWebhook, requireEventIdKeyedWithGate, requireEventIdKeyedWithoutGate, requireEventIdKeylessWithGate, requireEventIdKeylessWithoutGate, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, remainingBudgetTask, remainingBudgetInitial, remainingBudgetInRejected, remainingBudgetAfterResubmit, remainingBudgetResubmitError, remainingBudgetStateAfterResubmitReject, remainingBudgetHistoryLengthAfterResubmitReject, remainingBudgetAfterDispute, remainingBudgetDisputeError, remainingBudgetStateAfterDisputeReject, remainingBudgetHistoryLengthAfterDisputeReject, remainingBudgetDefaultTask, remainingBudgetDefaultReadings, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, outboxRetryOutbox, outboxRetrySummary, outboxRetryDeliverCalls, outboxRetryPendingAfterLive, outboxRetryDeadAfterLive, outboxRetryDryRunSummary, outboxRetryDryRunPendingAfter, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, dedupeProbeHasUnseen, dedupeProbeFirst, dedupeProbeStatsAfterRecord, dedupeProbeHasSeen, dedupeProbeStatsAfterHas, dedupeProbeHasAgain, dedupeProbeHasExpired, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeSignedSnapshotSource, dedupeSignedSnapshotFirst, dedupeSignedSnapshotDuplicate, dedupeSignedSnapshot, dedupeSignedSnapshotTamperedError, dedupeSignedSnapshotRestored, dedupeSignedSnapshotStatsAfterRestore, dedupeSignedSnapshotHasSeen, dedupeSignedSnapshotHasUnseen, dedupeSignedSnapshotStatsAfterHas, dedupeSignedSnapshotRestoredSeen, dedupeSignedSnapshotRestoredUnseen, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requireEventIdWebhook, requireEventIdKeyedWithGate, requireEventIdKeyedWithoutGate, requireEventIdKeylessWithGate, requireEventIdKeylessWithoutGate, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, remainingBudgetTask, remainingBudgetInitial, remainingBudgetInRejected, remainingBudgetAfterResubmit, remainingBudgetResubmitError, remainingBudgetStateAfterResubmitReject, remainingBudgetHistoryLengthAfterResubmitReject, remainingBudgetAfterDispute, remainingBudgetDisputeError, remainingBudgetStateAfterDisputeReject, remainingBudgetHistoryLengthAfterDisputeReject, remainingBudgetDefaultTask, remainingBudgetDefaultReadings, budgetUsedTask, budgetUsedInitial, budgetUsedInRejected, budgetUsedAfterResubmit, budgetUsedAfterResubmitRemaining, budgetUsedAfterDispute, budgetUsedDefaultTask, budgetUsedDefaultInitial, budgetUsedDefaultReadings, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, outboxRetryOutbox, outboxRetrySummary, outboxRetryDeliverCalls, outboxRetryPendingAfterLive, outboxRetryDeadAfterLive, outboxRetryDryRunSummary, outboxRetryDryRunPendingAfter, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
 }
 
 async function main(): Promise<void> {
