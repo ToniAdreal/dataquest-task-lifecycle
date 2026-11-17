@@ -1,7 +1,7 @@
 /**
  * Local micro-benchmark for the dataquest-task-lifecycle state machine.
  *
- * Measures real, locally-observed throughput for the sixty-nine hot-path
+ * Measures real, locally-observed throughput for the seventy-five hot-path
  * groups a watchdog / reconciliation deployment actually hammers:
  *
  *   1. dispatch — one full DRAFT -> PAID lifecycle (8 dispatches, each
@@ -1598,6 +1598,29 @@
  *      pinned to never be re-delivered (only the pending pair is
  *      retried, the dead letter stays at attempts 3). No network, no
  *      randomness, and no wall clock: the clock is injected and fixed.
+ *
+ *  75. budget-remaining reads — `remainingResubmits` /
+ *      `remainingDisputes` / `remainingVisits(state)` on one
+ *      fixed fresh task (see the budget-remaining fixture
+ *      below): budgets `maxResubmits` 1, `maxDisputes` 1, and
+ *      `maxVisitsByState` { CAPTURING: 2 }, read at construction
+ *      before any dispatch. This is the read-before-dispatch cost
+ *      a watchdog or dashboard pays to show how much budget is
+ *      left — the same history-derived counts the budget checks
+ *      themselves read, previously visible only inside the
+ *      dispatch rows that spend them and the demo segment that
+ *      prints them. One timed pass is one read of all three
+ *      remaining values; its per-iteration self-check pins them
+ *      to the hand-written 1 / 1 / 2. Outside the timed loop,
+ *      the readings are pinned to step in lockstep with the
+ *      budget gates (1 / 1 / 1 in REJECTED after the first
+ *      pass, 0 / 1 / 0 after one RESUBMIT round, 0 / 0 / 0
+ *      after one DISPUTE round), the second RESUBMIT and second
+ *      DISPUTE are pinned to their exact budget-exhausted
+ *      errors with state and history untouched, and an
+ *      unbudgeted task is pinned to read Infinity for all
+ *      three. No network, no randomness, and no wall clock:
+ *      every dispatch timestamp is fixed.
  *
  * Fixtures are fully deterministic: fixed task id, actors, timestamps
  * (a fixed base instant plus per-step offsets), webhook secret, payload
@@ -3411,6 +3434,212 @@ if (
     unknownStateError.message !== BUDGET_COUNTS_UNKNOWN_STATE_ERROR
   ) {
     throw new Error("benchmark fixture failed: budget-counts fresh task");
+  }
+}
+
+// Budget-remaining read fixture (backlog #1219): the read side of
+// the three budgets above — `remainingResubmits` / `remainingDisputes`
+// getters and `remainingVisits(state)` — on one fixed task carrying
+// the demo's DEMO-100 budgets (maxResubmits 1, maxDisputes 1,
+// maxVisitsByState { CAPTURING: 2 }). Hand-written expectations,
+// written out here from the fixture composition and cross-checked
+// against test/budgetUsage.test.ts, test/resubmitBudget.test.ts,
+// test/disputeBudget.test.ts, test/visitBudget.test.ts, and the
+// demo's budget-remaining segment (src/demo.ts), never derived by
+// running the path itself:
+//   - at construction (DRAFT, 0 entries) the three remaining values
+//     read 1 / 1 / 2 — the timed fixture stays at construction, so
+//     one timed pass is one read of all three remaining values
+//     with no dispatch in the loop;
+//   - driven through the 6-entry REJECTED prefix (the same
+//     LIFECYCLE.slice(0, 5) + REJECT shape the budget-counts
+//     fixture uses, BASE + 0..5s) the first CAPTURING visit is
+//     spent, so the readings step to 1 / 1 / 1;
+//   - one RESUBMIT round (RESUBMIT at BASE + 6s, SUBMIT + 7s,
+//     BEGIN_REVIEW + 8s, REJECT + 9s) spends the resubmit budget
+//     and the second CAPTURING visit together, so the readings
+//     step to 0 / 1 / 0; a second RESUBMIT is rejected with the
+//     pinned "resubmit budget exhausted: 1 of 1 RESUBMITs already
+//     used" error and leaves state REJECTED with a 10-entry
+//     history;
+//   - one DISPUTE round (DISPUTE at BASE + 10s, ARBITRATE_REJECT
+//     at BASE + 11s) spends the dispute budget, so the readings
+//     step to 0 / 0 / 0; a second DISPUTE is rejected with the
+//     pinned "dispute budget exhausted: 1 of 1 DISPUTEs already
+//     used" error and leaves state REJECTED with a 12-entry
+//     history;
+//   - an unbudgeted task driven through the same 6-entry prefix
+//     reads Infinity for all three — unlimited is not uncounted:
+//     the used counts still step (1 CAPTURING visit spent).
+const BUDGET_REMAINING_TASK_ID = "BENCH-BUDGET-REMAINING-001";
+const BUDGET_REMAINING_UNBUDGETED_TASK_ID = "BENCH-BUDGET-REMAINING-002";
+const BUDGET_REMAINING_RESUBMIT_EXHAUSTED_ERROR =
+  "resubmit budget exhausted: 1 of 1 RESUBMITs already used";
+const BUDGET_REMAINING_DISPUTE_EXHAUSTED_ERROR =
+  "dispute budget exhausted: 1 of 1 DISPUTEs already used";
+function buildBudgetRemainingTask(): TaskLifecycle {
+  return new TaskLifecycle(BUDGET_REMAINING_TASK_ID, {
+    maxResubmits: 1,
+    maxDisputes: 1,
+    maxVisitsByState: { CAPTURING: 2 },
+  });
+}
+const budgetRemainingTask = buildBudgetRemainingTask();
+if (
+  budgetRemainingTask.state !== "DRAFT" ||
+  budgetRemainingTask.history.length !== 0 ||
+  budgetRemainingTask.remainingResubmits !== 1 ||
+  budgetRemainingTask.remainingDisputes !== 1 ||
+  budgetRemainingTask.remainingVisits("CAPTURING") !== 2
+) {
+  throw new Error("benchmark fixture failed: budget-remaining task shape");
+}
+// One-time validation (outside the timed loop): the remaining
+// readings step in lockstep with the budget gates — the 6-entry
+// prefix spends the first CAPTURING visit (1 / 1 / 1), one
+// RESUBMIT round spends the resubmit budget and the second visit
+// together (0 / 1 / 0, second RESUBMIT rejected with the pinned
+// error, state and history untouched), one DISPUTE round spends
+// the dispute budget (0 / 0 / 0, second DISPUTE rejected with the
+// pinned error), and the unbudgeted control task reads Infinity
+// for all three after the same prefix.
+{
+  const probe = buildBudgetRemainingTask();
+  const readRemaining = (t: TaskLifecycle): [number, number, number] => [
+    t.remainingResubmits,
+    t.remainingDisputes,
+    t.remainingVisits("CAPTURING"),
+  ];
+  const expectRemaining = (
+    t: TaskLifecycle,
+    expected: [number, number, number],
+    where: string,
+  ): void => {
+    const [r, d, v] = readRemaining(t);
+    if (r !== expected[0] || d !== expected[1] || v !== expected[2]) {
+      throw new Error(
+        `benchmark fixture failed: budget-remaining ${where} reads ${r}/${d}/${v} (expected ${expected[0]}/${expected[1]}/${expected[2]})`,
+      );
+    }
+  };
+  const expectProbeShape = (
+    t: TaskLifecycle,
+    expectedState: TaskState,
+    expectedLength: number,
+    where: string,
+  ): void => {
+    if (t.state !== expectedState || t.history.length !== expectedLength) {
+      throw new Error(
+        `benchmark fixture failed: budget-remaining probe ${where} is at ${t.state} with ${t.history.length} history entries (expected ${expectedState}, ${expectedLength})`,
+      );
+    }
+  };
+  expectRemaining(probe, [1, 1, 2], "at construction");
+  LIFECYCLE.slice(0, 5).forEach(({ event, actor, extra }, i) => {
+    probe.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  probe.dispatch("REJECT", {
+    actor: "reviewer",
+    at: new Date(BASE_MS + 5000).toISOString(),
+  });
+  expectProbeShape(probe, "REJECTED", 6, "prefix");
+  expectRemaining(probe, [1, 1, 1], "in REJECTED after the first pass");
+  probe.dispatch("RESUBMIT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 6000).toISOString(),
+  });
+  probe.dispatch("SUBMIT", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 7000).toISOString(),
+  });
+  probe.dispatch("BEGIN_REVIEW", {
+    actor: "reviewer",
+    at: new Date(BASE_MS + 8000).toISOString(),
+  });
+  probe.dispatch("REJECT", {
+    actor: "reviewer",
+    at: new Date(BASE_MS + 9000).toISOString(),
+  });
+  expectProbeShape(probe, "REJECTED", 10, "after one RESUBMIT round");
+  if (probe.visitCount("CAPTURING") !== 2) {
+    throw new Error(
+      "benchmark fixture failed: budget-remaining probe after one RESUBMIT round has the wrong CAPTURING visit count",
+    );
+  }
+  expectRemaining(probe, [0, 1, 0], "after one RESUBMIT round");
+  let resubmitError: unknown;
+  try {
+    probe.dispatch("RESUBMIT", {
+      actor: "contributor",
+      at: new Date(BASE_MS + 12000).toISOString(),
+    });
+  } catch (e) {
+    resubmitError = e;
+  }
+  if (
+    !(resubmitError instanceof Error) ||
+    resubmitError.message !== BUDGET_REMAINING_RESUBMIT_EXHAUSTED_ERROR
+  ) {
+    throw new Error(
+      "benchmark fixture failed: budget-remaining second RESUBMIT rejection",
+    );
+  }
+  expectProbeShape(probe, "REJECTED", 10, "after the rejected second RESUBMIT");
+  probe.dispatch("DISPUTE", {
+    actor: "contributor",
+    at: new Date(BASE_MS + 10000).toISOString(),
+  });
+  probe.dispatch("ARBITRATE_REJECT", {
+    actor: "reviewer",
+    at: new Date(BASE_MS + 11000).toISOString(),
+  });
+  expectProbeShape(probe, "REJECTED", 12, "after one DISPUTE round");
+  expectRemaining(probe, [0, 0, 0], "after one DISPUTE round");
+  let disputeError: unknown;
+  try {
+    probe.dispatch("DISPUTE", {
+      actor: "contributor",
+      at: new Date(BASE_MS + 13000).toISOString(),
+    });
+  } catch (e) {
+    disputeError = e;
+  }
+  if (
+    !(disputeError instanceof Error) ||
+    disputeError.message !== BUDGET_REMAINING_DISPUTE_EXHAUSTED_ERROR
+  ) {
+    throw new Error(
+      "benchmark fixture failed: budget-remaining second DISPUTE rejection",
+    );
+  }
+  expectProbeShape(probe, "REJECTED", 12, "after the rejected second DISPUTE");
+  const unbudgeted = new TaskLifecycle(BUDGET_REMAINING_UNBUDGETED_TASK_ID);
+  LIFECYCLE.slice(0, 5).forEach(({ event, actor, extra }, i) => {
+    unbudgeted.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  unbudgeted.dispatch("REJECT", {
+    actor: "reviewer",
+    at: new Date(BASE_MS + 5000).toISOString(),
+  });
+  if (
+    unbudgeted.state !== "REJECTED" ||
+    unbudgeted.history.length !== 6 ||
+    unbudgeted.remainingResubmits !== Infinity ||
+    unbudgeted.remainingDisputes !== Infinity ||
+    unbudgeted.remainingVisits("CAPTURING") !== Infinity ||
+    unbudgeted.visitCount("CAPTURING") !== 1
+  ) {
+    throw new Error(
+      "benchmark fixture failed: budget-remaining unbudgeted control task",
+    );
   }
 }
 
@@ -13155,6 +13384,25 @@ function benchBudgetCounts(): number {
   }, ITERATIONS);
 }
 
+function benchBudgetRemaining(): number {
+  return measure(() => {
+    // Shared fixture task per iteration: the three remaining
+    // values are pure reads off the history-derived counters, so
+    // no rebuild is needed. Per-iteration self-check: exactly
+    // the hand-written remaining values at construction
+    // (1 RESUBMIT of 1 budgeted, 1 DISPUTE of 1 budgeted,
+    // 2 CAPTURING visits of 2 budgeted — see the
+    // budget-remaining fixture above).
+    if (
+      budgetRemainingTask.remainingResubmits !== 1 ||
+      budgetRemainingTask.remainingDisputes !== 1 ||
+      budgetRemainingTask.remainingVisits("CAPTURING") !== 2
+    ) {
+      throw new Error("benchmark self-check failed: budget remaining");
+    }
+  }, ITERATIONS);
+}
+
 function benchTasksByState(): number {
   return measure(() => {
     // Shared fixture batch per iteration: the filter is pure, so
@@ -14860,6 +15108,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding)", ops: benchMinorUnitsConversion() },
   { path: "nextTaskDeadline (8 mixed tasks, earliest whole-map deadline)", ops: benchNextTaskDeadline() },
   { path: "budget counts (resubmit/dispute/visit, 12-entry task)", ops: benchBudgetCounts() },
+  { path: "budget remaining (resubmit/dispute/visit, fresh task)", ops: benchBudgetRemaining() },
 ];
 
 console.log("path                                              throughput");

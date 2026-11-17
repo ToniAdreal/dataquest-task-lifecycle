@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `remainingResubmits` / `remainingDisputes` / `remainingVisits(state)`
+  benchmark row (2026-11-17, backlog #1219): `npm run bench` now
+  measures the read-before-dispatch cost of the three
+  budget-remaining values on one fixed fresh task (`maxResubmits: 1`,
+  `maxDisputes: 1`, `maxVisitsByState: { CAPTURING: 2 }`), so one
+  measured op reads all three and self-checks them to 1 / 1 / 2.
+  Outside the timed loop, the readings are pinned to step with the
+  budget gates (1 / 1 / 1 in REJECTED after the first pass, 0 / 1 / 0
+  after one RESUBMIT round, 0 / 0 / 0 after one DISPUTE round), a
+  second RESUBMIT and a second DISPUTE are pinned to their exact
+  budget-exhausted errors, and an unbudgeted task reads Infinity for
+  all three. Measured at ~2,959,861 ops/sec (0.34 µs/op) on Node
+  v24.22.1, linux/x64.
+
 - CLI demo adds a budget-remaining read-only API segment (2026-11-17,
   backlog #1210): `npm run demo` now shows the read side of the
   three budgets on DEMO-100 (`maxResubmits: 1`, `maxDisputes: 1`,

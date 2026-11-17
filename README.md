@@ -2844,7 +2844,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred sixteen hot
+`npm run bench` measures locally-observed throughput for the one hundred seventeen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -3034,7 +3034,7 @@ a batch of PAID tasks), watchdog screening (`expiredTasks` /
 approaching-deadline screening (`tasksApproachingDeadline` over a
 fixed 6-task batch — in-window, upper-bound, lower-bound, overdue,
 no-deadline, and terminal cases under the half-open window `(now,
-now + withinMs]`), next-SLA-deadline scheduling (`nextSlaDeadline` over a fixed 8-task batch: earliest future current-state deadline wins, tie keeps input order, terminal, overdue, and departed-state deadlines excluded, self-checked against the hand-pinned NSL-01 winner), whole-map next-deadline scheduling (`nextTaskDeadline` over a fixed 8-task batch: earliest future deadline anywhere in any task's SLA map wins — including deadlines on states not yet reached — tie keeps input order, within-task ties keep transition-table declaration order, terminal-state deadlines never count, a departed-state deadline counts, self-checked against the hand-pinned NTD-03 winner), budget-usage reads (`resubmitCount` / `disputeCount` / `visitCount` over one fixed 12-entry REJECTED task — 1 resubmit of 2 budgeted, 1 dispute of 1, 2 CAPTURING visits of 2 — self-checked against the hand-pinned counts), and watchdog
+now + withinMs]`), next-SLA-deadline scheduling (`nextSlaDeadline` over a fixed 8-task batch: earliest future current-state deadline wins, tie keeps input order, terminal, overdue, and departed-state deadlines excluded, self-checked against the hand-pinned NSL-01 winner), whole-map next-deadline scheduling (`nextTaskDeadline` over a fixed 8-task batch: earliest future deadline anywhere in any task's SLA map wins — including deadlines on states not yet reached — tie keeps input order, within-task ties keep transition-table declaration order, terminal-state deadlines never count, a departed-state deadline counts, self-checked against the hand-pinned NTD-03 winner), budget-usage reads (`resubmitCount` / `disputeCount` / `visitCount` over one fixed 12-entry REJECTED task — 1 resubmit of 2 budgeted, 1 dispute of 1, 2 CAPTURING visits of 2 — self-checked against the hand-pinned counts), budget-remaining reads (`remainingResubmits` / `remainingDisputes` / `remainingVisits` over one fixed fresh task — 1 resubmit of 1 budgeted, 1 dispute of 1, 2 CAPTURING visits of 2 — self-checked against the hand-pinned remaining values), and watchdog
 execution (`expireOverdueTasks` / `actOnStaleTasks` over the same
 batch, plus `actOnStaleTasks` with a notify-only action over the same
 batch — the reminder-loop shape that notifies without dispatching), plus `actOnStaleTasks` with the default ABANDON action over the same batch with a collecting listener subscribed to every task — the #746 bench variant of the #732 test row, self-checked per iteration for exactly 1 notification (the WD-04 ABANDON), plus `expireOverdueTasks` over the same batch with a collecting listener subscribed to every task — the #754 bench variant of the #748 test row, self-checked per iteration for exactly 3 notifications (the WD-01 / WD-10 / WD-12 EXPIREs),
@@ -3999,6 +3999,20 @@ budget-exhausted error with state and history byte-identical, and a
 fresh task is pinned to 0 resubmits / 0 disputes with the initial DRAFT
 visit already counted, plus the unknown-state fail-fast; one timed pass
 is one three-count read over a 12-entry history.
+The budget-remaining path runs one read of all three budget-remaining values
+over one fixed fresh task on every iteration (no network, no
+randomness, no wall clock): the task carries budgets `maxResubmits` 1,
+`maxDisputes` 1, and `maxVisitsByState` { CAPTURING: 2 } and has not
+dispatched anything, so the remaining values read 1 / 1 / 2. Its
+per-iteration self-check pins the three remaining values to the
+hand-written expectations written out in the bench comments; outside
+the timed loop, the readings are pinned to step in lockstep with the
+budget gates (1 / 1 / 1 in REJECTED after the first pass, 0 / 1 / 0
+after one RESUBMIT round, 0 / 0 / 0 after one DISPUTE round), a second
+RESUBMIT and a second DISPUTE are pinned to their exact
+budget-exhausted errors with state and history untouched, and an
+unbudgeted task is pinned to read Infinity for all three; one timed pass
+is one three-value read over a fresh task.
 The `reconcilePayouts` path runs one five-way reconciliation over a fixed
 5-task batch against a 4-row ledger on every iteration (no network, no
 randomness, no wall clock): two tasks settle exactly as the ledger records,
@@ -4133,12 +4147,13 @@ See the throughput row below. One real run on 2026-11-16:
 | toMinorUnits/fromMinorUnits (4-vector conversion + 0.333 rounding) | ~2,554,579 ops/sec (0.39 µs/op) |
 | nextTaskDeadline (8 mixed tasks, earliest whole-map deadline) | ~149,167 ops/sec (6.70 µs/op) |
 | budget counts (resubmit/dispute/visit, 12-entry task) | ~2,029,649 ops/sec (0.49 µs/op) |
+| budget remaining (resubmit/dispute/visit, fresh task) | ~2,959,861 ops/sec (0.34 µs/op) |
 Environment: Node v24.22.1, linux/x64, AMD EPYC 9D25 (virtualized;
 shared host under load, so numbers vary run to run — several paths
 swing widely between runs on this host, so treat each figure as an
 order of magnitude, not a precise rate). The
-retryPayoutWebhookOutbox row above was measured on a 2026-11-17 run;
-the rest of the table is the 2026-11-16 run. Machine-local
+retryPayoutWebhookOutbox and budget remaining rows above were measured on
+2026-11-17 runs; the rest of the table is the 2026-11-16 run. Machine-local
 measurements for capacity planning, not guaranteed throughput —
 run `npm run bench` on your own hardware.
 
