@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Whole-map next-deadline demo segment (2026-11-18, backlog
+  #1234): `npm run demo` now re-screens the next-SLA branch's five
+  fixed tasks at the same fixed `now` with `nextTaskDeadline()` and
+  prints the planning pick — DEMO-062 (ACCEPTED) at
+  2026-03-22T12:00:00.000Z on its departed OPEN state — beside
+  `nextSlaDeadline()`'s scheduler pick (DEMO-061 at
+  2026-03-22T21:00:00.000Z), so the two lenses' disagreement is
+  visible in one run: a departed-state deadline counts in the whole
+  map and not in the current-state lens, while the terminal task's
+  1-hour-out deadline counts in neither. `DemoResult` gains
+  `nextTaskNext`, the demo test count rises by one (1647 to 1648
+  tests), and the golden demo output grows by 11 lines (1080 to
+  1091).
+
 - `PayoutWebhookOutbox.stats()` benchmark row (2026-11-18, backlog
   #1222): `npm run bench` now measures the read-only ledger counts
   on a fixed 3-pair outbox (2 pending, 1 dead-lettered, 6 failed

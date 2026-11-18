@@ -87,6 +87,7 @@ import {
   isOverdue,
   isTerminal,
   nextSlaDeadline,
+  nextTaskDeadline,
   parseHistory,
   parseMinorUnits,
   parsePayoutRetryAfter,
@@ -479,6 +480,17 @@ Task DEMO-067: DRAFT
   tie-break: nextSlaDeadline([DEMO-066, DEMO-067], <timestamp>): DEMO-066 @ <timestamp> (same deadline — input order wins)
   contrast: the earliest timestamp in the batch does not win — DEMO-063's 1-hour-out deadline is terminal and DEMO-062's 3-hour-out deadline is on a left state, so the scheduler wakes for DEMO-061 at 12 hours out, and DEMO-064's past deadline stays with expiredTasks
   scheduling is pure: no task was dispatched or mutated by either call
+
+Whole-map next-deadline scheduler branch (same five tasks, earliest future deadline anywhere in the SLA map):
+  screened at: <timestamp> (fixed now; no wall clock)
+  DEMO-061: state OPEN, earliest whole-map deadline <timestamp> (OPEN) -> candidate, loses on lateness (its <timestamp> OPEN deadline is not the earliest)
+  DEMO-062: state ACCEPTED, earliest whole-map deadline <timestamp> (OPEN) -> winner: its <timestamp> deadline sits on OPEN, a state already left — counted here, ignored by nextSlaDeadline
+  DEMO-063: state ABANDONED, earliest whole-map deadline none -> excluded: terminal task (ABANDONED)
+  DEMO-064: state OPEN, earliest whole-map deadline none -> excluded: overdue (belongs to expiredTasks)
+  DEMO-065: state OPEN, earliest whole-map deadline none -> excluded: no deadline on any state
+  nextTaskDeadline([DEMO-061, DEMO-062, DEMO-063, DEMO-064, DEMO-065], <timestamp>): DEMO-062 (OPEN) @ <timestamp>
+  contrast: nextSlaDeadline over the same batch picks DEMO-061 @ <timestamp> — the earliest deadline on a CURRENT state — while nextTaskDeadline picks DEMO-062 @ <timestamp>, because a departed-state deadline counts in the whole map and not in the current-state lens; the terminal deadline counts in neither
+  planning is pure: no task was dispatched or mutated by the call
 
 Actor-filter branch (tasksByActor over four more tasks, audit history vs state):
 Task DEMO-050: DRAFT
@@ -1228,7 +1240,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1080);
+  assert.equal(lines.length, 1091);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2861,7 +2873,7 @@ test("demo next-SLA-deadline segment is deterministic: two runs print byte-ident
   const nextSlaLines = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Next-SLA-deadline scheduler branch (seven more tasks, earliest future current-state deadline):"),
-      ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):") - 1,
+      ls.indexOf("Whole-map next-deadline scheduler branch (same five tasks, earliest future deadline anywhere in the SLA map):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -2874,6 +2886,92 @@ test("demo next-SLA-deadline segment is deterministic: two runs print byte-ident
   assert.deepEqual(segA, nextSlaLines(b.lines));
   assert.equal(a.nextSlaNext?.task.id, b.nextSlaNext?.task.id);
   assert.equal(a.nextSlaTieNext?.task.id, b.nextSlaTieNext?.task.id);
+});
+
+test("demo shows the whole-map next-deadline scheduler branch in-process: departed-state deadline counts, terminal deadline does not", async () => {
+  const a = await runDemo();
+  const b = await runDemo();
+  const { nextSlaTasks, nextSlaNext, nextTaskNext, lines } = a;
+  const text = lines.join("\n");
+  const NOW = new Date("2026-03-22T09:00:00.000Z");
+
+  // The same five next-SLA branch tasks, re-screened whole-map:
+  // DEMO-062's 3-hour-out OPEN deadline counts here even though
+  // it sits on a state the task has already left, so it beats
+  // DEMO-061's 12-hour-out current-state deadline; the terminal
+  // task's 1-hour-out deadline counts in neither lens.
+  assert.equal(nextTaskNext?.task.id, "DEMO-062");
+  assert.equal(nextTaskNext?.state, "OPEN");
+  assert.equal(nextTaskNext?.deadline, "2026-03-22T12:00:00.000Z");
+  // The two lenses disagree on purpose over the same batch.
+  assert.equal(nextSlaNext?.task.id, "DEMO-061");
+  assert.notEqual(nextTaskNext?.task.id, nextSlaNext?.task.id);
+  // An independent re-screening of the returned tasks reproduces
+  // the pick — the demo segment is not self-certifying.
+  const rescreened = nextTaskDeadline(nextSlaTasks, NOW);
+  assert.equal(rescreened?.task.id, "DEMO-062");
+  assert.equal(rescreened?.state, "OPEN");
+  assert.equal(rescreened?.deadline, "2026-03-22T12:00:00.000Z");
+  // Planning is pure: the tasks keep their states and history
+  // lengths after the call ran inside the demo.
+  assert.deepEqual(
+    nextSlaTasks.map((t) => [t.state, t.history.length]),
+    [
+      ["OPEN", 1],
+      ["ACCEPTED", 2],
+      ["ABANDONED", 3],
+      ["OPEN", 1],
+      ["OPEN", 1],
+    ],
+  );
+  // The branch is printed after the next-SLA branch and before
+  // the actor-filter branch, with its lines verbatim.
+  const nextTaskAt = text.indexOf(
+    "Whole-map next-deadline scheduler branch (same five tasks, earliest future deadline anywhere in the SLA map):",
+  );
+  assert.ok(
+    nextTaskAt >
+      text.indexOf("Next-SLA-deadline scheduler branch (seven more tasks, earliest future current-state deadline):"),
+    "whole-map branch must follow the next-SLA branch",
+  );
+  assert.ok(
+    text.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):") >
+      nextTaskAt,
+    "actor-filter branch must follow the whole-map branch",
+  );
+  assert.match(
+    text,
+    /DEMO-061: state OPEN, earliest whole-map deadline 2026-03-22T21:00:00\.000Z \(OPEN\) -> candidate, loses on lateness \(its 2026-03-22T21:00:00\.000Z OPEN deadline is not the earliest\)/,
+  );
+  assert.match(
+    text,
+    /DEMO-062: state ACCEPTED, earliest whole-map deadline 2026-03-22T12:00:00\.000Z \(OPEN\) -> winner: its 2026-03-22T12:00:00\.000Z deadline sits on OPEN, a state already left — counted here, ignored by nextSlaDeadline/,
+  );
+  assert.match(
+    text,
+    /DEMO-063: state ABANDONED, earliest whole-map deadline none -> excluded: terminal task \(ABANDONED\)/,
+  );
+  assert.match(
+    text,
+    /nextTaskDeadline\(\[DEMO-061, DEMO-062, DEMO-063, DEMO-064, DEMO-065\], 2026-03-22T09:00:00\.000Z\): DEMO-062 \(OPEN\) @ 2026-03-22T12:00:00\.000Z/,
+  );
+  assert.match(
+    text,
+    /contrast: nextSlaDeadline over the same batch picks DEMO-061 @ 2026-03-22T21:00:00\.000Z — the earliest deadline on a CURRENT state — while nextTaskDeadline picks DEMO-062 @ 2026-03-22T12:00:00\.000Z/,
+  );
+  // Determinism: two runs print byte-identical whole-map lines.
+  const wholeMapLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Whole-map next-deadline scheduler branch (same five tasks, earliest future deadline anywhere in the SLA map):"),
+      ls.indexOf("Actor-filter branch (tasksByActor over four more tasks, audit history vs state):") - 1,
+    );
+  const segA = wholeMapLines(a.lines);
+  // Header + screened-at + 5 per-task lines + pick line +
+  // contrast line + purity line; every timestamp in the segment
+  // is a fixed literal, so no normalization is needed.
+  assert.equal(segA.length, 10);
+  assert.deepEqual(segA, wholeMapLines(b.lines));
+  assert.equal(a.nextTaskNext?.task.id, b.nextTaskNext?.task.id);
 });
 
 test("demo shows the actor-filter branch in-process: moderator and contributor slices disagree with the state slice", async () => {
@@ -4819,7 +4917,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1080);
+  assert.equal(out.trimEnd().split("\n").length, 1091);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
