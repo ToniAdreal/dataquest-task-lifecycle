@@ -7,7 +7,7 @@ and the version below is the version declared in `package.json`. Every entry
 summarizes one or more commits in this repository's `git log`, grouped by
 change type; no entry describes a feature that is not in the history.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-18
 
 ### Added
 

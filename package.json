@@ -1,6 +1,6 @@
 {
   "name": "@toniadreal/dataquest-task-lifecycle",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Task lifecycle state machine for a two-sided data marketplace (reproduced from the DataQuest portfolio case study)",
   "type": "module",
   "main": "dist/src/index.js",
