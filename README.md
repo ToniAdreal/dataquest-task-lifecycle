@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1648 tests, all local
+npm test   # 1649 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -103,7 +103,7 @@ to 100.00: paid 635050, gap 14950), diffs the two with
 `diffTaskSettlementsSummaries` (exactly three fields move —
 paidTotal, gap, unquotedPaidTotal — gap as its own entry), and
 prints both summaries with `renderTaskSettlements` (the first
-reads -9849.00 (overpaid), the second 149.50 (underpaid)) — a dispatch subscription branch
+reads -9849.00 (overpaid), the second 149.50 (underpaid)) — a settlement summary CSV/JSON export + import branch that exports the recorded summary with `renderTaskSettlementsCsv`/`renderTaskSettlementsJson`, parses it back with `parseTaskSettlementsCsv`/`parseTaskSettlementsJson` (deep-equal, re-rendered byte-identical), and shows a header-tampered CSV rejected fail-fast — a dispatch subscription branch
 that subscribes a collecting listener to a sixth task under
 fixed-literal timestamps — the listener receives the first three
 dispatches in order, each `(event, from, to)` matching the audit
@@ -2677,7 +2677,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1648 tests covering the happy path, reject→resubmit
+`npm test` runs 1649 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

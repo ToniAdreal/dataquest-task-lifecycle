@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Settlement summary CSV/JSON export + import demo segment
+  (2026-11-18, backlog #1237): `npm run demo` now exports the
+  recorded settlement summary with `renderTaskSettlementsCsv` /
+  `renderTaskSettlementsJson` and parses it back with
+  `parseTaskSettlementsCsv` / `parseTaskSettlementsJson` (deep-equal,
+  re-rendered byte-identical), and shows a header-tampered CSV
+  rejected fail-fast with its exact wording — so the reconciliation
+  handoff (spreadsheet row, API/storage document) is demonstrated
+  end to end. `DemoResult` gains the exported texts, the two
+  round-trips and the rejection, the demo test count rises by one
+  (1648 to 1649 tests), and the golden demo output grows by 10
+  lines (1091 to 1101).
+
 - Whole-map next-deadline demo segment (2026-11-18, backlog
   #1234): `npm run demo` now re-screens the next-SLA branch's five
   fixed tasks at the same fixed `now` with `nextTaskDeadline()` and

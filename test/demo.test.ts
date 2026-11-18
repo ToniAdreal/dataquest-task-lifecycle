@@ -91,8 +91,12 @@ import {
   parseHistory,
   parseMinorUnits,
   parsePayoutRetryAfter,
+  parseTaskSettlementsCsv,
+  parseTaskSettlementsJson,
   payoutMismatch,
   renderTaskSettlements,
+  renderTaskSettlementsCsv,
+  renderTaskSettlementsJson,
   staleTasks,
   stateAtFromHistory,
   stateDiagram,
@@ -370,6 +374,16 @@ Settlement summary diff + rendering branch (summarizeTaskSettlements over the sc
     Unquoted paid tasks: 2
     Unquoted paid total: 100.00
     Amounts are integer minor units (cents).
+
+Settlement summary CSV/JSON export + import branch (renderTaskSettlementsCsv/Json over the recorded summary, then parse back):
+  exported CSV (renderTaskSettlementsCsv, as recorded):
+    tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal
+    6,4,650000,1634900,-984900,1,2,1009850
+  exported JSON (renderTaskSettlementsJson, as recorded):
+    {"tasks":6,"paid":4,"quotedTotal":650000,"paidTotal":1634900,"gap":-984900,"mismatched":1,"unquotedPaid":2,"unquotedPaidTotal":1009850}
+  CSV round-trip: parsed back deep-equal and re-rendered byte-identical: true
+  JSON round-trip: parsed back deep-equal and re-rendered byte-identical: true
+  rejected CSV (header tampered): cannot parse task settlements CSV: header must be exactly "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal"
 
 Dispatch subscription branch (sixth task, in-process fan-out):
 Task DEMO-006: DRAFT
@@ -1240,7 +1254,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1091);
+  assert.equal(lines.length, 1101);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -2324,9 +2338,12 @@ test("demo settlement summary segment is deterministic: two runs print byte-iden
   const a = summaryLines((await runDemo()).lines);
   const b = summaryLines((await runDemo()).lines);
   // Header + corrected line + diff line + rendered-before header +
-  // 9 rendered lines + rendered-after header + 9 rendered lines;
-  // every value is a pinned literal, so no normalization is needed.
-  assert.equal(a.length, 23);
+  // 9 rendered lines + rendered-after header + 9 rendered lines +
+  // blank line + export/import header + CSV header line + 2 CSV
+  // lines + JSON header line + 1 JSON line + 2 round-trip lines +
+  // 1 rejection line; every value is a pinned literal, so no
+  // normalization is needed.
+  assert.equal(a.length, 33);
   assert.deepEqual(a, b);
 });
 
@@ -2336,7 +2353,7 @@ test("demo settlement summary segment prints the full branch verbatim: corrected
     "Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):",
   );
   assert.ok(start > 0);
-  assert.deepEqual(lines.slice(start, start + 23), [
+  assert.deepEqual(lines.slice(start, start + 33), [
     "Settlement summary diff + rendering branch (summarizeTaskSettlements over the screened batch, twice):",
     "  corrected: DEMO-087 re-drives DEMO-001's chain with payoutAmount 100 (the unquoted settlement was corrected from 10098.5 to 100.00)",
     '  diff: {"paidTotalChanged":{"from":1634900,"to":635050},"gapChanged":{"from":-984900,"to":14950},"unquotedPaidTotalChanged":{"from":1009850,"to":10000}} (only the payout-linked fields moved — tasks, paid, quotedTotal, mismatched and unquotedPaid did not; gap is its own entry)',
@@ -2360,7 +2377,92 @@ test("demo settlement summary segment prints the full branch verbatim: corrected
     "    Unquoted paid tasks: 2",
     "    Unquoted paid total: 100.00",
     "    Amounts are integer minor units (cents).",
+    "",
+    "Settlement summary CSV/JSON export + import branch (renderTaskSettlementsCsv/Json over the recorded summary, then parse back):",
+    "  exported CSV (renderTaskSettlementsCsv, as recorded):",
+    "    tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal",
+    "    6,4,650000,1634900,-984900,1,2,1009850",
+    "  exported JSON (renderTaskSettlementsJson, as recorded):",
+    '    {"tasks":6,"paid":4,"quotedTotal":650000,"paidTotal":1634900,"gap":-984900,"mismatched":1,"unquotedPaid":2,"unquotedPaidTotal":1009850}',
+    "  CSV round-trip: parsed back deep-equal and re-rendered byte-identical: true",
+    "  JSON round-trip: parsed back deep-equal and re-rendered byte-identical: true",
+    '  rejected CSV (header tampered): cannot parse task settlements CSV: header must be exactly "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal"',
   ]);
+});
+
+test("demo settlement summary CSV/JSON export + import branch in-process: the recorded summary exports, parses back, and a tampered header is rejected", async () => {
+  const {
+    settlementSummaryBefore,
+    settlementSummaryCsv,
+    settlementSummaryJson,
+    settlementSummaryCsvRoundTrip,
+    settlementSummaryCsvReRendered,
+    settlementSummaryJsonRoundTrip,
+    settlementSummaryJsonReRendered,
+    settlementSummaryRejectedCsvError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+  // Hand-written expectations, independent of the demo's own
+  // literals: the recorded summary (6 tasks, 4 PAID) as one CSV
+  // row and one JSON document, in canonical field order.
+  assert.equal(
+    settlementSummaryCsv,
+    "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal\n6,4,650000,1634900,-984900,1,2,1009850",
+  );
+  assert.equal(
+    settlementSummaryJson,
+    '{"tasks":6,"paid":4,"quotedTotal":650000,"paidTotal":1634900,"gap":-984900,"mismatched":1,"unquotedPaid":2,"unquotedPaidTotal":1009850}',
+  );
+  // The round-trips agree with the library directly: parsing the
+  // export returns the recorded summary, and re-rendering it is
+  // byte-identical to the export.
+  assert.deepEqual(settlementSummaryCsvRoundTrip, settlementSummaryBefore);
+  assert.equal(
+    renderTaskSettlementsCsv(settlementSummaryCsvRoundTrip),
+    settlementSummaryCsv,
+  );
+  assert.equal(settlementSummaryCsvReRendered, settlementSummaryCsv);
+  assert.deepEqual(settlementSummaryJsonRoundTrip, settlementSummaryBefore);
+  assert.equal(
+    renderTaskSettlementsJson(settlementSummaryJsonRoundTrip),
+    settlementSummaryJson,
+  );
+  assert.equal(settlementSummaryJsonReRendered, settlementSummaryJson);
+  // The tampered header is rejected with the library's exact
+  // wording — re-derived here from the library, not just trusted
+  // from the demo's own error string.
+  assert.equal(
+    settlementSummaryRejectedCsvError,
+    'cannot parse task settlements CSV: header must be exactly "tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal"',
+  );
+  let tamperedError = "";
+  try {
+    parseTaskSettlementsCsv(settlementSummaryCsv.replace("tasks,", "task,"));
+  } catch (err) {
+    tamperedError = err instanceof Error ? err.message : String(err);
+  }
+  assert.equal(tamperedError, settlementSummaryRejectedCsvError);
+  // Order: the export branch follows the rendering branch and
+  // precedes the subscription branch.
+  const exportAt = text.indexOf(
+    "Settlement summary CSV/JSON export + import branch",
+  );
+  assert.ok(
+    exportAt >
+      text.indexOf(
+        "  rendered after (renderTaskSettlements, payout corrected):",
+      ),
+    "export branch must follow the rendering branch",
+  );
+  assert.ok(
+    text.indexOf(
+      "Dispatch subscription branch (sixth task, in-process fan-out):",
+    ) > exportAt,
+    "subscription branch must follow the export branch",
+  );
+  assert.match(text, /exported CSV \(renderTaskSettlementsCsv, as recorded\):/);
+  assert.match(text, /exported JSON \(renderTaskSettlementsJson, as recorded\):/);
 });
 
 
@@ -4917,7 +5019,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1091);
+  assert.equal(out.trimEnd().split("\n").length, 1101);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
