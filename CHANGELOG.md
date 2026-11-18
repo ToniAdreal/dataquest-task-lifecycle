@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `PayoutWebhookOutbox.stats()` benchmark row (2026-11-18, backlog
+  #1222): `npm run bench` now measures the read-only ledger counts
+  on a fixed 3-pair outbox (2 pending, 1 dead-lettered, 6 failed
+  attempts in total, one pair acknowledged and cleared so it counts
+  nowhere), so one measured op reads `stats()` and self-checks it
+  to { size: 3, pending: 2, deadLettered: 1, totalAttempts: 6 }.
+  Outside the timed loop, the pure-read shape is pinned
+  (pending/dead-letter lists byte-identical before and after
+  `stats()`, a mutated snapshot leaving a re-read unchanged, an
+  empty outbox reading all zeros) and the redrive step is pinned
+  (the dead-lettered pair back to pending, counts stepping to
+  { size: 3, pending: 3, deadLettered: 0, totalAttempts: 3 }, then
+  three fresh failures restoring the fixture). Measured at
+  ~3,947,218 ops/sec (0.25 µs/op) on Node v24.22.1, linux/x64.
+
 - `remainingResubmits` / `remainingDisputes` / `remainingVisits(state)`
   benchmark row (2026-11-17, backlog #1219): `npm run bench` now
   measures the read-before-dispatch cost of the three

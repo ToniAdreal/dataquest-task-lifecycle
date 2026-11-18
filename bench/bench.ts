@@ -1433,7 +1433,7 @@
  *      demo segment.
  *  68. payout webhook outbox — `PayoutWebhookOutbox` (the
  *      failure ledger a payout gateway keeps for its webhooks),
- *      eight rows over a fixed outbox (`maxAttempts: 3`, injected
+ *      nine rows over a fixed outbox (`maxAttempts: 3`, injected
  *      fixed clock — see the outbox fixture below): recording one
  *      failure per fresh `(endpoint, eventId)` pair (`recordAttempt`
  *      with the pinned 500 error), driving one pair through the
@@ -1443,6 +1443,10 @@
  *      acknowledging a pending pair clear (`acknowledge`),
  *      exporting that 1,000-pair ledger (`exportSnapshot`),
  *      restoring it from its JSON round-tripped form (`restore`),
+ *      reading the ledger counts without materializing the lists
+ *      (`stats()` over a fixed 3-pair ledger: 2 pending,
+ *      1 dead-lettered, 6 failed attempts in total — see the
+ *      outbox-stats fixture below),
  *      and redriving one dead-lettered pair back to pending at a
  *      fixed later clock and re-delivering its signed webhook
  *      through a fake fetch that answers 200 on the first attempt,
@@ -1458,7 +1462,8 @@
  *      state exactly where they are cheap to read (the ledger size
  *      after each fresh failure; the pending / dead-letter lists
  *      and their pinned attempts / error / timestamp on the
- *      boundary and list rows; the redriven shape and the delivered
+ *      boundary and list rows; the stats snapshot on the stats row;
+ *      the redriven shape and the delivered
  *      body and signature on the redrive row), while the full
  *      entry-for-entry comparison of the record ledger and the
  *      restored ledger runs once, outside the timed loop, in the
@@ -6856,6 +6861,183 @@ if (
   throw new Error(
     "benchmark fixture failed: outbox redrive redelivery signature does not verify",
   );
+}
+
+// Outbox stats fixture (backlog #1222): the read-only counts a
+// gateway polls to watch its failure ledger. One fixed outbox
+// (`maxAttempts: 3`, injected fixed clock — the clock never
+// advances, so every `lastAt` is OUTBOX_NOW_MS), three tracked
+// pairs: one pending pair failed once, one pending pair failed
+// twice (both on OUTBOX_ENDPOINT), and one dead-lettered pair
+// failed three times (on a second endpoint, so the counts span
+// endpoints the way a real gateway's ledger does). A fourth pair
+// failed once and was then acknowledged, so it is gone — the
+// fixture pins that a cleared pair counts nowhere. Hand-written
+// expectations — written out here from the composition above and
+// the `stats()` semantics the outbox tests pin, never derived by
+// calling the outbox itself:
+//   - size 3 (pending 2 + dead-lettered 1), totalAttempts 6
+//     (1 + 2 + 3 — the acknowledged pair contributes nothing).
+// `stats()` is a pure read, so the timed loop reuses this one
+// fixture — no rebuild. Mirrors the sibling escrow
+// `SettlementWebhookOutbox.stats` row (backlog #1221) row for row.
+const OUTBOX_STATS_ENDPOINT_2 =
+  "https://payouts.example.com/hooks/payout-2";
+const OUTBOX_STATS_EXPECTED = {
+  size: 3,
+  pending: 2,
+  deadLettered: 1,
+  totalAttempts: 6,
+};
+const outboxStats = new PayoutWebhookOutbox({
+  maxAttempts: OUTBOX_MAX_ATTEMPTS,
+  now: () => OUTBOX_NOW_MS,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_ENDPOINT,
+  eventId: "bench-outbox-stats-pending-1",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_ENDPOINT,
+  eventId: "bench-outbox-stats-pending-2",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_ENDPOINT,
+  eventId: "bench-outbox-stats-pending-2",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_STATS_ENDPOINT_2,
+  eventId: "bench-outbox-stats-dead-1",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_STATS_ENDPOINT_2,
+  eventId: "bench-outbox-stats-dead-1",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_STATS_ENDPOINT_2,
+  eventId: "bench-outbox-stats-dead-1",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.recordAttempt({
+  endpoint: OUTBOX_ENDPOINT,
+  eventId: "bench-outbox-stats-acked",
+  ok: false,
+  status: 500,
+  error: OUTBOX_ERROR,
+});
+outboxStats.acknowledge(OUTBOX_ENDPOINT, "bench-outbox-stats-acked");
+function checkOutboxStats(where: string): void {
+  const snapshot = outboxStats.stats();
+  if (
+    snapshot.size !== OUTBOX_STATS_EXPECTED.size ||
+    snapshot.pending !== OUTBOX_STATS_EXPECTED.pending ||
+    snapshot.deadLettered !== OUTBOX_STATS_EXPECTED.deadLettered ||
+    snapshot.totalAttempts !== OUTBOX_STATS_EXPECTED.totalAttempts ||
+    outboxStats.size !== OUTBOX_STATS_EXPECTED.size
+  ) {
+    throw new Error(`benchmark ${where} failed: PayoutWebhookOutbox stats`);
+  }
+}
+// Fixture validation (outside the timed loop): the full snapshot
+// matches the hand-written expectation above.
+checkOutboxStats("fixture");
+// Pure-read check (outside the timed loop): `stats()` neither
+// records nor drops anything — the pending / dead-letter lists
+// are byte-identical before and after a `stats()` call, and two
+// consecutive `stats()` calls agree.
+{
+  const beforePending = JSON.stringify(outboxStats.pending());
+  const beforeDead = JSON.stringify(outboxStats.deadLetter());
+  const first = outboxStats.stats();
+  const second = outboxStats.stats();
+  if (
+    JSON.stringify(outboxStats.pending()) !== beforePending ||
+    JSON.stringify(outboxStats.deadLetter()) !== beforeDead ||
+    JSON.stringify(first) !== JSON.stringify(second)
+  ) {
+    throw new Error(
+      "benchmark fixture failed: PayoutWebhookOutbox stats is not a pure read",
+    );
+  }
+}
+// Detached-copy check (outside the timed loop): mutating a
+// returned snapshot — rewriting every field — leaves a re-read
+// unchanged.
+{
+  const detached = outboxStats.stats();
+  detached.size = 999;
+  detached.pending = 999;
+  detached.deadLettered = 999;
+  detached.totalAttempts = 999;
+  checkOutboxStats("fixture");
+}
+// Empty-store check (outside the timed loop): an outbox that has
+// recorded nothing reports all-zero stats.
+{
+  const empty = new PayoutWebhookOutbox({
+    maxAttempts: OUTBOX_MAX_ATTEMPTS,
+    now: () => OUTBOX_NOW_MS,
+  });
+  const emptyStats = empty.stats();
+  if (
+    empty.size !== 0 ||
+    emptyStats.size !== 0 ||
+    emptyStats.pending !== 0 ||
+    emptyStats.deadLettered !== 0 ||
+    emptyStats.totalAttempts !== 0
+  ) {
+    throw new Error("benchmark fixture failed: empty outbox stats shape");
+  }
+}
+// Redrive step (outside the timed loop): redriving the
+// dead-lettered pair back to pending steps the counts to
+// { size: 3, pending: 3, deadLettered: 0, totalAttempts: 3 } —
+// the redriven pair's attempts reset to 0 — and three fresh
+// failures restore the fixture exactly.
+{
+  outboxStats.redrive(
+    OUTBOX_STATS_ENDPOINT_2,
+    "bench-outbox-stats-dead-1",
+    { now: OUTBOX_NOW_MS },
+  );
+  const redriven = outboxStats.stats();
+  if (
+    redriven.size !== 3 ||
+    redriven.pending !== 3 ||
+    redriven.deadLettered !== 0 ||
+    redriven.totalAttempts !== 3
+  ) {
+    throw new Error(
+      "benchmark fixture failed: PayoutWebhookOutbox stats after redrive",
+    );
+  }
+  for (let f = 0; f < OUTBOX_MAX_ATTEMPTS; f++) {
+    outboxStats.recordAttempt({
+      endpoint: OUTBOX_STATS_ENDPOINT_2,
+      eventId: "bench-outbox-stats-dead-1",
+      ok: false,
+      status: 500,
+      error: OUTBOX_ERROR,
+    });
+  }
+  checkOutboxStats("fixture");
 }
 
 // Retry fixture (backlog #1208): the opt-in retry loop over the
@@ -13108,6 +13290,12 @@ async function benchRetryPayoutWebhookOutbox(): Promise<number> {
   }, ITERATIONS);
 }
 
+function benchPayoutWebhookOutboxStats(): number {
+  return measure(() => {
+    checkOutboxStats("self-check");
+  }, ITERATIONS);
+}
+
 function benchTruncateOutboxError(): number {
   return measure(() => {
     // Pure function over fixed strings: no rebuild, the same
@@ -15059,6 +15247,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "PayoutWebhookOutbox restore (1,000-pair snapshot, JSON round-trip)", ops: benchPayoutWebhookOutboxRestore() },
   { path: "PayoutWebhookOutbox redrive + redelivery (dead-lettered pair, fake fetch 200 first attempt)", ops: await benchPayoutWebhookOutboxRedrive() },
   { path: "retryPayoutWebhookOutbox (3 pending pairs, 500→200, maxRounds 2)", ops: await benchRetryPayoutWebhookOutbox() },
+  { path: "PayoutWebhookOutbox stats (3-pair ledger: 2 pending, 1 dead-lettered)", ops: benchPayoutWebhookOutboxStats() },
   { path: "truncateOutboxError (short / at-cap / 10 KB error)", ops: benchTruncateOutboxError() },
   { path: "PayoutEventDedupe exportSignedSnapshot (1,000-entry snapshot)", ops: benchPayoutEventDedupeExportSignedSnapshot() },
   { path: "PayoutEventDedupe restoreSignedSnapshot (1,000-entry snapshot, JSON round-trip)", ops: benchPayoutEventDedupeRestoreSignedSnapshot() },
