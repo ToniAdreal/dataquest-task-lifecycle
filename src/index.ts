@@ -9,6 +9,7 @@ export {
   fromMinorUnits,
   GENESIS_PREV_HASH,
   isOverdue,
+  isSettlementComplete,
   isTerminal,
   MAX_ACTOR_LENGTH,
   MAX_IDEMPOTENCY_KEY_LENGTH,

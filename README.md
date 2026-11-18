@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1653 tests, all local
+npm test   # 1663 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1119,6 +1119,14 @@ amount cannot be checked against a ledger by amount, so it stays
 unreconciled too — an amount of 0 still counts as recorded (a
 zero-value settlement is still a settlement, the same rule the
 `requirePayoutAmount` gate uses); only a missing amount is flagged.
+
+The screen itself is a named export, `isSettlementComplete(task)`: it
+returns true exactly when a task is `PAID` and its last
+`PAYOUT_COMPLETE` entry carries both a `payoutRef` and a
+`payoutAmount`, false otherwise — including a `PAID` task with no
+completion entry at all. Both `unreconciledPayouts()` and
+`reconcilePayouts()` call it, so the two helpers can never disagree
+about what counts as settled.
 
 The same population can be aged instead of just listed.
 `payoutAging()` buckets the unreconciled tasks by whole days since
@@ -2677,7 +2685,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1653 tests covering the happy path, reject→resubmit
+`npm test` runs 1663 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

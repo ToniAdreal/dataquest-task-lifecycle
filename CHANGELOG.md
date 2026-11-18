@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Named settlement-complete predicate `isSettlementComplete(task)`
+  (2026-11-18, backlog #1243): a task is settlement-complete exactly
+  when it is `PAID` and its last `PAYOUT_COMPLETE` entry carries both
+  a `payoutRef` and a `payoutAmount` (an amount of 0 still counts as
+  recorded; a `PAID` task with no completion entry at all is not
+  complete, matching the `unreconciledPayouts` screen). The two
+  hand-written inline predicates in `unreconciledPayouts()` and
+  `reconcilePayouts()` now call it, so the settlement screen has a
+  single source of truth and the two helpers cannot drift apart;
+  behaviour is unchanged. Exported from the package entry point, the
+  README reconciliation section documents it, and the test count
+  rises by ten (1653 to 1663 tests).
+
 - Settlement summary CSV/JSON export + import demo segment
   (2026-11-18, backlog #1237): `npm run demo` now exports the
   recorded settlement summary with `renderTaskSettlementsCsv` /

@@ -1357,6 +1357,45 @@ export function actOnStaleTasks(
 }
 
 /**
+ * Settlement predicate: whether a task's settlement is complete — the
+ * task is `PAID` and its last `PAYOUT_COMPLETE` entry carries both a
+ * `payoutRef` and a `payoutAmount`.
+ *
+ * This is the single source of truth for the settlement-complete
+ * screen that {@link unreconciledPayouts} and {@link reconcilePayouts}
+ * used to hand-write inline in two places: the same three conditions,
+ * spelled twice, with nothing stopping them drifting apart. Both
+ * helpers now call this function, so the screen has exactly one
+ * definition.
+ *
+ * The check reads the last `PAYOUT_COMPLETE` entry (the one that
+ * moved the task to `PAID`), not `REQUEST_PAYOUT`: a reference on the
+ * request but none on the completion still means the settlement
+ * itself is unevidenced. An amount of 0 still counts as recorded (a
+ * zero-value settlement is still a settlement, the same rule the
+ * `requirePayoutAmount` gate uses); only `undefined` is missing. A
+ * `PAID` task with no `PAYOUT_COMPLETE` entry at all is not complete
+ * — it cannot arise through the validated construction paths
+ * (dispatch/fromJSON/fromHistory all guarantee the entry), but if it
+ * ever did, missing completion evidence is exactly what
+ * {@link unreconciledPayouts} flags, not silently passes, so the
+ * predicate aligns with that screen rather than with the state alone.
+ *
+ * Pure: reads the task, never mutates or dispatches.
+ */
+export function isSettlementComplete(task: TaskLifecycle): boolean {
+  if (task.state !== "PAID") return false;
+  let complete: TaskHistoryEntry | undefined;
+  for (const entry of task.history) {
+    if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+  }
+  if (complete === undefined) return false;
+  return (
+    complete.payoutRef !== undefined && complete.payoutAmount !== undefined
+  );
+}
+
+/**
  * Reconciliation helper: from a batch of tasks, return the ones whose
  * settlement lacks external payment evidence — currently PAID, but the
  * `PAYOUT_COMPLETE` audit entry carries no `payoutRef` or no
@@ -1388,22 +1427,15 @@ export function actOnStaleTasks(
  * what reconciliation should flag, not silently pass.
  *
  * Pure: reads the tasks, never mutates or dispatches. An empty input
- * returns an empty array.
+ * returns an empty array. The screen itself is {@link isSettlementComplete}:
+ * this helper returns the `PAID` tasks for which that predicate is false.
  */
 export function unreconciledPayouts(
   tasks: readonly TaskLifecycle[],
 ): TaskLifecycle[] {
-  return tasks.filter((task) => {
-    if (task.state !== "PAID") return false;
-    let complete: TaskHistoryEntry | undefined;
-    for (const entry of task.history) {
-      if (entry.event === "PAYOUT_COMPLETE") complete = entry;
-    }
-    // Defensive: unreachable through dispatch/fromJSON/fromHistory, but
-    // a PAID task with no completion entry is reconciliation-worthy too.
-    if (complete === undefined) return true;
-    return complete.payoutRef === undefined || complete.payoutAmount === undefined;
-  });
+  return tasks.filter(
+    (task) => task.state === "PAID" && !isSettlementComplete(task),
+  );
 }
 
 /** One unreconciled payout together with its age, as returned by {@link payoutAging}. */
@@ -2279,22 +2311,22 @@ export function reconcilePayouts(
   const groupsByRef = new Map<string, PairingCandidate[]>();
   for (const task of tasks) {
     if (task.state !== "PAID") continue;
+    // The settlement-complete screen lives in isSettlementComplete;
+    // this loop re-reads the completion entry only for the
+    // candidate's reference and amount, which the predicate has
+    // already established are both present.
+    if (!isSettlementComplete(task)) {
+      result.unreconciled.push(task);
+      continue;
+    }
     let complete: TaskHistoryEntry | undefined;
     for (const entry of task.history) {
       if (entry.event === "PAYOUT_COMPLETE") complete = entry;
     }
-    if (
-      complete === undefined ||
-      complete.payoutRef === undefined ||
-      complete.payoutAmount === undefined
-    ) {
-      result.unreconciled.push(task);
-      continue;
-    }
     const candidate: PairingCandidate = {
       task,
-      ref: complete.payoutRef,
-      amount: complete.payoutAmount,
+      ref: complete!.payoutRef!,
+      amount: complete!.payoutAmount!,
     };
     candidates.push(candidate);
     seenRefs.add(candidate.ref);
