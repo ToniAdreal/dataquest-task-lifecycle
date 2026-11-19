@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1664 tests, all local
+npm test   # 1672 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -680,14 +680,20 @@ The executor takes an optional third argument, `at` — a `Date` or a
 canonical ISO-8601 string — that pins the EXPIRE audit entry's
 timestamp: `expireOverdueTasks(tasks, now, at)`. A caller replaying a
 fixed screening instant gets deterministic watchdog entries instead of
-wall-clock stamps. Omitted, the dispatch stamps the wall clock, as
-before, so a caller that passed a past `now` for screening sees no
-silent change. An `at` earlier than a task's last history entry trips
-dispatch's non-decreasing-timestamp check and lands as a per-task
-`{ expired: false, error }` — the batch continues. An invalid `at`
+wall-clock stamps. Omitted, the pin stays the screening `now` (the
+#552 semantic, mirrored from escrow's `expireOverdueEscrows`): every
+EXPIRE entry in the batch carries the same timestamp as the screening
+decision, so two runs over the same batch at the same `now` produce
+byte-identical histories. An `at` earlier than a task's last history
+entry trips dispatch's non-decreasing-timestamp check and lands as a
+per-task `{ expired: false, error }` — the batch continues — and the
+same applies to an unpinned screening `now` that predates a task's
+last entry. An invalid `at`
 (a non-Date/non-string value, an invalid Date, a non-canonical
 string) throws `invalid at: …` before any task is screened or
-dispatched, so a bad pin can never half-stamp a batch.
+dispatched, so a bad pin can never half-stamp a batch. An invalid
+`now` screens nothing and never throws: the pin is only materialized
+when the batch is non-empty.
 
 For rehearsing a batch before expiring it for real, pass
 `{ dryRun: true }` as a fourth argument:
@@ -699,9 +705,10 @@ would have expired that task) and, when false, the same-wording
 `error` the live run would have reported (no `EXPIRE` edge, a
 backdated `at` pin, or a `rolePolicy` that does not admit `system`);
 `expired` is false throughout and `entry` is never present. The
-clock check reads the `at` pin when given; without a pin the live
-dispatch stamps the wall clock unchecked, so the prediction does the
-same. Illegal options throw
+clock check reads the resolved audit timestamp — the `at` pin when
+given, else the screening `now` — so the prediction and the live
+run agree even when the screening instant predates a task's last
+entry. Illegal options throw
 `invalid expireOverdueTasks options: …` fail-fast, before any
 screening.
 
@@ -2686,7 +2693,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1664 tests covering the happy path, reject→resubmit
+`npm test` runs 1672 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -6,7 +6,11 @@
  * screening `now` — a deterministic replay could not get a
  * deterministic watchdog entry out of the default actions. Both
  * executors now take an optional `at?: Date | string` that pins the
- * audit timestamp; omitted, the wall clock applies as before.
+ * audit timestamp. `actOnStaleTasks()` still falls back to the wall
+ * clock when `at` is omitted; `expireOverdueTasks()` instead pins
+ * the screening `now` when omitted (the #552 semantic, mirrored
+ * from escrow's `expireOverdueEscrows`, backlog #1252), so a fixed
+ * screening instant yields deterministic watchdog entries.
  */
 
 import { describe, it } from "node:test";
@@ -69,17 +73,18 @@ describe("expireOverdueTasks at", () => {
     assert.equal(t.history.at(-1)!.at, "2026-05-20T08:30:00.000Z");
   });
 
-  it("omitted at keeps the wall-clock stamp (no silent change)", () => {
-    const t = openTask("wall-clock", "2026-05-01T09:00:00.000Z");
+  it("omitted at pins the screening now (the #552 semantic, backlog #1252)", () => {
+    const t = openTask("pinned-now", "2026-05-01T09:00:00.000Z");
     t.setSlaDeadline(PAST);
 
     const results = expireOverdueTasks([t], NOW);
     assert.equal(results[0].expired, true);
     const last = t.history.at(-1)!;
-    // Canonical ISO, and a real wall-clock instant: after the fixed
-    // screening now, never the pinned value a caller would pass.
-    assert.equal(new Date(last.at).toISOString(), last.at);
-    assert.ok(Date.parse(last.at) >= NOW.getTime());
+    // The audit timestamp is the screening instant, verbatim —
+    // never the wall clock, and never the pinned value a caller
+    // would pass as an explicit `at`.
+    assert.equal(last.at, NOW.toISOString());
+    assert.equal(results[0].entry?.at, NOW.toISOString());
     assert.notEqual(last.at, "2026-05-15T12:00:00.000Z");
   });
 

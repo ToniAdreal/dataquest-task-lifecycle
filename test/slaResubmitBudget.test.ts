@@ -34,9 +34,27 @@ const TO_REJECTED: Array<
   "PUBLISH" | "ACCEPT" | "START_CAPTURE" | "SUBMIT" | "BEGIN_REVIEW" | "REJECT"
 > = ["PUBLISH", "ACCEPT", "START_CAPTURE", "SUBMIT", "BEGIN_REVIEW", "REJECT"];
 
+/** Fixed audit timestamps for driven chains: strictly increasing, all before NOW. */
+const DRIVE_AT = [
+  "2026-01-01T00:00:00.000Z", // PUBLISH
+  "2026-02-01T00:00:00.000Z", // ACCEPT
+  "2026-02-15T00:00:00.000Z", // START_CAPTURE
+  "2026-03-01T00:00:00.000Z", // SUBMIT
+  "2026-03-15T00:00:00.000Z", // BEGIN_REVIEW
+  "2026-04-01T00:00:00.000Z", // REJECT
+  "2026-05-01T00:00:00.000Z", // DISPUTE
+  "2026-06-01T00:00:00.000Z", // ARBITRATE_REJECT
+  "2026-07-01T00:00:00.000Z", // RESUBMIT
+  "2026-08-01T00:00:00.000Z", // SUBMIT (second round)
+  "2026-08-15T00:00:00.000Z", // BEGIN_REVIEW (second round)
+  "2026-09-01T00:00:00.000Z", // REJECT (second round)
+] as const;
+
 /** Drive a fresh task to REJECTED. */
 function toRejected(task: TaskLifecycle): void {
-  for (const event of TO_REJECTED) task.dispatch(event);
+  for (const [i, event] of TO_REJECTED.entries()) {
+    task.dispatch(event, { at: DRIVE_AT[i] });
+  }
 }
 
 /**
@@ -46,7 +64,7 @@ function toRejected(task: TaskLifecycle): void {
 function exhaustedInCapturing(id: string): TaskLifecycle {
   const task = new TaskLifecycle(id, { maxResubmits: 1 });
   toRejected(task);
-  task.dispatch("RESUBMIT"); // used 1 of 1 -> CAPTURING
+  task.dispatch("RESUBMIT", { at: DRIVE_AT[6] }); // used 1 of 1 -> CAPTURING
   assert.equal(task.state, "CAPTURING");
   return task;
 }
@@ -57,8 +75,10 @@ function exhaustedInCapturing(id: string): TaskLifecycle {
  */
 function exhaustedInRejected(id: string): TaskLifecycle {
   const task = exhaustedInCapturing(id);
-  for (const event of ["SUBMIT", "BEGIN_REVIEW", "REJECT"] as const) {
-    task.dispatch(event);
+  for (const [i, event] of (
+    ["SUBMIT", "BEGIN_REVIEW", "REJECT"] as const
+  ).entries()) {
+    task.dispatch(event, { at: DRIVE_AT[7 + i] });
   }
   assert.equal(task.state, "REJECTED");
   return task;

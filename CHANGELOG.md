@@ -1154,6 +1154,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `expireOverdueTasks()` pins the screening `now` as the EXPIRE
+  audit timestamp when no `at` is given (2026-11-19, backlog
+  #1252): the omitted-pin default was the wall clock, so the same
+  screening instant screened one batch at T and stamped it at
+  T+ε, breaking deterministic replay — the demo had to pass an
+  explicit `at` to work around it (#1248 noted the library default
+  was a separate item; this is that item). The pin is now the
+  screening `now` (the #552 semantic, mirrored from escrow's
+  `expireOverdueEscrows`): every EXPIRE entry in the batch carries
+  the same timestamp as the screening decision, an explicit `at`
+  still wins, and the dry-run prediction uses the same resolved
+  pin, so a rehearsal agrees with the live run about the clock
+  check too — a task whose last entry sits after the screening
+  `now` now fails per task instead of expiring with a
+  wall-clock stamp earlier than its own history. An invalid `now`
+  still screens nothing and never throws: the pin is only
+  materialized when the batch is non-empty (escrow resolves the
+  same expression unconditionally and does throw a bare
+  RangeError on an invalid `now`; this executor keeps the
+  documented intent instead of the bug). The watchdog tests'
+  fixtures now pin their dispatch timestamps before the fixed
+  screening instant, and the test count rises by eight (1664 to
+  1672 tests).
+
 - CLI demo output is byte-identical across runs (2026-11-19, backlog
   #1248): the main chain's 12 dispatches now carry fixed `at`
   literals (2026-03-09T09:00–09:55), the main payout webhook is built
@@ -1162,8 +1186,10 @@ change type; no entry describes a feature that is not in the history.
   `DEMO_WEBHOOK_EVENT_ID`), and the SLA batch-execution segment pins
   the fixed screening now as `expireOverdueTasks()`' `at` argument,
   so the DEMO-014/DEMO-015 EXPIRE entries no longer carry the
-  wall-clock stamp. (The library default without an `at` pin is
-  still the wall clock; changing that default is a separate item.)
+  wall-clock stamp. (The library default without an `at` pin was
+  still the wall clock at the time; backlog #1252 has since changed
+  that default to pin the screening `now`, so the demo's explicit
+  `at` is now redundant but harmless.)
   Two `npm run demo` runs now diff empty, the golden output carries
   the pinned event id, and the demo tests gain a full-output
   double-run byte-identical assertion plus pinned `at`/`eventId`

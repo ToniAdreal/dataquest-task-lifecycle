@@ -32,28 +32,34 @@ import type {
 const PAST = new Date("2026-01-01T00:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
 const NOW = new Date("2026-06-01T00:00:00.000Z");
+const PUBLISH_AT = "2026-01-01T00:00:00.000Z";
+const ACCEPT_AT = "2026-02-01T00:00:00.000Z";
+const CAPTURE_AT = "2026-02-15T00:00:00.000Z";
+const SUBMIT_AT = "2026-03-01T00:00:00.000Z";
+const REVIEW_AT = "2026-03-15T00:00:00.000Z";
+const ABANDON_AT = "2026-04-01T00:00:00.000Z";
 
 type Call = [TaskEvent, TaskState, TaskState, TaskHistoryEntry];
 
 function openTask(id: string): TaskLifecycle {
   const t = new TaskLifecycle(id);
-  t.dispatch("PUBLISH", { actor: "poster" });
+  t.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   return t; // OPEN — has an EXPIRE edge
 }
 
 function inReviewTask(id: string): TaskLifecycle {
   const t = openTask(id);
-  t.dispatch("ACCEPT", { actor: "contributor" });
-  t.dispatch("START_CAPTURE", { actor: "contributor" });
-  t.dispatch("SUBMIT", { actor: "contributor" });
-  t.dispatch("BEGIN_REVIEW", { actor: "reviewer" });
+  t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
+  t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
+  t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
+  t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
   return t; // IN_REVIEW — no EXPIRE edge
 }
 
 function abandonedTask(id: string): TaskLifecycle {
   const t = openTask(id);
-  t.dispatch("ACCEPT", { actor: "contributor" });
-  t.dispatch("ABANDON", { actor: "contributor" });
+  t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
+  t.dispatch("ABANDON", { actor: "contributor", at: ABANDON_AT });
   return t; // ABANDONED — terminal
 }
 

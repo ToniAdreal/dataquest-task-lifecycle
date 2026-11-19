@@ -15,21 +15,27 @@ import { TaskLifecycle, expireOverdueTasks } from "../src/index.js";
 const PAST = new Date("2026-01-01T00:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
 const NOW = new Date("2026-06-01T00:00:00.000Z");
+const PUBLISH_AT = "2026-01-01T00:00:00.000Z";
+const ACCEPT_AT = "2026-02-01T00:00:00.000Z";
+const CAPTURE_AT = "2026-02-15T00:00:00.000Z";
+const SUBMIT_AT = "2026-03-01T00:00:00.000Z";
+const REVIEW_AT = "2026-03-15T00:00:00.000Z";
+const ABANDON_AT = "2026-04-01T00:00:00.000Z";
 
 function openTask(id: string): TaskLifecycle {
   const t = new TaskLifecycle(id);
-  t.dispatch("PUBLISH", { actor: "poster" });
+  t.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   t.setSlaDeadline(PAST);
   return t; // OPEN, overdue — has an EXPIRE edge
 }
 
 function stuckTask(id: string): TaskLifecycle {
   const t = new TaskLifecycle(id);
-  t.dispatch("PUBLISH", { actor: "poster" });
-  t.dispatch("ACCEPT", { actor: "contributor" });
-  t.dispatch("START_CAPTURE", { actor: "contributor" });
-  t.dispatch("SUBMIT", { actor: "contributor" });
-  t.dispatch("BEGIN_REVIEW", { actor: "reviewer" });
+  t.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
+  t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
+  t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
+  t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
+  t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
   t.setSlaDeadline(PAST);
   return t; // IN_REVIEW, overdue — no EXPIRE edge
 }

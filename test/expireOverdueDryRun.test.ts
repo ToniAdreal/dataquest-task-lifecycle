@@ -15,20 +15,20 @@
  * live error byte for byte — a rehearsal that disagrees with the real
  * run about WHY a task would not expire is worse than no rehearsal.
  *
- * One deliberate difference from the escrow mirror: this executor
- * takes a separate `at` pin for the audit timestamp, while escrow pins
- * the screening `now` as its audit timestamp. The prediction therefore
- * checks the `at` pin when given — and skips the clock check entirely
- * when no pin is given, because dispatch stamps the wall clock
- * unchecked in that case (its non-decreasing-timestamp check only
- * covers an explicitly provided `at`). The screening `now` is never
- * consulted: it only selects the batch. The "audit timestamp, not
- * screening instant" test pins that: a backdated screening `now` with
- * a valid later `at` still predicts expiry, exactly as the live run
- * expires it — and the "no at pin, last entry in the future" test
- * pins the other side: with no pin, the live run expires the task
- * (stamping a wall-clock entry earlier than the last entry), so the
- * dry run must predict expiry too.
+ * One deliberate difference from the escrow mirror used to exist:
+ * this executor took a separate `at` pin for the audit timestamp,
+ * while escrow pins the screening `now` as its audit timestamp.
+ * Backlog #1252 closed that gap: without a pin the audit timestamp
+ * is now the screening `now` here too (the #552 semantic), so the
+ * prediction checks the resolved timestamp — pin or screening now —
+ * exactly as the live run does. The screening `now` is therefore
+ * consulted as the audit timestamp, never as a second screening
+ * instant: a backdated screening `now` with a valid later `at`
+ * still predicts expiry, exactly as the live run expires it — and
+ * the "no at pin, last entry in the future" test pins the other
+ * side: with no pin, the live run now fails the task (its last
+ * entry sits after the screening `now`), so the dry run must
+ * predict refusal with the live run's exact wording.
  */
 
 import { describe, it } from "node:test";
@@ -65,7 +65,7 @@ function openOverdueTask(
   opts?: TaskLifecycleOptions,
 ): TaskLifecycle {
   const task = new TaskLifecycle(id, opts);
-  task.dispatch("PUBLISH", { actor: "poster" });
+  task.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   task.setSlaDeadline(PAST);
   return task; // OPEN — has an EXPIRE edge
 }
@@ -313,17 +313,14 @@ describe("expireOverdueTasks dryRun", () => {
     assert.equal(stuck.history.length, beforeLen.get("stuck"));
     assert.equal(a.history[a.history.length - 1].event, "EXPIRE");
     assert.equal(a.history[a.history.length - 1].actor, "system");
-    // The live entry stamps the wall clock: canonical ISO, never
-    // earlier than the entry it follows.
+    // The live entry pins the screening now: canonical ISO, equal
+    // to NOW, never earlier than the entry it follows.
     for (const [id, task] of [
       ["a", a],
       ["b", b],
     ] as const) {
       const last = task.history[task.history.length - 1];
-      assert.match(
-        last.at,
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-      );
+      assert.equal(last.at, NOW.toISOString());
       assert.ok(Date.parse(last.at) >= Date.parse(beforeLastAt.get(id) ?? ""));
     }
   });
@@ -369,27 +366,31 @@ describe("expireOverdueTasks dryRun", () => {
     }
   });
 
-  it("no at pin, last entry in the future: the live run still expires, so the dry run predicts expiry", () => {
-    // dispatch's non-decreasing-timestamp check only covers an
-    // explicitly provided `at`: with no pin it stamps the wall clock
-    // unchecked, even when the last entry sits in the future — so the
-    // live run expires this task (leaving a wall-clock entry earlier
-    // than the entry it follows), and the dry run must agree.
-    // Tightening dispatch's wall-clock path is out of scope here; the
-    // rehearsal's job is to match the live run, not to second-guess it.
+  it("no at pin, last entry in the future: the live run fails the task, so the dry run predicts refusal", () => {
+    // The audit timestamp is the screening `now` when no pin is
+    // given (the #552 semantic, backlog #1252): a task whose last
+    // entry sits after that instant trips dispatch's
+    // non-decreasing-timestamp check, so the live run fails it
+    // per task — and the dry run must predict exactly that failure,
+    // with the live run's wording. The rehearsal's job is to match
+    // the live run, not to second-guess it.
     const build = () => futureEntryTask("future-entry");
     const [dry] = expireOverdueTasks([build()], NOW, undefined, {
       dryRun: true,
     });
-    assert.equal(dry.wouldExpire, true);
-    assert.equal(dry.error, undefined);
+    assert.equal(dry.wouldExpire, false);
+    assert.equal(dry.expired, false);
+    assert.equal("entry" in dry, false);
+    assert.equal(dry.error, liveError(build, NOW));
+    assert.match(
+      dry.error ?? "",
+      /invalid dispatch options: at 2026-06-01T00:00:00\.000Z is earlier than the previous entry's at 2027-01-01T00:00:00\.000Z/,
+    );
     const twin = build();
     const [live] = expireOverdueTasks([twin], NOW);
-    assert.equal(live.expired, true);
-    assert.equal(live.entry?.event, "EXPIRE");
-    assert.ok(
-      Date.parse(live.entry?.at ?? "") <
-        Date.parse("2027-01-01T00:00:00.000Z"),
-    );
+    assert.equal(live.expired, false);
+    assert.equal(live.error, dry.error);
+    assert.ok(!("entry" in live), "failed outcome must not carry an entry");
+    assert.equal(twin.state, "OPEN");
   });
 });

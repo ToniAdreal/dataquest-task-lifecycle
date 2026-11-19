@@ -22,13 +22,14 @@ import type { ExpireOverdueResult, TaskLifecycleOptions } from "../src/index.js"
 
 const PAST = new Date("2026-01-01T00:00:00.000Z");
 const NOW = new Date("2026-06-01T00:00:00.000Z");
+const PUBLISH_AT = "2026-01-01T00:00:00.000Z";
 
 function openOverdueTask(
   id: string,
   opts?: TaskLifecycleOptions,
 ): TaskLifecycle {
   const task = new TaskLifecycle(id, opts);
-  task.dispatch("PUBLISH", { actor: "poster" });
+  task.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   task.setSlaDeadline(PAST);
   return task; // OPEN — has an EXPIRE edge, past its SLA deadline
 }

@@ -39,6 +39,7 @@ const SECRET = "test-payout-webhook-expire-overdue-secret";
 const PAST = new Date("2026-01-01T00:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
 const NOW = new Date("2026-06-01T00:00:00.000Z");
+const PUBLISH_AT = "2026-01-01T00:00:00.000Z";
 
 /** Drive a task from DRAFT all the way to PAID. */
 function toPaid(id: string): TaskLifecycle {
@@ -57,7 +58,7 @@ function toPaid(id: string): TaskLifecycle {
 
 function openTask(id: string): TaskLifecycle {
   const t = new TaskLifecycle(id);
-  t.dispatch("PUBLISH", { actor: "poster" });
+  t.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   assert.equal(t.state, "OPEN");
   return t;
 }

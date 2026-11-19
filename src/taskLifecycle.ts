@@ -851,8 +851,9 @@ export interface ExpireOverdueResult {
  * non-string/non-Date value, an invalid Date, a non-canonical
  * string — throws `invalid at: …` before any task is touched, so a
  * bad pin can never half-stamp a batch. `undefined` means "no pin":
- * the executor dispatches with no `at` and the audit entry carries
- * the wall clock, exactly as before.
+ * the executor falls back to the screening `now` (the #552 semantic,
+ * mirrored from escrow's `expireOverdueEscrows`), never to the wall
+ * clock — see {@link expireOverdueTasks}.
  */
 function resolveWatchdogAt(at: Date | string | undefined): string | undefined {
   if (at === undefined) return undefined;
@@ -895,11 +896,12 @@ export interface ExpireOverdueTasksOptions {
  *
  * (1) when the caller pinned `at`, the pin must not move the audit
  * clock backwards (same check dispatch runs first, same wording);
- * without a pin dispatch stamps the wall clock UNCHECKED — its
- * non-decreasing-timestamp check only covers an explicitly provided
- * `at` — so the prediction likewise skips the clock check and a
- * task whose last entry sits in the future still predicts expiry;
- * (2) edge legality, read off the transition table via
+ * without an explicit pin the audit timestamp is the screening
+ * `now` (the #552 semantic, mirrored from escrow), so the
+ * prediction checks that instant against the last entry exactly
+ * as the live run does — a task whose last entry sits after the
+ * screening `now` predicts refusal, and the live run fails the
+ * same way; (2) edge legality, read off the transition table via
  * `transition()` (its throw carries the exact message the live run
  * would report); (3) RBAC, read off the task's snapshot policy —
  * the live run dispatches as the `system` actor, so a policy that
@@ -908,21 +910,23 @@ export interface ExpireOverdueTasksOptions {
  * `EXPIRE` carries no amount, so the money/cap checks never apply
  * to it.
  *
- * `auditAt` is the `at` pin when the caller passed one, else
- * `undefined` (no clock check — see (1)). The screening `now` is
- * deliberately NOT consulted here — it only selects the batch, it
- * never enters the audit trail — so a dry run can never disagree
- * with the live run about the same call: a backdated screening
- * `now` with a valid `at` pin still predicts expiry, exactly as the
- * live run would expire it.
+ * `auditAt` is the resolved audit timestamp — the `at` pin when
+ * the caller passed one, else the screening `now` (the #552
+ * semantic). The screening `now` is therefore consulted here only
+ * as the audit timestamp, never as a second screening instant: a
+ * backdated screening `now` with a valid `at` pin still predicts
+ * expiry, exactly as the live run would expire it.
  */
 function predictExpireOverdueTask(
   task: TaskLifecycle,
   auditAt: string | undefined,
 ): ExpireOverdueResult {
-  // (1) Backward clock, only when the caller pinned `at`: dispatch
-  // validates an explicitly provided `at` against the last history
-  // entry, and stamps the wall clock unchecked when none is given.
+  // (1) Backward clock: dispatch validates the resolved audit
+  // timestamp against the last history entry — the explicit `at`
+  // pin when given, else the screening `now` (the #552 semantic).
+  // `auditAt` is undefined only for an empty batch, where this
+  // function is never called; the guard stays so the check is
+  // total on its own terms.
   const history = task.history;
   const last = history[history.length - 1];
   if (
@@ -991,15 +995,23 @@ function predictExpireOverdueTask(
  * The optional `at` pins the EXPIRE audit entry's timestamp — pass a
  * `Date` (normalized with `toISOString()`) or a canonical ISO-8601
  * string, and deterministic replays get deterministic watchdog
- * entries instead of wall-clock stamps. Omitted, the dispatch stamps
- * the wall clock, as before: a caller that passed a past `now` for
- * screening sees no silent change. An `at` earlier than a task's last
+ * entries instead of wall-clock stamps. Omitted, the pin stays the
+ * screening `now` (the #552 semantic, mirrored from escrow's
+ * `expireOverdueEscrows`): every EXPIRE entry in the batch carries
+ * the same timestamp as the screening decision, so a fixed `now`
+ * yields identical histories across runs and replays — a caller
+ * replaying a past `now` now gets deterministic entries where it
+ * used to get wall-clock stamps. An `at` earlier than a task's last
  * history entry trips dispatch's non-decreasing-timestamp check and
  * lands as a per-task `{ expired: false, error }` — the batch
- * continues, same isolation as an illegal transition. An invalid
- * `at` (a non-Date/non-string value, an invalid Date, a
- * non-canonical string) throws `invalid at: …` before any task is
- * screened or dispatched, so a bad pin can never half-stamp a batch.
+ * continues, same isolation as an illegal transition — and the same
+ * applies to an unpinned screening `now` that predates a task's
+ * last entry. An invalid `at` (a non-Date/non-string value, an
+ * invalid Date, a non-canonical string) throws `invalid at: …`
+ * before any task is screened or dispatched, so a bad pin can
+ * never half-stamp a batch. An invalid `now` screens nothing (the
+ * overdue comparison is false for a NaN instant) and never throws:
+ * the pin is only materialized when the batch is non-empty.
  *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
@@ -1019,13 +1031,11 @@ function predictExpireOverdueTask(
  * live dispatch's checks off the transition table and the task's own
  * history and snapshot policy — it never dispatches, so a dry run
  * leaves no residue and the same batch can immediately be expired
- * for real. Note the clock check reads the `at` pin when given;
- * without a pin, dispatch stamps the wall clock without a
- * backward-clock check (it only validates an explicitly provided
- * `at`), so the prediction does the same — unlike the sibling
- * escrow executor, which pins `now` as the audit timestamp, this
- * executor's `now` only screens. Illegal `opts` throw fail-fast,
- * before any screening.
+ * for real. Note the clock check reads the resolved audit
+ * timestamp — the `at` pin when given, else the screening `now` —
+ * so the prediction and the live run agree even when the screening
+ * instant predates a task's last entry. Illegal `opts` throw
+ * fail-fast, before any screening.
  */
 export function expireOverdueTasks(
   tasks: readonly TaskLifecycle[],
@@ -1049,12 +1059,22 @@ export function expireOverdueTasks(
   }
   // Fail fast on a bad `at` before screening or dispatching anything:
   // a malformed pin must never half-stamp a batch.
-  const atIso = resolveWatchdogAt(at);
+  const atOpt = resolveWatchdogAt(at);
   const screened = expiredTasks(tasks, now);
+  // Omitted, the pin stays the screening `now` (the #552 semantic,
+  // mirrored from escrow's expireOverdueEscrows). Resolved after
+  // screening: an invalid `now` screens nothing, so the pin is only
+  // materialized when the batch is non-empty — and a non-empty batch
+  // proves `now` is a valid instant — so this never throws a bare
+  // RangeError for it. (Escrow resolves the same expression
+  // unconditionally and does throw RangeError on an invalid `now`;
+  // this executor keeps the documented intent instead of the bug.)
+  const atIso =
+    atOpt ?? (screened.length === 0 ? undefined : now.toISOString());
   if (opts?.dryRun === true) {
-    // Predict against the `at` pin when given; without a pin the
-    // live dispatch stamps the wall clock unchecked, so the
-    // prediction receives no audit timestamp to check.
+    // Predict against the resolved audit timestamp — the `at` pin
+    // when given, else the screening `now` — so the rehearsal and
+    // the live run agree about the clock check too.
     return screened.map((task) => predictExpireOverdueTask(task, atIso));
   }
   return screened.map((task) => {
@@ -1063,7 +1083,8 @@ export function expireOverdueTasks(
       // action: watchdog-driven expiry must stay distinguishable from a
       // human-driven EXPIRE dispatch in the append-only audit trail.
       // `at` pins the audit timestamp (deterministic replay); omitted,
-      // the dispatch stamps the wall clock as before.
+      // the pin stays the screening `now`, so every entry in the batch
+      // carries the same timestamp as the screening decision.
       task.dispatch("EXPIRE", {
         actor: "system",
         ...(atIso !== undefined ? { at: atIso } : {}),
