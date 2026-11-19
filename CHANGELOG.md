@@ -7,7 +7,7 @@ and the version below is the version declared in `package.json`. Every entry
 summarizes one or more commits in this repository's `git log`, grouped by
 change type; no entry describes a feature that is not in the history.
 
-## [0.2.0] - 2026-11-18
+## [Unreleased]
 
 ### Added
 
@@ -42,6 +42,108 @@ change type; no entry describes a feature that is not in the history.
   behaviour is unchanged. Exported from the package entry point, the
   README reconciliation section documents it, and the test count
   rises by ten (1653 to 1663 tests).
+
+### Fixed
+
+- `payoutMismatch()` compares in integer minor units (2026-11-19,
+  backlog #1263): legacy sub-cent pairs (quoted 100.005 / paid
+  100.004) used to report a delta-0 mismatch and broke the
+  `summarizeTaskSettlements` gap identity; equality and delta now
+  run through `toMinorUnits`, so same-cent pairs are no mismatch
+  and a one-cent difference reports an exact +/-0.01 delta. The
+  test count rises by eleven (1715 to 1726 tests).
+
+- `reconcilePayouts()` rejects a ledger row whose `payoutAmount`
+  carries sub-cent precision (2026-11-19, backlog #1260): the
+  ledger side was only checked for a non-negative finite number,
+  while `dispatch()` gates task-side amounts to integer minor
+  units (backlog #558) — so the two pairing paths disagreed on
+  the same row. A shared-ref ledger row of 199.996 was rounded by
+  `toMinorUnits` to 20000 cents and matched a two-task 200.00
+  batch total, while the single-task path compared raw floats
+  and called the same row a mismatch. Ledger amounts now pass
+  the same round-trip gate (`toMinorUnits(x) / 100 !== x`
+  throws `invalid reconcilePayouts: ledger payoutAmount must be
+  a minor-unit amount (at most 2 decimal places)`), checked
+  before the duplicate-ref check, and the single-task
+  comparison now runs in integer minor units like the shared-ref
+  path. The test count rises by ten (1705 to 1715 tests).
+
+- `dispatch()` rejects unknown `DispatchOptions` keys fail-closed
+  (2026-11-19, backlog #1255): an unknown opts key throws
+  `invalid dispatch options: unknown option "<key>"` before any
+  field is read, so a typo'd `payoutref` can no longer silently
+  drop the settlement-reconciliation anchor and a typo'd
+  `quotedamount` can no longer silently drop the quote the payout
+  is reconciled against. The scan runs after the `expectedSeq`
+  guard (which stays first of all) and the opts-must-be-object
+  check, before actor shape validation and the idempotency dedupe;
+  a stale `expectedSeq` still reports its conflict first. The
+  test count rises by nine (1680 to 1689 tests).
+
+- `reconcilePayouts()` rejects duplicate task ids before pairing
+  (2026-11-19, backlog #1253): a task id appearing twice in the
+  batch throws (`duplicate task`), whether it is the same object
+  passed twice or two objects sharing one id — counting one task
+  twice would double the batch sum, so the batch is rejected
+  before any pairing. The test count rises by eight (1672 to
+  1680 tests).
+
+- `expireOverdueTasks()` pins the screening `now` as the EXPIRE
+  audit timestamp when no `at` is given (2026-11-19, backlog
+  #1252): the omitted-pin default was the wall clock, so the same
+  screening instant screened one batch at T and stamped it at
+  T+ε, breaking deterministic replay — the demo had to pass an
+  explicit `at` to work around it (#1248 noted the library default
+  was a separate item; this is that item). The pin is now the
+  screening `now` (the #552 semantic, mirrored from escrow's
+  `expireOverdueEscrows`): every EXPIRE entry in the batch carries
+  the same timestamp as the screening decision, an explicit `at`
+  still wins, and the dry-run prediction uses the same resolved
+  pin, so a rehearsal agrees with the live run about the clock
+  check too — a task whose last entry sits after the screening
+  `now` now fails per task instead of expiring with a
+  wall-clock stamp earlier than its own history. An invalid `now`
+  still screens nothing and never throws: the pin is only
+  materialized when the batch is non-empty (escrow resolves the
+  same expression unconditionally and does throw a bare
+  RangeError on an invalid `now`; this executor keeps the
+  documented intent instead of the bug). The watchdog tests'
+  fixtures now pin their dispatch timestamps before the fixed
+  screening instant, and the test count rises by eight (1664 to
+  1672 tests).
+
+- CLI demo output is byte-identical across runs (2026-11-19, backlog
+  #1248): the main chain's 12 dispatches now carry fixed `at`
+  literals (2026-03-09T09:00–09:55), the main payout webhook is built
+  with pinned `now` (2026-03-09T10:00:00.000Z) and `eventId`
+  (`evt_demo_main_webhook_001`, exported as `DEMO_WEBHOOK_NOW` /
+  `DEMO_WEBHOOK_EVENT_ID`), and the SLA batch-execution segment pins
+  the fixed screening now as `expireOverdueTasks()`' `at` argument,
+  so the DEMO-014/DEMO-015 EXPIRE entries no longer carry the
+  wall-clock stamp. (The library default without an `at` pin was
+  still the wall clock at the time; backlog #1252 has since changed
+  that default to pin the screening `now`, so the demo's explicit
+  `at` is now redundant but harmless.)
+  Two `npm run demo` runs now diff empty, the golden output carries
+  the pinned event id, and the demo tests gain a full-output
+  double-run byte-identical assertion plus pinned `at`/`eventId`
+  checks (test count 1663 to 1664).
+
+### Tests
+
+- `toMinorUnits` / `fromMinorUnits` round-trip property/fuzz tests
+  (2026-11-18, backlog #1239): seeded corpora (mulberry32, seed
+  20261118) — 582 random amounts round-trip within half a cent,
+  exact for 2-decimal amounts; 210 fractional minor units rejected;
+  219 overflow amounts rejected; same-seed determinism. Mutation
+  check: `Math.round` -> `Math.floor` turns the round-trip test
+  red (1 fail / 3 pass), reverted. The test count rises by four
+  (1649 to 1653 tests).
+
+## [0.2.0] - 2026-11-18
+
+### Added
 
 - Settlement summary CSV/JSON export + import demo segment
   (2026-11-18, backlog #1237): `npm run demo` now exports the
@@ -1172,63 +1274,6 @@ change type; no entry describes a feature that is not in the history.
   type-level breaking change; there is no runtime behavior change.
 
 ### Fixed
-
-- `reconcilePayouts()` rejects a ledger row whose `payoutAmount`
-  carries sub-cent precision (2026-11-19, backlog #1260): the
-  ledger side was only checked for a non-negative finite number,
-  while `dispatch()` gates task-side amounts to integer minor
-  units (backlog #558) — so the two pairing paths disagreed on
-  the same row. A shared-ref ledger row of 199.996 was rounded by
-  `toMinorUnits` to 20000 cents and matched a two-task 200.00
-  batch total, while the single-task path compared raw floats
-  and called the same row a mismatch. Ledger amounts now pass
-  the same round-trip gate (`toMinorUnits(x) / 100 !== x`
-  throws `invalid reconcilePayouts: ledger payoutAmount must be
-  a minor-unit amount (at most 2 decimal places)`), checked
-  before the duplicate-ref check, and the single-task
-  comparison now runs in integer minor units like the shared-ref
-  path. The test count rises by ten (1705 to 1715 tests).
-
-- `expireOverdueTasks()` pins the screening `now` as the EXPIRE
-  audit timestamp when no `at` is given (2026-11-19, backlog
-  #1252): the omitted-pin default was the wall clock, so the same
-  screening instant screened one batch at T and stamped it at
-  T+ε, breaking deterministic replay — the demo had to pass an
-  explicit `at` to work around it (#1248 noted the library default
-  was a separate item; this is that item). The pin is now the
-  screening `now` (the #552 semantic, mirrored from escrow's
-  `expireOverdueEscrows`): every EXPIRE entry in the batch carries
-  the same timestamp as the screening decision, an explicit `at`
-  still wins, and the dry-run prediction uses the same resolved
-  pin, so a rehearsal agrees with the live run about the clock
-  check too — a task whose last entry sits after the screening
-  `now` now fails per task instead of expiring with a
-  wall-clock stamp earlier than its own history. An invalid `now`
-  still screens nothing and never throws: the pin is only
-  materialized when the batch is non-empty (escrow resolves the
-  same expression unconditionally and does throw a bare
-  RangeError on an invalid `now`; this executor keeps the
-  documented intent instead of the bug). The watchdog tests'
-  fixtures now pin their dispatch timestamps before the fixed
-  screening instant, and the test count rises by eight (1664 to
-  1672 tests).
-
-- CLI demo output is byte-identical across runs (2026-11-19, backlog
-  #1248): the main chain's 12 dispatches now carry fixed `at`
-  literals (2026-03-09T09:00–09:55), the main payout webhook is built
-  with pinned `now` (2026-03-09T10:00:00.000Z) and `eventId`
-  (`evt_demo_main_webhook_001`, exported as `DEMO_WEBHOOK_NOW` /
-  `DEMO_WEBHOOK_EVENT_ID`), and the SLA batch-execution segment pins
-  the fixed screening now as `expireOverdueTasks()`' `at` argument,
-  so the DEMO-014/DEMO-015 EXPIRE entries no longer carry the
-  wall-clock stamp. (The library default without an `at` pin was
-  still the wall clock at the time; backlog #1252 has since changed
-  that default to pin the screening `now`, so the demo's explicit
-  `at` is now redundant but harmless.)
-  Two `npm run demo` runs now diff empty, the golden output carries
-  the pinned event id, and the demo tests gain a full-output
-  double-run byte-identical assertion plus pinned `at`/`eventId`
-  checks (test count 1663 to 1664).
 
 - `payoutAging` bench fixture went stale at backlog #1046
   (2026-11-11): the fixture's supposedly reconciled task carried a
