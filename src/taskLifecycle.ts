@@ -2739,6 +2739,31 @@ const TASK_OPTION_FIELDS = new Set([
   "slaDeadlines",
 ]);
 
+/**
+ * Whitelist of `DispatchOptions` field names, enforced by
+ * {@link TaskLifecycle.dispatch} (backlog #1255, the paired counterpart
+ * of escrow-state-machine-ts's `DISPATCH_OPTION_FIELDS`, backlog #1254).
+ * A field outside this set is rejected, never silently dropped: a
+ * typo'd `payoutRef` (e.g. `payoutref`) would otherwise parse as "no
+ * reference" and quietly drop the settlement-reconciliation anchor, and
+ * a typo'd `quotedAmount` would drop the quote the payout is reconciled
+ * against — the same silent-config-loss class the constructor-side
+ * `TASK_OPTION_FIELDS` guard already closes, moved from construction
+ * time to every dispatch. The set must stay in lockstep with the
+ * `DispatchOptions` interface; adding a field there without adding it
+ * here makes the new option unusable.
+ */
+const DISPATCH_OPTION_FIELDS = new Set([
+  "actor",
+  "note",
+  "at",
+  "payoutRef",
+  "payoutAmount",
+  "quotedAmount",
+  "idempotencyKey",
+  "expectedSeq",
+]);
+
 function assertRequirePayoutRef(value: unknown, tag: string): boolean {
   if (value === undefined) return false;
   if (typeof value !== "boolean") {
@@ -3019,6 +3044,13 @@ function assertRolePolicy(
  * conditional update keyed on a version column). The sibling
  * escrow-state-machine-ts repo carries the paired guard with identical
  * semantics.
+ *
+ * Unknown keys fail closed: dispatch throws
+ * `invalid dispatch options: unknown option "<key>"` before any field
+ * is read (see `DISPATCH_OPTION_FIELDS` in `src/taskLifecycle.ts`), so
+ * a typo'd key can never silently drop a guard it was meant to set —
+ * a typo'd `payoutRef` would otherwise drop the settlement anchor, a
+ * typo'd `idempotencyKey` the exactly-once dedupe.
  */
 export interface DispatchOptions {
   actor?: string;
@@ -4848,7 +4880,12 @@ export class TaskLifecycle {
    * the budgets — and a conflict changes nothing (no key consumed, no
    * listener notified), so a caller that re-reads the task can retry with
    * the fresh seq. A non-integer or negative `expectedSeq` throws
-   * `invalid dispatch options: …` instead. This is a single-process
+   * `invalid dispatch options: …` instead. Right after the guard, inside
+   * the option validation, the unknown-option scan runs (see
+   * `DISPATCH_OPTION_FIELDS`): an unknown `opts` key throws
+   * `invalid dispatch options: unknown option "<key>"` before any field
+   * is read — a stale `expectedSeq` still reports the conflict first, a
+   * typo'd key is never silently dropped. This is a single-process
    * optimistic lock only — see {@link DispatchOptions}.
    *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
@@ -4930,6 +4967,27 @@ export class TaskLifecycle {
         throw new Error(
           `dispatch conflict: expected seq ${opts.expectedSeq} but task is at seq ${this._history.length}`,
         );
+      }
+    }
+    if (opts !== undefined) {
+      if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+        throw new Error("invalid dispatch options: opts must be an object");
+      }
+      // Unknown option keys fail closed (#1255, see
+      // DISPATCH_OPTION_FIELDS), checked before any field is read so a
+      // typo is reported as itself, not as a missing-field default: a
+      // typo'd `payoutref` would otherwise silently drop the
+      // settlement-reconciliation anchor, and a typo'd `quotedamount`
+      // would drop the quote the payout is reconciled against. Runs
+      // after the `expectedSeq` guard above (the guard stays first of
+      // all) and after the must-be-object check, before the actor shape
+      // validation and the idempotency dedupe.
+      for (const key of Object.keys(opts)) {
+        if (!DISPATCH_OPTION_FIELDS.has(key)) {
+          throw new Error(
+            `invalid dispatch options: unknown option "${key}"`
+          );
+        }
       }
     }
     // An empty actor has zero audit value: the field exists to say WHO

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1680 tests, all local
+npm test   # 1689 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2222,6 +2222,17 @@ works. A non-integer or negative `expectedSeq` is a caller error and
 throws `invalid dispatch options: …` up front. Omitting it preserves
 the exact pre-guard behavior.
 
+Unknown option keys fail closed right after the guard: `dispatch`
+accepts exactly the eight documented keys (`actor`, `note`, `at`,
+`payoutRef`, `payoutAmount`, `quotedAmount`, `idempotencyKey`,
+`expectedSeq`) and throws
+`invalid dispatch options: unknown option "<key>"` on any other key,
+before any field is read — so a typo'd `payoutref` can never silently
+drop the settlement-reconciliation anchor, and a typo'd
+`quotedamount` can never silently drop the quote the payout is
+reconciled against. A stale `expectedSeq` still reports its conflict
+first; a rejected dispatch consumes no idempotency key.
+
 Honest limit: this is a single-process optimistic lock — it compares
 against the in-memory history, so it cannot stop two processes that
 each restored the same snapshot from racing. Cross-process writers
@@ -2697,7 +2708,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1680 tests covering the happy path, reject→resubmit
+`npm test` runs 1689 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
