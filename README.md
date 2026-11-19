@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1715 tests, all local
+npm test   # 1726 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1364,9 +1364,15 @@ mismatchedPayouts(allTasks); // => PAID tasks whose settled amount differs from 
 
 `payoutMismatch()` returns `undefined` — no mismatch to report — when
 the task is not `PAID`, when either amount was never recorded (the
-library cannot compare what it cannot observe), or when
-`quoted === paid` exactly. `delta` is `paid - quoted` rounded to cents:
-negative means underpaid, positive overpaid.
+library cannot compare what it cannot observe), or when the two
+amounts round to the same cent. The comparison runs in integer minor
+units: `delta` is
+`(toMinorUnits(paid) - toMinorUnits(quoted)) / 100`, negative means
+underpaid, positive overpaid. That matters for legacy sub-cent pairs,
+which parse fine but were never writable through `dispatch()`: quoted
+100.005 / paid 100.004 reports `delta: -0.01`, while 100.001 / 100.002
+rounds to the same cent and is no mismatch — so the
+`summarizeTaskSettlements()` gap identity holds for legacy pairs too.
 
 The batch form of the owed half is `totalQuoted()`: it sums the last
 `ACCEPT` quote across `PAID` tasks in integer minor units, the exact
@@ -2726,7 +2732,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1715 tests covering the happy path, reject→resubmit
+`npm test` runs 1726 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

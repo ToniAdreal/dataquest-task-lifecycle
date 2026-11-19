@@ -2048,9 +2048,11 @@ export interface PayoutMismatch {
   /** Actually settled amount from the `PAYOUT_COMPLETE` entry. */
   paid: number;
   /**
-   * `paid - quoted`, rounded to cents (the same
-   * `Math.round(x * 100) / 100` convention as {@link totalPaidOut}):
-   * negative means the task was underpaid, positive overpaid.
+   * `paid - quoted`, in integer minor units ({@link toMinorUnits})
+   * divided back to major units: negative means the task was
+   * underpaid, positive overpaid. The delta is always an exact
+   * multiple of 0.01 — a legacy sub-cent pair that rounds to the same
+   * cent reports no mismatch at all (see {@link payoutMismatch}).
    */
   delta: number;
 }
@@ -2062,15 +2064,28 @@ export interface PayoutMismatch {
  * The quote is the `quotedAmount` on the LAST `ACCEPT` entry; the
  * settled amount is the `payoutAmount` on the `PAYOUT_COMPLETE` entry
  * (the same entry {@link totalPaidOut} reads). Returns
- * `{ quoted, paid, delta }` with `delta = paid - quoted` rounded to
- * cents — negative is an underpayment, positive an overpayment.
+ * `{ quoted, paid, delta }` with
+ * `delta = (toMinorUnits(paid) - toMinorUnits(quoted)) / 100` —
+ * negative is an underpayment, positive an overpayment. Both amounts
+ * are compared in integer minor units (cents), so the comparison is
+ * exact: a legacy sub-cent pair that rounds to the same cent (quoted
+ * 100.001, paid 100.002) is not a mismatch, and a pair a cent apart
+ * (quoted 100.005, paid 100.004) reports `delta: -0.01` instead of a
+ * delta-0 mismatch. That keeps the `summarizeTaskSettlements` gap
+ * identity exact — `gap + unquotedPaidTotal` is the negated sum of
+ * the per-task deltas in minor units — for legacy sub-cent pairs
+ * too. A legacy amount whose minor-unit conversion overflows (e.g.
+ * `1e308`) throws `minor units conversion overflowed: …` instead of
+ * returning a poisoned delta: fail-fast, the same converter contract
+ * `totalQuoted` and `totalPaidOut` rely on.
  *
  * Returns `undefined` — "no mismatch to report" — when:
  *  - the task is not `PAID` (nothing has settled yet, or never will);
  *  - either amount was never recorded (no `ACCEPT` quote, or no
  *    `PAYOUT_COMPLETE` amount — the library cannot compare what it
  *    cannot observe);
- *  - `quoted === paid` exactly (settled as agreed).
+ *  - `quoted` and `paid` round to the same minor-unit amount
+ *    (settled as agreed, to the cent).
  *
  * Pure: reads the task, never mutates or dispatches.
  */
@@ -2087,9 +2102,11 @@ export function payoutMismatch(task: TaskLifecycle): PayoutMismatch | undefined 
     }
   }
   if (quoted === undefined || paid === undefined) return undefined;
-  if (quoted === paid) return undefined;
-  const delta = Math.round((paid - quoted) * 100) / 100;
-  return { quoted, paid, delta: delta === 0 ? 0 : delta };
+  const quotedMinorUnits = toMinorUnits(quoted);
+  const paidMinorUnits = toMinorUnits(paid);
+  if (quotedMinorUnits === paidMinorUnits) return undefined;
+  const delta = (paidMinorUnits - quotedMinorUnits) / 100;
+  return { quoted, paid, delta };
 }
 
 /**
