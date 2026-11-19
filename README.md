@@ -15,14 +15,15 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1663 tests, all local
+npm test   # 1664 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
 through the full `DRAFT → PAID` chain, including a first submission that is
 rejected in QA and resubmitted (the demo sets `maxResubmits: 2` and uses 1 of
 the 2; the library default is unlimited) before passing on re-review, with
-the append-only audit history printed to stdout, an audit hash-chain
+the append-only audit history printed to stdout (every timestamp and event
+id in the demo is a fixed literal, so two runs print byte-identical output), an audit hash-chain
 segment that runs `verifyHistoryChain` on that history — the intact
 12-entry chain passes, a detached copy whose `PAYOUT_COMPLETE`
 entry's `payoutAmount` is altered by 1 is detected (`false`: the
@@ -204,11 +205,11 @@ both overdue and both expired, a third ACCEPTED task whose
 deadline is still ahead produces no result entry and is never
 attempted, and the printed screening subset equals the
 execution's acted set (2 attempted, 2 expired, 0 failed; the
-executor's own EXPIRE audit entries carry the library-default
-wall-clock timestamp, and the segment now prints each successful
-result's entry citation — seq/event/from/to/at, with a "no entry"
-line for any failed dispatch — so its printed lines agree across
-runs only after timestamp normalization, like the golden output)
+executor's EXPIRE audit entries are pinned to the same fixed
+screening `now` via its `at` argument, and the segment prints
+each successful result's entry citation — seq/event/from/to/at,
+with a "no entry" line for any failed dispatch — so its printed
+lines are byte-identical across runs, like the rest of the demo)
 — and a closing event-sourcing
 segment that exports the main task's audit history with
 `historyToNdjson()`, prints all 12 NDJSON lines, parses them back
@@ -2685,7 +2686,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1663 tests covering the happy path, reject→resubmit
+`npm test` runs 1664 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

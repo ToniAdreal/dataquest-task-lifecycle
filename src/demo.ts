@@ -666,11 +666,11 @@
  * in-process instead of only regex-matching a child process's stdout.
  * The CLI entry point at the bottom prints those lines unchanged:
  * `npm run demo` output is line-for-line what the pre-refactor
- * top-level script printed (the golden comparison lives in
- * `test/demo.test.ts`, normalizing only the values that already
- * varied between any two runs of the old script — the main task's
- * wall-clock history timestamps and the webhook's `at` / `eventId` /
- * signature, which derive from them and from a random UUID).
+ * top-level script printed, and byte-identical across runs: every
+ * timestamp and event id in the demo is a fixed literal (the
+ * golden comparison in `test/demo.test.ts` still normalizes
+ * timestamps, event ids, signatures and hash links, so the golden
+ * stays readable).
  */
 
 import { createHmac } from "node:crypto";
@@ -772,6 +772,18 @@ import { readmeDiagramInSync } from "./diagram.js";
  * secret from its own credential store and never commits it.
  */
 export const DEMO_WEBHOOK_SECRET = "demo-secret-do-not-use-in-production";
+
+/**
+ * Fixed signing instant and event id for the demo's main payout
+ * webhook — the single build at the top of runDemo() carries these
+ * pinned values (like every other webhook the demo builds), so its
+ * `at`, `eventId` and signature are identical on every run and
+ * `npm run demo` output is byte-identical across runs. The signing
+ * instant sits just after the main chain's last dispatch
+ * (2026-03-09T09:55:00.000Z).
+ */
+export const DEMO_WEBHOOK_NOW = "2026-03-09T10:00:00.000Z";
+export const DEMO_WEBHOOK_EVENT_ID = "evt_demo_main_webhook_001";
 
 /**
  * Signing secrets for the demo's closing secret-rotation segment
@@ -1073,28 +1085,32 @@ const steps: Array<{
   event: TaskEvent;
   actor: string;
   note: string;
+  /** Fixed dispatch instant: the main chain never reads the wall clock. */
+  at: string;
   payoutRef?: string;
   payoutAmount?: number;
 }> = [
-  { event: "PUBLISH", actor: "system", note: "Researcher publishes the data-collection task" },
-  { event: "ACCEPT", actor: "contributor", note: "Contributor picks up the task" },
-  { event: "START_CAPTURE", actor: "contributor", note: "Data capture begins" },
-  { event: "SUBMIT", actor: "contributor", note: "Batch uploaded for QA" },
-  { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist starts review" },
-  { event: "REJECT", actor: "reviewer", note: "Sample fails QA: gaps in the capture" },
+  { event: "PUBLISH", actor: "system", note: "Researcher publishes the data-collection task", at: "2026-03-09T09:00:00.000Z" },
+  { event: "ACCEPT", actor: "contributor", note: "Contributor picks up the task", at: "2026-03-09T09:05:00.000Z" },
+  { event: "START_CAPTURE", actor: "contributor", note: "Data capture begins", at: "2026-03-09T09:10:00.000Z" },
+  { event: "SUBMIT", actor: "contributor", note: "Batch uploaded for QA", at: "2026-03-09T09:15:00.000Z" },
+  { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist starts review", at: "2026-03-09T09:20:00.000Z" },
+  { event: "REJECT", actor: "reviewer", note: "Sample fails QA: gaps in the capture", at: "2026-03-09T09:25:00.000Z" },
   {
     event: "RESUBMIT",
     actor: "contributor",
     note: "Contributor fixes the batch and resubmits (uses 1 of the demo's 2 allowed RESUBMITs)",
+    at: "2026-03-09T09:30:00.000Z",
   },
-  { event: "SUBMIT", actor: "contributor", note: "Revised batch uploaded for QA" },
-  { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist re-reviews the revised batch" },
-  { event: "APPROVE", actor: "reviewer", note: "Revised sample passes QA" },
-  { event: "REQUEST_PAYOUT", actor: "contributor", note: "Contributor requests payout" },
+  { event: "SUBMIT", actor: "contributor", note: "Revised batch uploaded for QA", at: "2026-03-09T09:35:00.000Z" },
+  { event: "BEGIN_REVIEW", actor: "reviewer", note: "QA specialist re-reviews the revised batch", at: "2026-03-09T09:40:00.000Z" },
+  { event: "APPROVE", actor: "reviewer", note: "Revised sample passes QA", at: "2026-03-09T09:45:00.000Z" },
+  { event: "REQUEST_PAYOUT", actor: "contributor", note: "Contributor requests payout", at: "2026-03-09T09:50:00.000Z" },
   {
     event: "PAYOUT_COMPLETE",
     actor: "system",
     note: "Finance settles the payout",
+    at: "2026-03-09T09:55:00.000Z",
     // Settlement evidence carried on the audit entry (same fixture
     // values the webhook tests use): the payout webhook payload below
     // derives payoutRef/payoutAmount from exactly this entry.
@@ -2227,11 +2243,12 @@ export async function runDemo(): Promise<DemoResult> {
   const task = new TaskLifecycle("DEMO-001", { maxResubmits: 2 });
   const lines: string[] = [`Task ${task.id}: ${task.state}`];
 
-  for (const { event, actor, note, payoutRef, payoutAmount } of steps) {
+  for (const { event, actor, note, at, payoutRef, payoutAmount } of steps) {
     const from = task.state;
     const to = task.dispatch(event, {
       actor,
       note,
+      at,
       ...(payoutRef !== undefined ? { payoutRef } : {}),
       ...(payoutAmount !== undefined ? { payoutAmount } : {}),
     });
@@ -2384,8 +2401,15 @@ export async function runDemo(): Promise<DemoResult> {
 
   // The PAID state is where PAYOUT_COMPLETE settlement webhooks fire:
   // build the signed notification from the audit history, print what a
-  // receiver would get, then verify it with the same secret.
-  const webhook = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET);
+  // receiver would get, then verify it with the same secret. The build
+  // pins the fixed demo signing instant and event id
+  // (DEMO_WEBHOOK_NOW / DEMO_WEBHOOK_EVENT_ID), so the payload `at`,
+  // `eventId` and signature are identical on every run — the main
+  // webhook used to take the wall clock and a random UUID here.
+  const webhook = buildPayoutWebhook(task, DEMO_WEBHOOK_SECRET, {
+    now: DEMO_WEBHOOK_NOW,
+    eventId: DEMO_WEBHOOK_EVENT_ID,
+  });
   const { payload, signature } = webhook;
   lines.push("", "Payout webhook (signed PAYOUT_COMPLETE notification):");
   lines.push(`  event:        ${payload.event}`);
@@ -4961,16 +4985,17 @@ export async function runDemo(): Promise<DemoResult> {
   // [DEMO-014, DEMO-015]; the executor returns exactly one entry
   // per screened task, both expired=true and now EXPIRED, so the
   // screening subset and the execution's acted set agree.
-  // Honest limit: `expireOverdueTasks()` takes no action
-  // callback, so its EXPIRE dispatches are library-attributed
-  // (`actor: "system"`, a wall-clock audit timestamp) — the fixed
-  // screening now only selects, it does not stamp. The segment
+  // The fixed screening now is also pinned as the executor's `at`,
+  // exactly like the stale-action branch pins its execution
+  // instant: the EXPIRE audit entries carry SLA_BRANCH_NOW instead
+  // of the library-default wall-clock stamp, so the segment — and
+  // the whole demo — stays byte-deterministic. (The library default
+  // without a pin is still the wall clock; changing that default is
+  // a separate backlog item, not this demo segment.) The segment
   // below now prints each successful result's entry citation
   // (seq/event/from/to/at) so a reader can see the audit record
-  // without re-reading task.history; the printed `at` is that
-  // wall-clock dispatch timestamp, so the demo tests pin
-  // seq/event/from/to/actor and normalize the printed `at`,
-  // never asserting a wall-clock value.
+  // without re-reading task.history; the printed `at` is the pinned
+  // screening now, so the demo tests pin it as a fixed literal.
   const driveExpireTask = driveStaleTask;
   lines.push("", "SLA watchdog batch execution branch (expireOverdueTasks over a rebuilt SLA batch):");
   lines.push(
@@ -5017,6 +5042,7 @@ export async function runDemo(): Promise<DemoResult> {
   const expireExecutionResults = expireOverdueTasks(
     expireExecutionTasks,
     SLA_BRANCH_NOW,
+    SLA_BRANCH_NOW,
   );
   for (const r of expireExecutionResults) {
     lines.push(
@@ -5027,12 +5053,11 @@ export async function runDemo(): Promise<DemoResult> {
   }
   // Backlog #616 self-check: a successful result's `entry` must be
   // exactly the task history's last entry (the EXPIRE record just
-  // appended, stamped with the executor's wall-clock dispatch
-  // timestamp — not the fixed screening now, which only selects);
-  // a failed result must carry no entry, because a failed dispatch
-  // appends nothing. Any drift fails the demo outright, so the
-  // printed entry citations below can never disagree with the
-  // audit log.
+  // appended, stamped with the pinned screening now — the executor's
+  // `at` pin, not the wall clock); a failed result must carry no
+  // entry, because a failed dispatch appends nothing. Any drift fails
+  // the demo outright, so the printed entry citations below can never
+  // disagree with the audit log.
   const expireExecutionEntryRefs: Array<{
     taskId: string;
     entry: TaskHistoryEntry;
@@ -5100,8 +5125,8 @@ export async function runDemo(): Promise<DemoResult> {
   // the original's last entry (the demo tests pin all of this,
   // including a full deep equality of the two histories). The
   // segment adds no new nondeterminism: it only serializes the
-  // main task's existing history — whose timestamps already vary
-  // between runs — and reads no network, no randomness, and no
+  // main task's existing history — whose timestamps are fixed
+  // literals — and reads no network, no randomness, and no
   // new wall clock.
   const ndjsonText = historyToNdjson(task);
   const ndjsonLines = ndjsonText.trimEnd().split("\n");
@@ -5541,10 +5566,10 @@ export async function runDemo(): Promise<DemoResult> {
   //     history entry in canonical field order, so `prevHash`
   //     moves after `note`; every value and hash is unchanged,
   //     which the demo tests pin with a deep equality check.)
-  // The serialized byte count is exact on every run: the only
-  // fields that vary between runs (the main task's wall-clock
-  // timestamps and the hashes computed over them) are
-  // fixed-length, so the total never moves. The segment
+  // The serialized byte count is exact on every run: the timestamps
+  // and the hashes computed over them are fixed-length (and, since
+  // the main chain's timestamps were pinned, fixed literals), so the
+  // total never moves. The segment
   // asserts all of this here, outside the printed lines: a
   // snapshot that lost fidelity would fail the demo itself,
   // not just a test. No network, no randomness, and no new

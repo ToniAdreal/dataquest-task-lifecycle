@@ -63,6 +63,8 @@ import {
   DEMO_PATROL_UNMAPPED_REVIEW_AT,
   DEMO_PATROL_UNMAPPED_TASK_ID,
   DEMO_SEEDED_IDEMPOTENCY_KEYS,
+  DEMO_WEBHOOK_EVENT_ID,
+  DEMO_WEBHOOK_NOW,
   DEMO_WEBHOOK_SECRET,
 } from "../src/demo.js";
 import { readmeDiagramInSync } from "../src/diagram.js";
@@ -129,15 +131,17 @@ const repoRoot = path.dirname(
 /**
  * Golden output of the pre-refactor top-level demo script, captured
  * from a real `npm run demo` run before the runDemo() refactor. The
- * only normalized values are the ones that already varied between
- * any two runs of the old script: ISO timestamps (the main task's
- * wall-clock history timestamps, from which the webhook `at` also
- * derives), the webhook eventId (a random UUID), and the HMAC
- * signature (a function of those), and the audit hash-chain links
- * (`prevHash` / `hash`) carried by the NDJSON export lines, which
- * are hashes of entries containing those timestamps. Every other
- * byte — wording, spacing, ordering, blank lines — must match
- * exactly.
+ * normalized values are the ones that varied between any two runs
+ * of the old script: ISO timestamps (the main task's wall-clock
+ * history timestamps, from which the webhook `at` also derived),
+ * the webhook eventId (a random UUID then; pinned to
+ * `evt_demo_main_webhook_001` since backlog #1248, so the golden
+ * carries that literal and the `<uuid>` replacement below is only
+ * a guard), and the HMAC signature (a function of those), and the
+ * audit hash-chain links (`prevHash` / `hash`) carried by the NDJSON
+ * export lines, which are hashes of entries containing those
+ * timestamps. Every other byte — wording, spacing, ordering, blank
+ * lines — must match exactly.
  */
 function normalize(text: string): string {
   return text
@@ -231,13 +235,13 @@ Payout webhook (signed PAYOUT_COMPLETE notification):
   payoutRef:    xfer-88f2
   payoutAmount: 10098.5
   at:           <timestamp>
-  eventId:      <uuid>
+  eventId:      evt_demo_main_webhook_001
   signature:    sha256=<signature>
   verifyPayoutWebhook: ok
 
 Receiver-side dedupe (PayoutEventDedupe on the webhook's eventId):
   dedupe ttl: 60000 ms (demo policy; the library default is 3600000 ms) — clock injected and fixed at <timestamp>
-  delivery 1: eventId <uuid> -> checkAndRecord false (new event, payout booked)
+  delivery 1: eventId evt_demo_main_webhook_001 -> checkAndRecord false (new event, payout booked)
   delivery 2: same eventId redelivered -> checkAndRecord true (duplicate, skipped — no second booking)
   delivery 3: clock advanced by exactly the ttl to <timestamp> -> checkAndRecord false (record expired at the ttl boundary, accepted again)
 
@@ -1258,6 +1262,23 @@ test("demo lines match the pre-refactor golden output, line for line", async () 
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
+test("demo output is byte-identical across two full runs (backlog #1248)", async () => {
+  const a = await runDemo();
+  const b = await runDemo();
+  // The whole CLI output — every timestamp and event id is a fixed
+  // literal now (main chain 2026-03-09, main webhook pinned
+  // DEMO_WEBHOOK_NOW / DEMO_WEBHOOK_EVENT_ID, expireOverdueTasks
+  // pinned to the fixed screening now) — so two runs must agree
+  // byte for byte with no normalization at all. The NDJSON export
+  // and the webhook signature are part of the printed lines, and
+  // are also pinned as structured values.
+  assert.equal(a.lines.join("\n"), b.lines.join("\n"));
+  assert.equal(a.ndjsonText, b.ndjsonText);
+  assert.equal(a.webhook.signature, b.webhook.signature);
+  assert.equal(a.webhook.payload.at, DEMO_WEBHOOK_NOW);
+  assert.equal(a.webhook.payload.eventId, DEMO_WEBHOOK_EVENT_ID);
+});
+
 test("demo runs the DRAFT -> PAID chain with a REJECT -> RESUBMIT loop in-process", async () => {
   const { task, lines } = await runDemo();
   const text = lines.join("\n");
@@ -1374,14 +1395,15 @@ test("demo builds the payout webhook from the settled task and verifies it (stru
 
   // Payload fields derive from the PAYOUT_COMPLETE audit entry — the
   // structured values the old subprocess test could only regex-shape.
+  // The signing instant and event id are the demo's pinned literals
+  // (DEMO_WEBHOOK_NOW / DEMO_WEBHOOK_EVENT_ID), so the payload — and
+  // the signature over it — is identical on every run.
   assert.equal(payload.event, "PAYOUT_COMPLETE");
   assert.equal(payload.taskId, "DEMO-001");
   assert.equal(payload.payoutRef, "xfer-88f2");
   assert.equal(payload.payoutAmount, 10098.5);
-  assert.match(
-    payload.eventId,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  );
+  assert.equal(payload.at, DEMO_WEBHOOK_NOW);
+  assert.equal(payload.eventId, DEMO_WEBHOOK_EVENT_ID);
   assert.match(signature, /^sha256=[0-9a-f]{64}$/);
   // The demo's own receiver-side check passes, and an independent
   // re-verification agrees; tampering with a signed field breaks it.
@@ -4316,7 +4338,7 @@ test("demo time-travel segment is deterministic: two runs print byte-identical s
   );
 });
 
-test("demo event-sourcing segment agrees across two runs once the main task's own varying values are normalized", async () => {
+test("demo event-sourcing segment is byte-identical across two runs (backlog #1248)", async () => {
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Event-sourcing replay (NDJSON history export + fromHistory replay of DEMO-001):") - 1,
@@ -4331,12 +4353,11 @@ test("demo event-sourcing segment agrees across two runs once the main task's ow
   // now follows the replay lines before the allowed-events
   // listing: blank separator + header + 8 query lines (10).
   assert.equal(segA.length, 30);
-  // The only varying values are the ones the main task already
-  // varied on between any two runs: its wall-clock history
-  // timestamps and the hash-chain links derived from them, both
-  // replaced by normalize(). The segment itself reads no new wall
-  // clock, no randomness, and no network.
-  assert.equal(normalize(segA.join("\n")), normalize(segment(b.lines).join("\n")));
+  // The segment reads no wall clock, no randomness, and no network,
+  // and the main task history it serializes now carries fixed
+  // literals — so the two runs agree byte for byte with no
+  // normalization at all.
+  assert.deepEqual(segA, segment(b.lines));
   assert.equal(a.replayedTask.state, "PAID");
   assert.equal(b.replayedTask.state, "PAID");
   assert.equal(a.ndjsonText.trimEnd().split("\n").length, 12);
@@ -5194,18 +5215,20 @@ test("demo shows the SLA watchdog batch execution branch in-process: screening s
       ["DEMO-016", "ACCEPTED", 2],
     ],
   );
-  // The executor's EXPIRE entries carry the library defaults for `at`
-  // (wall-clock) but are always signed `actor: "system"` — watchdog-driven
-  // expiry must stay distinguishable from a human one — so the test pins
-  // event/from/to/actor, never those entries' wall-clock `at`.
+  // The executor's EXPIRE entries are pinned to the fixed screening
+  // now (the demo passes SLA_BRANCH_NOW as the `at` pin, like the
+  // stale-action branch pins its execution instant) and are always
+  // signed `actor: "system"` — watchdog-driven expiry must stay
+  // distinguishable from a human one — so the test pins
+  // event/from/to/actor/at, all as fixed literals.
   assert.deepEqual(
     expireExecutionTasks.slice(0, 2).map((t) => {
       const last = t.history.at(-1)!;
-      return [last.event, last.from, last.to, last.actor];
+      return [last.event, last.from, last.to, last.actor, last.at];
     }),
     [
-      ["EXPIRE", "ACCEPTED", "EXPIRED", "system"],
-      ["EXPIRE", "OPEN", "EXPIRED", "system"],
+      ["EXPIRE", "ACCEPTED", "EXPIRED", "system", "2026-03-06T09:00:00.000Z"],
+      ["EXPIRE", "OPEN", "EXPIRED", "system", "2026-03-06T09:00:00.000Z"],
     ],
   );
   assert.equal(
@@ -5359,10 +5382,9 @@ test("demo SLA watchdog execution entry citations: result.entry lines match the 
     "entry citations must precede the not-overdue line",
   );
   // DemoResult refs: one per success, in batch order, each exactly
-  // the task's last history entry (seq/event/from/to/actor pinned;
-  // `at` equals the last entry's `at` within the same run — both
-  // are the same wall-clock dispatch timestamp, never asserted
-  // against a fixed literal).
+  // the task's last history entry (seq/event/from/to/actor/at
+  // pinned; `at` is the pinned screening now
+  // 2026-03-06T09:00:00.000Z, equal to the last entry's `at`).
   assert.deepEqual(
     expireExecutionEntryRefs.map((r) => r.taskId),
     ["DEMO-014", "DEMO-015"],
@@ -5375,10 +5397,11 @@ test("demo SLA watchdog execution entry citations: result.entry lines match the 
       r.entry.from,
       r.entry.to,
       r.entry.actor,
+      r.entry.at,
     ]),
     [
-      ["DEMO-014", 3, "EXPIRE", "ACCEPTED", "EXPIRED", "system"],
-      ["DEMO-015", 2, "EXPIRE", "OPEN", "EXPIRED", "system"],
+      ["DEMO-014", 3, "EXPIRE", "ACCEPTED", "EXPIRED", "system", "2026-03-06T09:00:00.000Z"],
+      ["DEMO-015", 2, "EXPIRE", "OPEN", "EXPIRED", "system", "2026-03-06T09:00:00.000Z"],
     ],
   );
   for (const [i, ref] of expireExecutionEntryRefs.entries()) {
@@ -5438,11 +5461,10 @@ test("demo SLA watchdog execution segment is deterministic in its printed lines:
   // line) + screening line + 2 result lines + the entry block
   // header + 2 entry citation lines + the not-overdue
   // line + the consistency line + the execution summary; the
-  // entry citations carry the executor's wall-clock audit
-  // timestamps, so the two runs are compared normalized (like
-  // the golden output), never byte-for-byte on those `at` values.
+  // entry citations carry the pinned screening now as their `at`,
+  // so the two runs agree byte for byte with no normalization.
   assert.equal(segA.length, 23);
-  assert.deepEqual(normalize(segA.join("\n")), normalize(execLines(b.lines).join("\n")));
+  assert.deepEqual(segA, execLines(b.lines));
   assert.deepEqual(
     a.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),
     b.expireExecutionResults.map((r) => [r.task.id, r.expired, r.error]),

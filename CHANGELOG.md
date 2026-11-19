@@ -1154,6 +1154,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- CLI demo output is byte-identical across runs (2026-11-19, backlog
+  #1248): the main chain's 12 dispatches now carry fixed `at`
+  literals (2026-03-09T09:00–09:55), the main payout webhook is built
+  with pinned `now` (2026-03-09T10:00:00.000Z) and `eventId`
+  (`evt_demo_main_webhook_001`, exported as `DEMO_WEBHOOK_NOW` /
+  `DEMO_WEBHOOK_EVENT_ID`), and the SLA batch-execution segment pins
+  the fixed screening now as `expireOverdueTasks()`' `at` argument,
+  so the DEMO-014/DEMO-015 EXPIRE entries no longer carry the
+  wall-clock stamp. (The library default without an `at` pin is
+  still the wall clock; changing that default is a separate item.)
+  Two `npm run demo` runs now diff empty, the golden output carries
+  the pinned event id, and the demo tests gain a full-output
+  double-run byte-identical assertion plus pinned `at`/`eventId`
+  checks (test count 1663 to 1664).
+
 - `payoutAging` bench fixture went stale at backlog #1046
   (2026-11-11): the fixture's supposedly reconciled task carried a
   payoutRef but no payoutAmount, which #1046 made unreconciled, so
