@@ -2118,8 +2118,12 @@ export function mismatchedPayouts(
  * {@link reconcilePayouts}. The shape is deliberately minimal: the
  * reference that pairs a ledger row with a task, and the amount the
  * ledger says was paid, in the same major-unit, at-most-2-decimal
- * convention as the `PAYOUT_COMPLETE` entry's `payoutAmount`. Extra
- * fields on a caller-supplied row are ignored, never compared.
+ * convention as the `PAYOUT_COMPLETE` entry's `payoutAmount`.
+ * {@link reconcilePayouts} rejects a ledger row whose amount carries
+ * sub-cent precision — the same minor-unit bar `dispatch()` applies
+ * to task-side amounts — so a rounded ledger row can never match a
+ * batch total it never equalled. Extra fields on a caller-supplied
+ * row are ignored, never compared.
  */
 export interface LedgerPayout {
   /** External payment reference, pairing with a task's `payoutRef`. */
@@ -2227,9 +2231,9 @@ export interface ReconcilePayoutsResult {
  *    every task in the group lands in `amountMismatch`, each entry
  *    carrying its own `taskAmount` and the group's sum as
  *    `groupAmount`. A reference carried by exactly one pairing task
- *    keeps the old per-task comparison, exactly — a single-task
- *    batch total is the task's own amount, so no caller-visible
- *    behaviour changes there, and no `groupAmount` is attached.
+ *    keeps the per-task comparison, in integer minor units like the
+ *    shared path — a single-task batch total is the task's own
+ *    amount, so no `groupAmount` is attached.
  *    Comparing per task under a shared reference would be wrong in
  *    both directions: a row recording the batch total would flag
  *    every task as mismatched (a false positive), while a row
@@ -2258,7 +2262,8 @@ export interface ReconcilePayoutsResult {
  * was paid once). A ledger row that is not an object, carries an
  * empty, non-string, or overlong (longer than
  * {@link MAX_PAYOUT_REF_LENGTH} characters) `payoutRef`, or carries a
- * non-finite or negative `payoutAmount` throws, and a reference
+ * non-finite, negative, or sub-cent (more than 2 decimal places)
+ * `payoutAmount` throws, and a reference
  * appearing twice in the ledger throws `duplicate ledger payoutRef`
  * — a duplicated ledger row would otherwise make "matched" ambiguous
  * (which row did the task pair with?). The task side needs no other
@@ -2319,6 +2324,24 @@ export function reconcilePayouts(
     ) {
       throw new Error(
         `invalid reconcilePayouts: ledger payoutAmount must be a non-negative finite number, got ${String(row.payoutAmount)}`,
+      );
+    }
+    // Minor-unit denomination (backlog #1260): a ledger amount must
+    // also be exactly representable in integer minor units — the
+    // same round-trip gate dispatch() applies to task-side amounts
+    // (backlog #558). Without it the two pairing paths disagree on
+    // a sub-cent row: the shared-ref path rounds it with
+    // toMinorUnits and can match a batch total it never equalled
+    // (199.996 rounds to 20000 cents), while the single-task path
+    // compared raw floats and called the same row a mismatch.
+    // Checked before the duplicate-ref check below, so the
+    // sub-cent error is the one the caller sees.
+    if (
+      row.payoutAmount !== undefined &&
+      toMinorUnits(row.payoutAmount) / 100 !== row.payoutAmount
+    ) {
+      throw new Error(
+        `invalid reconcilePayouts: ledger payoutAmount must be a minor-unit amount (at most 2 decimal places)`,
       );
     }
     if (ledgerByRef.has(row.payoutRef)) {
@@ -2414,7 +2437,12 @@ export function reconcilePayouts(
     }
     const group = groupsByRef.get(candidate.ref)!;
     if (group.length === 1) {
-      if (candidate.amount !== row.payoutAmount) {
+      // Minor-unit comparison (backlog #1260): the same integer-cents
+      // equality the shared-ref path uses, so one input cannot be a
+      // match on one path and a mismatch on the other.
+      if (
+        toMinorUnits(candidate.amount) !== toMinorUnits(row.payoutAmount)
+      ) {
         result.amountMismatch.push({
           task: candidate.task,
           ledger: row,

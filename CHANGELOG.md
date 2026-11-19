@@ -1173,6 +1173,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `reconcilePayouts()` rejects a ledger row whose `payoutAmount`
+  carries sub-cent precision (2026-11-19, backlog #1260): the
+  ledger side was only checked for a non-negative finite number,
+  while `dispatch()` gates task-side amounts to integer minor
+  units (backlog #558) — so the two pairing paths disagreed on
+  the same row. A shared-ref ledger row of 199.996 was rounded by
+  `toMinorUnits` to 20000 cents and matched a two-task 200.00
+  batch total, while the single-task path compared raw floats
+  and called the same row a mismatch. Ledger amounts now pass
+  the same round-trip gate (`toMinorUnits(x) / 100 !== x`
+  throws `invalid reconcilePayouts: ledger payoutAmount must be
+  a minor-unit amount (at most 2 decimal places)`), checked
+  before the duplicate-ref check, and the single-task
+  comparison now runs in integer minor units like the shared-ref
+  path. The test count rises by ten (1705 to 1715 tests).
+
 - `expireOverdueTasks()` pins the screening `now` as the EXPIRE
   audit timestamp when no `at` is given (2026-11-19, backlog
   #1252): the omitted-pin default was the wall clock, so the same

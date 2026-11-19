@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1705 tests, all local
+npm test   # 1715 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1256,7 +1256,8 @@ integer minor units (the `totalPaidOut()` cents convention, so
 group; a difference puts every task in the group into
 `amountMismatch`, each entry carrying its own `taskAmount` and
 the group's sum as `groupAmount`. A reference carried by exactly
-one task keeps the per-task comparison. A group member that
+one task keeps the per-task comparison, in integer minor units
+like the batch total. A group member that
 recorded no amount never pairs (it lands in `unreconciled`) and
 contributes nothing to the sum. An amount disagreement is
 reported only when both sides recorded an amount and they
@@ -1266,7 +1267,10 @@ recorded none, it never pairs: it lands in `unreconciled` instead, the
 same population `unreconciledPayouts()` returns. A reference appearing
 twice in the ledger throws (`duplicate ledger payoutRef`), as does
 any malformed ledger row (including a `payoutRef` longer than 256
-characters); a task id appearing twice in the batch throws too
+characters, or a `payoutAmount` with sub-cent precision — the same
+minor-unit bar `dispatch()` applies to task-side amounts, so a
+ledger row of 199.996 can never be rounded into a match against a
+200.00 batch total); a task id appearing twice in the batch throws too
 (`duplicate task`), whether it is the same object passed twice or
 two objects sharing one id — counting one task twice would double
 the batch sum, so the batch is rejected before any pairing. Pure,
@@ -2722,7 +2726,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1705 tests covering the happy path, reject→resubmit
+`npm test` runs 1715 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
