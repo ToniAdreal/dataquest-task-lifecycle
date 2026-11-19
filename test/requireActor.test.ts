@@ -22,10 +22,12 @@ import { TaskLifecycle, type TaskLifecycleOptions } from "../src/index.js";
  *    reports the RBAC error first; an unlisted event with no actor
  *    reports actor-required
  *  - a rejected dispatch consumes no idempotency key and leaves no seq gap
- *  - the switch is task configuration, not audit data: it is never
- *    written into the toJSON() snapshot
- *  - fromJSON() does not restore the switch (advisory again after restore);
- *    fromHistory(id, history, { requireActor: true }) re-attaches it
+ *  - the switch is task configuration, not audit data, but it IS
+ *    written into the toJSON() snapshot when enabled (backlog
+ *    #1257): a gate-off task's snapshot keeps its legacy shape
+ *  - fromJSON() restores the switch (an explicit opts value overrides
+ *    the snapshot's); fromHistory(id, history, { requireActor: true })
+ *    re-attaches it on a history-only rebuild
  *  - with requirePayoutRef also on, a PAYOUT_COMPLETE with an actor but
  *    no payoutRef reports the payout error; without either, the actor
  *    error reports first (check order pinned)
@@ -133,18 +135,28 @@ test("rejected dispatch consumes no idempotency key and leaves no seq gap", () =
   assert.equal(t.history[t.history.length - 1].seq, before + 1);
 });
 
-test("the switch is not written into the toJSON() snapshot", () => {
+test("the switch is written into the toJSON() snapshot only when on", () => {
   const t = toApproved("ra-8", { requireActor: true });
   const snapshot = t.toJSON();
-  assert.equal("requireActor" in snapshot, false);
+  assert.equal(snapshot.requireActor, true);
+  // ...but a gate-off task's snapshot keeps its exact legacy shape.
+  const off = toApproved("ra-8b");
+  assert.equal("requireActor" in off.toJSON(), false);
 });
 
-test("fromJSON() does not restore the switch: advisory again after restore", () => {
+test("fromJSON() restores the switch: gate still enforced after restore", () => {
   const t = toApproved("ra-9", { requireActor: true });
   const restored = TaskLifecycle.fromJSON(JSON.parse(JSON.stringify(t)));
-  restored.dispatch("REQUEST_PAYOUT");
+  assert.throws(
+    () => restored.dispatch("REQUEST_PAYOUT"),
+    /actor required/,
+  );
+  restored.dispatch("REQUEST_PAYOUT", { actor: "contributor" });
   assert.equal(restored.state, "PAYOUT_PENDING");
-  assert.equal(restored.history[restored.history.length - 1].actor, undefined);
+  assert.equal(
+    restored.history[restored.history.length - 1].actor,
+    "contributor",
+  );
 });
 
 test("fromHistory() re-attaches the switch via options", () => {

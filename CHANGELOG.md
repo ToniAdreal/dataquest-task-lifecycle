@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Snapshot persistence for the three payout/actor gates
+  `requirePayoutRef` / `requirePayoutAmount` / `requireActor`
+  (2026-11-19, backlog #1257): `toJSON()` writes each gate `true`
+  only when it is on, so a gate-off task's snapshot keeps its exact
+  legacy shape; `fromJSON()` restores the gates (strict boolean
+  validation, non-boolean values rejected) with explicit-opts-wins
+  merge semantics mirroring the sibling escrow-state-machine-ts
+  `fromJSON` merge table (backlog #1256), and a legacy snapshot
+  without a gate field restores with that gate off. A task that
+  opened with the gates on no longer silently loses them on a
+  snapshot restore and accepts a reference-free, amount-free, or
+  anonymous `PAYOUT_COMPLETE` it would previously have rejected.
+  `diffTaskSnapshots` reports a gate flip as `payoutRefGateChanged` /
+  `payoutAmountGateChanged` / `actorGateChanged` (absent field and
+  explicit `false` are the same gate-off state), the signed snapshot
+  envelope carries the gates under its MAC, and the README
+  Persistence section documents the new fields and the override
+  rule. The test count rises by sixteen (1689 to 1705 tests).
+
 - Named settlement-complete predicate `isSettlementComplete(task)`
   (2026-11-18, backlog #1243): a task is settlement-complete exactly
   when it is `PAID` and its last `PAYOUT_COMPLETE` entry carries both

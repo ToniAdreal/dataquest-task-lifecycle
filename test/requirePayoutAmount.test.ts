@@ -23,10 +23,13 @@ import { TaskLifecycle, type TaskLifecycleOptions } from "../src/index.js";
  *  - only PAYOUT_COMPLETE is gated; other events are unaffected
  *  - non-boolean option values throw `invalid option` at construction
  *  - a rejected dispatch consumes no idempotency key and leaves no seq gap
- *  - the switch is task configuration, not audit data: it is never
- *    written into the toJSON() snapshot (unlike maxDisputes/maxResubmits)
- *  - fromJSON() does not restore the switch (falls back to advisory);
- *    fromHistory(id, history, { requirePayoutAmount: true }) re-attaches it
+ *  - the switch is task configuration, not audit data, but it IS
+ *    written into the toJSON() snapshot when enabled (backlog
+ *    #1257): a gate-off task's snapshot keeps its legacy shape
+ *  - fromJSON() restores the switch (an explicit opts value overrides
+ *    the snapshot's); fromHistory(id, history,
+ *    { requirePayoutAmount: true }) re-attaches it on a history-only
+ *    rebuild
  */
 
 /** Drive a task from DRAFT to APPROVED, with optional ctor options. */
@@ -137,19 +140,34 @@ test("rejected dispatch consumes no idempotency key and leaves no seq gap", () =
   assert.equal(t.history[t.history.length - 1].seq, before + 1);
 });
 
-test("the switch is not written into the toJSON() snapshot", () => {
+test("the switch is written into the toJSON() snapshot only when on", () => {
   const t = toApproved("rpa-9", { requirePayoutAmount: true });
   const snapshot = t.toJSON();
-  assert.equal("requirePayoutAmount" in snapshot, false);
+  assert.equal(snapshot.requirePayoutAmount, true);
+  // ...but a gate-off task's snapshot keeps its exact legacy shape.
+  const off = toApproved("rpa-9b");
+  assert.equal("requirePayoutAmount" in off.toJSON(), false);
   // ...but the budget-style finite switches keep their own convention.
   assert.equal("maxDisputes" in snapshot, false);
 });
 
-test("fromJSON() does not restore the switch: advisory again after restore", () => {
+test("fromJSON() restores the switch: gate still enforced after restore", () => {
   const t = toApproved("rpa-10", { requirePayoutAmount: true });
   const restored = TaskLifecycle.fromJSON(JSON.parse(JSON.stringify(t)));
   restored.dispatch("REQUEST_PAYOUT", { actor: "contributor" });
-  restored.dispatch("PAYOUT_COMPLETE", { actor: "system" });
+  assert.throws(
+    () =>
+      restored.dispatch("PAYOUT_COMPLETE", {
+        actor: "system",
+        payoutRef: "xfer-10",
+      }),
+    /payout amount required/,
+  );
+  restored.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    payoutRef: "xfer-10",
+    payoutAmount: 100,
+  });
   assert.equal(restored.state, "PAID");
 });
 

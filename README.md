@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1689 tests, all local
+npm test   # 1705 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -829,7 +829,8 @@ task.dispatch("PUBLISH", { actor: "researcher" });
 task.setSlaDeadline("2026-12-01T00:00:00.000Z"); // advisory SLA deadline
 
 // snapshot: { v, id, state, history, slaDeadlines, [maxResubmits],
-//   [maxDisputes], [maxVisitsByState], [rolePolicy], [idempotencyKeys] } — plain JSON, no Maps, no class
+//   [maxDisputes], [maxVisitsByState], [rolePolicy], [idempotencyKeys],
+//   [requirePayoutRef], [requirePayoutAmount], [requireActor] } — plain JSON, no Maps, no class
 //   instances. The bracketed fields appear only when the corresponding
 //   option is configured (see TaskSnapshot). Also what
 //   JSON.stringify(task) produces.
@@ -849,7 +850,14 @@ timestamps are canonical ISO-8601 and non-decreasing. SLA deadline strings
 are normalized exactly like `setSlaDeadline` does. Malformed or
 inconsistent input throws a specific `invalid snapshot: …` error instead
 of producing a task with a broken audit trail. See
-`test/serialization.test.ts` for the full checklist.
+`test/serialization.test.ts` for the full checklist. The three
+payout/actor gates (`requirePayoutRef`, `requirePayoutAmount`,
+`requireActor`) travel in the snapshot too, but only when enabled — a
+gate-off task's snapshot keeps its legacy shape, a legacy snapshot
+without a gate field restores with that gate off, and an explicit
+`fromJSON(snapshot, { requirePayoutRef: false })` overrides the stored
+value in either direction; `diffTaskSnapshots` reports a gate flip as
+`payoutRefGateChanged` / `payoutAmountGateChanged` / `actorGateChanged`.
 
 Snapshots carry a schema version: `toJSON()` always writes `v: 1` (the
 exported `SNAPSHOT_VERSION` constant), and `fromJSON()` checks it before
@@ -873,9 +881,10 @@ without `v` are unaffected.
 Signed snapshots close the remaining gap: the hash chain covers
 history entries only, so the snapshot-level fields (`state`,
 `slaDeadlines`, `maxResubmits`, `maxDisputes`, `maxVisitsByState`,
-`rolePolicy`, `idempotencyKeys`) sit outside it — a rewritten
+`rolePolicy`, `idempotencyKeys`, `requirePayoutRef`,
+`requirePayoutAmount`, `requireActor`) sit outside it — a rewritten
 persisted file could push an SLA deadline back, loosen a budget or a
-policy, or clear consumed idempotency keys without breaking any
+policy, drop a payout/actor gate, or clear consumed idempotency keys without breaking any
 history link. `task.exportSignedSnapshot(secret)` wraps the snapshot
 in `{ v: 1, snapshot, mac }` (HMAC-SHA256 over the canonical JSON of
 the whole snapshot, same envelope shape as the sibling
@@ -1095,15 +1104,18 @@ task with `new TaskLifecycle(id, { requirePayoutRef: true })` makes a
 `PAYOUT_COMPLETE` dispatch without a `payoutRef` throw
 `payout reference required: …` (checked after the transition/budget
 checks, before anything is appended — a rejected dispatch leaves no
-trace). The switch is task configuration, not audit data: it is never
-written into the `toJSON()` snapshot, so a restored task re-enables it
-via `fromHistory(id, history, { requirePayoutRef: true })`. The settled
+trace). The switch is task configuration, not audit data, but it IS
+written into the `toJSON()` snapshot when enabled, so a restored task
+keeps the gate (an explicit `fromJSON` option overrides the stored
+value); a history-only rebuild re-enables it via
+`fromHistory(id, history, { requirePayoutRef: true })`. The settled
 amount has the same opt-in: `new TaskLifecycle(id, { requirePayoutAmount: true })`
 makes a `PAYOUT_COMPLETE` dispatch without a `payoutAmount` throw
 `payout amount required: …`; a present amount still goes through the
 usual validation (finite, non-negative, at most 2 decimal places), and
-0 is a legal amount. Same in-memory-only semantics, re-enabled via
-`fromHistory(id, history, { requirePayoutAmount: true })`. For the other
+0 is a legal amount. Same snapshot persistence, re-enabled via
+`fromHistory(id, history, { requirePayoutAmount: true })` on a
+history-only rebuild. For the other
 half of the loop, the
 `unreconciledPayouts()` reconciliation helper flags `PAID` tasks whose
 `PAYOUT_COMPLETE` entry lacks one:
@@ -2500,9 +2512,11 @@ without an `actor` throw `actor required: …` (checked after the
 transition/RBAC/budget checks, before the idempotency key is consumed —
 a rejected dispatch leaves no trace and consumes nothing). A listed
 event still needs a matching actor, not just any actor. Like the payout
-switch, the gate is task configuration, not audit data: it is never
-written into the `toJSON()` snapshot, so a restored task re-enables it
-via `fromHistory(id, history, { requireActor: true })`.
+switch, the gate is task configuration, not audit data, but it IS
+written into the `toJSON()` snapshot when enabled, so a restored task
+keeps the gate (an explicit `fromJSON` option overrides the stored
+value); a history-only rebuild re-enables it via
+`fromHistory(id, history, { requireActor: true })`.
 
 Honest caveat: this is a caller-supplied allowlist, not identity — the
 library records the actor string it is given but cannot verify who
@@ -2708,7 +2722,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1689 tests covering the happy path, reject→resubmit
+`npm test` runs 1705 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

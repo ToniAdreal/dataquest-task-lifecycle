@@ -2627,11 +2627,14 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * opt-in up-front counterpart to the advisory default and the
  * `unreconciledPayouts()` post-hoc reconciliation helper — for payout
  * flows where an external transfer reference always exists. The switch
- * is task configuration, not audit data: it is never written into the
- * `toJSON()` snapshot envelope (unlike `maxDisputes`/`maxResubmits`,
- * whose finite budgets are stored), so a rehydrated task must re-enable
- * it via `fromHistory(id, history, { requirePayoutRef: true })`. Invalid
- * values throw `invalid option: …` at construction.
+ * is task configuration, not audit data, but it IS written into the
+ * `toJSON()` snapshot envelope when enabled (`requirePayoutRef: true`
+ * only; a gate-off task's snapshot keeps its legacy shape), so
+ * `fromJSON()` restores it — an explicit `opts.requirePayoutRef`
+ * overrides the snapshot's value, and a legacy snapshot without the
+ * field restores gate-off. `fromHistory(id, history,
+ * { requirePayoutRef: true })` still re-enables it on a history-only
+ * rebuild. Invalid values throw `invalid option: …` at construction.
  *
  * `requirePayoutAmount` is an optional boolean (default `false`): when
  * `true`, `dispatch("PAYOUT_COMPLETE")` without a `payoutAmount` throws
@@ -2644,11 +2647,14 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * `NaN`/negative/sub-cent amounts are rejected with the same
  * `invalid dispatch options: …` error whether the switch is on or off,
  * and `0` is a legal amount (a zero-value settlement is still a
- * settlement). The switch is task configuration, not audit data: it is
- * never written into the `toJSON()` snapshot envelope, so a rehydrated
- * task must re-enable it via
- * `fromHistory(id, history, { requirePayoutAmount: true })`. Invalid
- * values throw `invalid option: …` at construction.
+ * settlement). The switch is task configuration, not audit data, but
+ * it IS written into the `toJSON()` snapshot envelope when enabled,
+ * so `fromJSON()` restores it — an explicit `opts.requirePayoutAmount`
+ * overrides the snapshot's value, and a legacy snapshot without the
+ * field restores gate-off. `fromHistory(id, history,
+ * { requirePayoutAmount: true })` still re-enables it on a
+ * history-only rebuild. Invalid values throw `invalid option: …` at
+ * construction.
  *
  * `requireActor` is an optional boolean (default `false`): when `true`,
  * every `dispatch()` without an `actor` throws
@@ -2660,10 +2666,13 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * constrains the events it lists, while `requireActor` constrains all
  * of them (a listed event still needs a matching actor, not just any
  * actor). Like `requirePayoutRef`, the switch is task configuration,
- * not audit data: it is never written into the `toJSON()` snapshot
- * envelope, so a rehydrated task must re-enable it via
- * `fromHistory(id, history, { requireActor: true })`. Invalid values
- * throw `invalid option: …` at construction.
+ * not audit data, but it IS written into the `toJSON()` snapshot
+ * envelope when enabled, so `fromJSON()` restores it — an explicit
+ * `opts.requireActor` overrides the snapshot's value, and a legacy
+ * snapshot without the field restores gate-off.
+ * `fromHistory(id, history, { requireActor: true })` still re-enables
+ * it on a history-only rebuild. Invalid values throw
+ * `invalid option: …` at construction.
  *
  * `auditSecret` is an optional secret (string or Buffer) that upgrades
  * the audit-history hash chain from plain SHA-256 to HMAC-SHA256
@@ -3159,6 +3168,19 @@ export interface SubscribeOptions {
  * duplicates deduped, so a consumed key keeps its no-op effect after a
  * snapshot restore.
  *
+ * `requirePayoutRef` / `requirePayoutAmount` / `requireActor` are
+ * present only when the corresponding gate is enabled. `toJSON()`
+ * writes each field ONLY when its gate is on, so a gate-off task's
+ * snapshot keeps its exact legacy shape; `fromJSON()` restores them
+ * (strict boolean validation; an explicit `opts` value overrides the
+ * snapshot's), and a legacy snapshot without a field restores with
+ * that gate off — the pre-#1257 shape, in which a restored task
+ * silently lost the gate and accepted a reference-free, amount-free,
+ * or anonymous `PAYOUT_COMPLETE` it would previously have rejected.
+ * The same convention as the sibling escrow-state-machine-ts repo's
+ * `requireSettlementRef` / `requireRefundRef` persistence (backlog
+ * #1256).
+ *
  * The parser is fail-closed about fields outside this shape: any
  * top-level field other than the ones listed here (and any history-entry
  * field outside {@link TaskHistoryEntry}) is rejected as an unknown
@@ -3199,6 +3221,35 @@ export interface TaskSnapshot {
   maxVisitsByState?: Partial<Record<TaskState, number>>;
   rolePolicy?: RolePolicy;
   idempotencyKeys?: string[];
+  /**
+   * Payout-reference gate (see {@link TaskLifecycleOptions.requirePayoutRef}),
+   * present only when the gate is enabled. `toJSON()` writes this
+   * field ONLY when true, so a gate-off task's snapshot keeps its
+   * exact legacy shape. `fromJSON()` restores it (strict boolean
+   * validation; an explicit `opts.requirePayoutRef` overrides the
+   * snapshot's value). A legacy snapshot without the field restores
+   * with the gate off. The schema version stays 1: the field is an
+   * optional gate flag, not a format change.
+   */
+  requirePayoutRef?: boolean;
+  /**
+   * Payout-amount gate (see {@link TaskLifecycleOptions.requirePayoutAmount}),
+   * present only when the gate is enabled. Same write/restore rules
+   * as `requirePayoutRef`: `toJSON()` writes it ONLY when true,
+   * `fromJSON()` restores it unless an explicit
+   * `opts.requirePayoutAmount` overrides it, and a legacy snapshot
+   * without the field restores with the gate off.
+   */
+  requirePayoutAmount?: boolean;
+  /**
+   * Audit-attribution gate (see {@link TaskLifecycleOptions.requireActor}),
+   * present only when the gate is enabled. Same write/restore rules
+   * as `requirePayoutRef`: `toJSON()` writes it ONLY when true,
+   * `fromJSON()` restores it unless an explicit `opts.requireActor`
+   * overrides it, and a legacy snapshot without the field restores
+   * with the gate off.
+   */
+  requireActor?: boolean;
 }
 
 /**
@@ -3224,6 +3275,9 @@ const SNAPSHOT_FIELDS = new Set([
   "maxVisitsByState",
   "rolePolicy",
   "idempotencyKeys",
+  "requirePayoutRef",
+  "requirePayoutAmount",
+  "requireActor",
 ]);
 
 const HISTORY_ENTRY_FIELDS = new Set([
@@ -3272,11 +3326,12 @@ const HISTORY_ENTRY_FIELDS = new Set([
  * Why this exists: the audit hash chain covers the history entries
  * only — the snapshot-level fields (`state`, `slaDeadlines`,
  * `maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`,
- * `idempotencyKeys`) sit outside the chain, so a rewritten persisted
+ * `idempotencyKeys`, `requirePayoutRef`, `requirePayoutAmount`,
+ * `requireActor`) sit outside the chain, so a rewritten persisted
  * snapshot could push an SLA deadline back, loosen a budget or a
- * policy, or clear consumed idempotency keys without breaking any
- * history link. The envelope MAC covers the whole snapshot, so any
- * such rewrite fails closed at restore.
+ * policy, drop a payout/actor gate, or clear consumed idempotency
+ * keys without breaking any history link. The envelope MAC covers
+ * the whole snapshot, so any such rewrite fails closed at restore.
  *
  * The envelope carries no secret: the secret is caller configuration,
  * never persisted in the envelope, and the same secret must be
@@ -3484,6 +3539,26 @@ export interface TaskSnapshotDiff {
    * "no field" and an empty array are the same state.
    */
   idempotencyKeysChanged?: boolean;
+  /**
+   * Payout-reference gate flipped. Reported as plain booleans: an
+   * absent field and an explicit `false` are the same state (gate
+   * off), so only a true off->on or on->off flip is a change.
+   */
+  payoutRefGateChanged?: { from: boolean; to: boolean };
+  /**
+   * Payout-amount gate flipped. Same reporting as
+   * `payoutRefGateChanged`: an absent field and an explicit `false`
+   * are the same state (gate off), so only a true off->on or
+   * on->off flip is a change.
+   */
+  payoutAmountGateChanged?: { from: boolean; to: boolean };
+  /**
+   * Audit-attribution gate flipped. Same reporting as
+   * `payoutRefGateChanged`: an absent field and an explicit `false`
+   * are the same state (gate off), so only a true off->on or
+   * on->off flip is a change.
+   */
+  actorGateChanged?: { from: boolean; to: boolean };
 }
 
 /**
@@ -3505,18 +3580,24 @@ export interface TaskSnapshotDiff {
  * it appends no history entry — `setSlaDeadline` /
  * `clearSlaDeadline` touch no audit log), the consumed
  * idempotency-key set as a whole (compared order-insensitively; a
- * snapshot without the field is the empty set), and history appends.
+ * snapshot without the field is the empty set), the three
+ * payout/actor gates `requirePayoutRef` / `requirePayoutAmount` /
+ * `requireActor` (only an off->on or on->off flip counts — an absent
+ * field and an explicit `false` are the same gate-off state), and
+ * history appends.
  * `v` and the configuration fields (`maxResubmits`, `maxDisputes`,
  * `maxVisitsByState`, `rolePolicy`) are deliberately not reported:
  * the version is schema metadata, and the rest is task
- * configuration, not task state. The idempotency-key set is the
- * exception to that exclusion: unlike the budgets and the role
- * policy, it is not fixed configuration — it grows with every
- * keyed dispatch, so it is task state, and a key consumed (or
- * dropped on restore) between two stored snapshots is a change
- * worth reporting. This mirrors the sibling
+ * configuration, not task state. The idempotency-key set and the
+ * three gates are the exceptions to that exclusion: unlike the
+ * budgets and the role policy, the key set grows with every keyed
+ * dispatch, so it is task state, and a key consumed (or dropped on
+ * restore) between two stored snapshots is a change worth
+ * reporting; likewise a gate flipped between two stored snapshots
+ * changes which dispatches the restored task will accept, so it is
+ * audit-relevant too. This mirrors the sibling
  * `escrow-state-machine-ts` repo's `diffEscrowSnapshots`, which
- * reports the same dimension for the same reason.
+ * reports the same dimensions for the same reasons.
  *
  * History is append-only, so `b`'s history must be an extension of
  * `a`'s: same entries in the same order, then zero or more new ones
@@ -3615,6 +3696,26 @@ export function diffTaskSnapshots(
   }
   if (idempotencyKeysKey(a.idempotencyKeys) !== idempotencyKeysKey(b.idempotencyKeys)) {
     diff.idempotencyKeysChanged = true;
+  }
+  if ((a.requirePayoutRef === true) !== (b.requirePayoutRef === true)) {
+    diff.payoutRefGateChanged = {
+      from: a.requirePayoutRef === true,
+      to: b.requirePayoutRef === true,
+    };
+  }
+  if (
+    (a.requirePayoutAmount === true) !== (b.requirePayoutAmount === true)
+  ) {
+    diff.payoutAmountGateChanged = {
+      from: a.requirePayoutAmount === true,
+      to: b.requirePayoutAmount === true,
+    };
+  }
+  if ((a.requireActor === true) !== (b.requireActor === true)) {
+    diff.actorGateChanged = {
+      from: a.requireActor === true,
+      to: b.requireActor === true,
+    };
   }
   return diff;
 }
@@ -4305,7 +4406,8 @@ function computeSignedSnapshotMac(
  *  - unknown top-level fields are rejected (fail-closed), never silently
  *    dropped: only `v`/`id`/`state`/`history`/`slaDeadlines`/
  *    `maxResubmits`/`maxDisputes`/`maxVisitsByState`/`rolePolicy`/
- *    `idempotencyKeys` are allowed (`unknown field "<name>"`), checked
+ *    `idempotencyKeys`/`requirePayoutRef`/`requirePayoutAmount`/
+ *    `requireActor` are allowed (`unknown field "<name>"`), checked
  *    right after the version gate and before any field is consumed, so a
  *    typo like `deadlline` fails loudly instead of quietly losing the
  *    SLA deadlines it was meant to carry
@@ -4325,6 +4427,11 @@ function computeSignedSnapshotMac(
  *    the budget only governs future dispatches into that state)
  *  - idempotencyKeys, when present, must be an array of non-empty
  *    strings (duplicates are deduped on rehydration)
+ *  - requirePayoutRef / requirePayoutAmount / requireActor, when
+ *    present, must each be a boolean (absent means that gate is off,
+ *    the legacy shape; a history that already lacks the gated evidence
+ *    does NOT fail rehydration — the gates only govern future
+ *    dispatches)
  *
  * Anything produced by toJSON() passes; anything else must earn its way.
  */
@@ -4338,6 +4445,9 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   maxVisitsByState: Map<TaskState, number>;
   rolePolicy: Map<TaskEvent, string[]>;
   idempotencyKeys: Set<string>;
+  requirePayoutRef: boolean | undefined;
+  requirePayoutAmount: boolean | undefined;
+  requireActor: boolean | undefined;
 } {
   if (!isRecord(snapshot)) {
     throw new Error("invalid snapshot: expected a JSON object");
@@ -4449,7 +4559,42 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     "invalid snapshot",
   );
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, maxVisitsByState, rolePolicy, idempotencyKeys };
+  // Same for the three payout/actor gates: configuration for future
+  // dispatches, validated strictly but never consulted against the
+  // stored history — a snapshot carrying `requirePayoutRef: true`
+  // restores gate-on, a snapshot without the field restores gate-off
+  // (the legacy shape), and a non-boolean value is rejected, not
+  // silently treated as off. The same per-field shape as the sibling
+  // escrow-state-machine-ts parser (backlog #1256).
+  let requirePayoutRef: boolean | undefined;
+  if (snapshot.requirePayoutRef !== undefined) {
+    if (typeof snapshot.requirePayoutRef !== "boolean") {
+      throw new Error(
+        `invalid snapshot: requirePayoutRef must be a boolean, got ${JSON.stringify(snapshot.requirePayoutRef)}`,
+      );
+    }
+    requirePayoutRef = snapshot.requirePayoutRef;
+  }
+  let requirePayoutAmount: boolean | undefined;
+  if (snapshot.requirePayoutAmount !== undefined) {
+    if (typeof snapshot.requirePayoutAmount !== "boolean") {
+      throw new Error(
+        `invalid snapshot: requirePayoutAmount must be a boolean, got ${JSON.stringify(snapshot.requirePayoutAmount)}`,
+      );
+    }
+    requirePayoutAmount = snapshot.requirePayoutAmount;
+  }
+  let requireActor: boolean | undefined;
+  if (snapshot.requireActor !== undefined) {
+    if (typeof snapshot.requireActor !== "boolean") {
+      throw new Error(
+        `invalid snapshot: requireActor must be a boolean, got ${JSON.stringify(snapshot.requireActor)}`,
+      );
+    }
+    requireActor = snapshot.requireActor;
+  }
+
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, maxVisitsByState, rolePolicy, idempotencyKeys, requirePayoutRef, requirePayoutAmount, requireActor };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -4463,20 +4608,23 @@ export class TaskLifecycle {
   private _rolePolicy: Map<TaskEvent, string[]>;
   /**
    * Up-front enforcement for PAYOUT_COMPLETE evidence. Task configuration:
-   * never written into the JSON snapshot (see toJSON), so a rehydrated
-   * task re-enables it via fromHistory(id, history, { requirePayoutRef }).
+   * written into the JSON snapshot when enabled (see toJSON), so a
+   * rehydrated task restores it via fromJSON; a history-only rebuild
+   * re-enables it via fromHistory(id, history, { requirePayoutRef }).
    */
   private _requirePayoutRef: boolean;
   /**
    * Up-front enforcement for PAYOUT_COMPLETE evidence. Task configuration:
-   * never written into the JSON snapshot (see toJSON), so a rehydrated
-   * task re-enables it via fromHistory(id, history, { requirePayoutAmount }).
+   * written into the JSON snapshot when enabled (see toJSON), so a
+   * rehydrated task restores it via fromJSON; a history-only rebuild
+   * re-enables it via fromHistory(id, history, { requirePayoutAmount }).
    */
   private _requirePayoutAmount: boolean;
   /**
    * Up-front enforcement for audit attribution. Task configuration:
-   * never written into the JSON snapshot (see toJSON), so a rehydrated
-   * task re-enables it via fromHistory(id, history, { requireActor }).
+   * written into the JSON snapshot when enabled (see toJSON), so a
+   * rehydrated task restores it via fromJSON; a history-only rebuild
+   * re-enables it via fromHistory(id, history, { requireActor }).
    */
   private _requireActor: boolean;
   /**
@@ -5441,6 +5589,15 @@ export class TaskLifecycle {
     if (this._idempotencyKeys.size > 0) {
       snapshot.idempotencyKeys = [...this._idempotencyKeys];
     }
+    if (this._requirePayoutRef) {
+      snapshot.requirePayoutRef = true;
+    }
+    if (this._requirePayoutAmount) {
+      snapshot.requirePayoutAmount = true;
+    }
+    if (this._requireActor) {
+      snapshot.requireActor = true;
+    }
     return snapshot;
   }
 
@@ -5503,15 +5660,60 @@ export class TaskLifecycle {
    * restored with a secret). A legacy hashless snapshot restored with
    * a secret is chained in keyed mode on rehydration, so its live
    * history verifies with that secret from then on.
+   *
+   * The three payout/actor gates (`requirePayoutRef`,
+   * `requirePayoutAmount`, `requireActor`) are snapshot state with
+   * override semantics, mirroring the sibling
+   * escrow-state-machine-ts `fromJSON` merge table (backlog #1256):
+   * an explicit (non-undefined) `opts` value wins, otherwise the
+   * snapshot's value is installed through the constructor. An
+   * explicit `undefined` counts as omitted. A legacy snapshot
+   * without a gate field restores with that gate off, exactly like a
+   * default-constructed task.
    */
   static fromJSON(
     snapshot: unknown,
     opts?: TaskLifecycleOptions,
   ): TaskLifecycle {
     const parsed = parseSnapshot(snapshot, opts?.auditSecret);
+    // Gate merge table (see JSDoc): snapshot values first, explicit
+    // opts override them. Only the three gate keys are merged — every
+    // other opts field keeps its existing fromJSON treatment (only
+    // auditSecret is read from opts; the budgets come from the
+    // snapshot), so a caller cannot silently re-budget a restore.
+    const snapshotGates: TaskLifecycleOptions = {
+      ...(parsed.requirePayoutRef !== undefined
+        ? { requirePayoutRef: parsed.requirePayoutRef }
+        : {}),
+      ...(parsed.requirePayoutAmount !== undefined
+        ? { requirePayoutAmount: parsed.requirePayoutAmount }
+        : {}),
+      ...(parsed.requireActor !== undefined
+        ? { requireActor: parsed.requireActor }
+        : {}),
+    };
+    const gateOverrides: TaskLifecycleOptions =
+      opts !== undefined &&
+      typeof opts === "object" &&
+      opts !== null &&
+      !Array.isArray(opts)
+        ? {
+            ...(opts.requirePayoutRef !== undefined
+              ? { requirePayoutRef: opts.requirePayoutRef }
+              : {}),
+            ...(opts.requirePayoutAmount !== undefined
+              ? { requirePayoutAmount: opts.requirePayoutAmount }
+              : {}),
+            ...(opts.requireActor !== undefined
+              ? { requireActor: opts.requireActor }
+              : {}),
+          }
+        : {};
     const task = new TaskLifecycle(parsed.id, {
       maxResubmits: parsed.maxResubmits,
       maxDisputes: parsed.maxDisputes,
+      ...snapshotGates,
+      ...gateOverrides,
       ...(opts?.auditSecret !== undefined
         ? { auditSecret: opts.auditSecret }
         : {}),
@@ -5548,7 +5750,8 @@ export class TaskLifecycle {
    * snapshot under `secret` throws a descriptive configuration
    * `Error` and no task is produced — a tampered `state`,
    * `slaDeadlines`, `maxResubmits`, `maxDisputes`,
-   * `maxVisitsByState`, `rolePolicy`, or `idempotencyKeys`, a
+   * `maxVisitsByState`, `rolePolicy`, `idempotencyKeys`,
+   * `requirePayoutRef`, `requirePayoutAmount`, or `requireActor`, a
    * tampered history entry, or a wrong secret all fail here, before
    * any snapshot parsing, so a tampered envelope can never partially
    * install. A MAC-valid envelope whose snapshot is itself malformed
