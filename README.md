@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1672 tests, all local
+npm test   # 1680 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1254,7 +1254,11 @@ recorded none, it never pairs: it lands in `unreconciled` instead, the
 same population `unreconciledPayouts()` returns. A reference appearing
 twice in the ledger throws (`duplicate ledger payoutRef`), as does
 any malformed ledger row (including a `payoutRef` longer than 256
-characters); pure, like the other screens.
+characters); a task id appearing twice in the batch throws too
+(`duplicate task`), whether it is the same object passed twice or
+two objects sharing one id — counting one task twice would double
+the batch sum, so the batch is rejected before any pairing. Pure,
+like the other screens.
 
 ### Payout amounts
 
@@ -2693,7 +2697,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1672 tests covering the happy path, reject→resubmit
+`npm test` runs 1680 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

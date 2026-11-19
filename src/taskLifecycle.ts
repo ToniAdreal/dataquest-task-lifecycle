@@ -2250,20 +2250,25 @@ export interface ReconcilePayoutsResult {
  *    no recorded amount cannot be checked against a ledger by
  *    amount.
  *
- * Fail-fast, before any pairing: a ledger row that is not an object,
- * carries an empty, non-string, or overlong (longer than
+ * Fail-fast, before any pairing: a task id appearing twice in the
+ * batch throws `duplicate task` — the same task object passed twice,
+ * or two objects sharing one id, would otherwise be counted as two
+ * tasks sharing a reference and double the batch sum (a ledger row
+ * recording exactly the doubled sum would then "match" money that
+ * was paid once). A ledger row that is not an object, carries an
+ * empty, non-string, or overlong (longer than
  * {@link MAX_PAYOUT_REF_LENGTH} characters) `payoutRef`, or carries a
  * non-finite or negative `payoutAmount` throws, and a reference
  * appearing twice in the ledger throws `duplicate ledger payoutRef`
  * — a duplicated ledger row would otherwise make "matched" ambiguous
- * (which row did the task pair with?). The task side needs no such
- * check: duplicate references across tasks are legitimate batch
- * settlements, as above. One more fail-fast lives in the pairing
- * itself: summing a shared reference's amounts in minor units can
- * overflow on legacy giant amounts (the same {@link totalPaidOut}
- * overflow contract), and that throws instead of silently wrapping
- * the sum — a single-task reference never sums, so it never throws
- * here.
+ * (which row did the task pair with?). The task side needs no other
+ * such check: duplicate references across distinct tasks are
+ * legitimate batch settlements, as above. One more fail-fast lives in
+ * the pairing itself: summing a shared reference's amounts in minor
+ * units can overflow on legacy giant amounts (the same
+ * {@link totalPaidOut} overflow contract), and that throws instead
+ * of silently wrapping the sum — a single-task reference never sums,
+ * so it never throws here.
  *
  * Pure: reads the tasks and the ledger rows, never mutates,
  * dispatches, or copies them. An empty task batch and an empty ledger
@@ -2273,6 +2278,22 @@ export function reconcilePayouts(
   tasks: readonly TaskLifecycle[],
   ledger: readonly LedgerPayout[],
 ): ReconcilePayoutsResult {
+  // A task id may appear only once in the batch: the same object
+  // passed twice, or two objects sharing one id, would otherwise be
+  // counted as two tasks sharing a reference and double the batch
+  // sum. Checked before any ledger validation, so the duplicate-task
+  // error is the one the caller sees even when the ledger is also
+  // malformed — and before any pairing, so no group is ever placed.
+  const seenTaskIds = new Set<string>();
+  for (const task of tasks) {
+    if (seenTaskIds.has(task.id)) {
+      throw new Error(
+        `invalid reconcilePayouts: duplicate task ${JSON.stringify(task.id)}`,
+      );
+    }
+    seenTaskIds.add(task.id);
+  }
+
   const ledgerByRef = new Map<string, LedgerPayout>();
   for (const row of ledger) {
     if (row === null || typeof row !== "object") {
