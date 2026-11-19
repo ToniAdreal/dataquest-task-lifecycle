@@ -37,13 +37,16 @@ const CSV_HEADER = SUMMARY_FIELDS.join(",");
 /**
  * Validate the structural shape of a task settlements summary
  * before it is serialized (or after it is parsed back). This is a
- * shape check plus the one self-consistency identity the summary
- * itself carries — `gap === quotedTotal - paidTotal` — not a
- * re-derivation of the accounting: the figures are trusted as the
- * caller's (normally {@link summarizeTaskSettlements}'s output
- * from `taskLifecycle.ts`), but a value that is not a summary at
- * all must fail loudly here rather than silently degrading in
- * transit.
+ * shape check plus the self-consistency the summary itself
+ * carries — one amount identity, `gap === quotedTotal - paidTotal`,
+ * and four count/amount consistencies a real
+ * {@link summarizeTaskSettlements} output always satisfies:
+ * `paid <= tasks`, `mismatched <= paid`, `unquotedPaid <= paid`,
+ * and `unquotedPaidTotal <= paidTotal` — not a re-derivation of
+ * the accounting: the figures are trusted as the caller's (normally
+ * {@link summarizeTaskSettlements}'s output from
+ * `taskLifecycle.ts`), but a value that is not a summary at all
+ * must fail loudly here rather than silently degrading in transit.
  *
  * Every field must be a safe integer — `JSON.stringify` and
  * `Number` both lose precision past `Number.MAX_SAFE_INTEGER`, so
@@ -94,6 +97,23 @@ function assertSummaryShape(summary: unknown, prefix: string): void {
       `gap ${typed.gap} does not equal quotedTotal ${typed.quotedTotal} minus paidTotal ${typed.paidTotal}`,
     );
   }
+  // Cross-field consistency: a real summarizeTaskSettlements output
+  // always satisfies these four, so a summary that breaks one is
+  // self-contradictory, not merely unusual.
+  if (typed.paid > typed.tasks) {
+    fail(`paid ${typed.paid} exceeds tasks ${typed.tasks}`);
+  }
+  if (typed.mismatched > typed.paid) {
+    fail(`mismatched ${typed.mismatched} exceeds paid ${typed.paid}`);
+  }
+  if (typed.unquotedPaid > typed.paid) {
+    fail(`unquotedPaid ${typed.unquotedPaid} exceeds paid ${typed.paid}`);
+  }
+  if (typed.unquotedPaidTotal > typed.paidTotal) {
+    fail(
+      `unquotedPaidTotal ${typed.unquotedPaidTotal} exceeds paidTotal ${typed.paidTotal}`,
+    );
+  }
 }
 
 /** Escape one CSV field following RFC 4180. */
@@ -130,8 +150,10 @@ function csvField(value: string): string {
  * Before rendering, the summary is shape-checked with
  * {@link assertSummaryShape}: a non-object summary, a missing or
  * unknown field, a non-integer or unsafe-integer figure, a
- * negative count or total, or a `gap` that does not equal
- * `quotedTotal - paidTotal` throws
+ * negative count or total, a `gap` that does not equal
+ * `quotedTotal - paidTotal`, or a count/total that contradicts
+ * another field (`paid > tasks`, `mismatched > paid`,
+ * `unquotedPaid > paid`, `unquotedPaidTotal > paidTotal`) throws
  * `cannot render task settlements summary as CSV: …` instead of
  * emitting a row that reads `Infinity` or `NaN`.
  *
@@ -279,8 +301,11 @@ function parseCsvInteger(value: string, where: string): number {
  * `tasks,paid,quotedTotal,paidTotal,gap,mismatched,unquotedPaid,unquotedPaidTotal`;
  * there must be exactly one data row; every field must be a
  * canonical integer (see {@link CSV_INTEGER}); every field except
- * `gap` must be non-negative; and `gap` must equal
- * `quotedTotal - paidTotal`. Any violation throws
+ * `gap` must be non-negative; `gap` must equal
+ * `quotedTotal - paidTotal`; and no count or total may contradict
+ * another field (`paid > tasks`, `mismatched > paid`,
+ * `unquotedPaid > paid`, `unquotedPaidTotal > paidTotal`). Any
+ * violation throws
  * `cannot parse task settlements CSV: …` instead of returning a
  * plausible-looking half-summary. A UTF-8 byte-order mark is a
  * transport artifact, not a column, and is stripped; trailing
@@ -380,8 +405,10 @@ export function renderTaskSettlementsJson(
  * non-integer or unsafe-integer figure (including `null`, which is
  * what a non-finite figure becomes after a plain `JSON.stringify`,
  * and `1e999`, which `JSON.parse` reads as `Infinity`), a
- * negative count or total, or a `gap` that does not equal
- * `quotedTotal - paidTotal` all throw
+ * negative count or total, a `gap` that does not equal
+ * `quotedTotal - paidTotal`, or a count/total that contradicts
+ * another field (`paid > tasks`, `mismatched > paid`,
+ * `unquotedPaid > paid`, `unquotedPaidTotal > paidTotal`) all throw
  * `cannot parse task settlements JSON: …` instead of returning a
  * plausible-looking half-summary. A parsed summary re-renders
  * byte-identically through `renderTaskSettlementsJson`.
@@ -447,8 +474,10 @@ export function parseTaskSettlementsJson(text: string): TaskSettlementsSummary {
  * Before rendering, the summary is shape-checked with
  * {@link assertSummaryShape}: a non-object summary, a missing or
  * unknown field, a non-integer or unsafe-integer figure, a negative
- * count or total, or a `gap` that does not equal
- * `quotedTotal - paidTotal` throws
+ * count or total, a `gap` that does not equal
+ * `quotedTotal - paidTotal`, or a count/total that contradicts
+ * another field (`paid > tasks`, `mismatched > paid`,
+ * `unquotedPaid > paid`, `unquotedPaidTotal > paidTotal`) throws
  * `cannot render task settlements summary: …` instead of emitting a
  * plausible-looking document.
  *

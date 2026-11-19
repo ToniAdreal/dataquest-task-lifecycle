@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1726 tests, all local
+npm test   # 1740 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2732,7 +2732,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1726 tests covering the happy path, reject→resubmit
+`npm test` runs 1740 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -2848,7 +2848,13 @@ split, all-quoted gap identity against the per-task deltas, non-PAID
 exclusion, minor-unit integer-ness on a 0.1 + 0.2 batch, quote
 without a recorded payout neither mismatched nor unquoted,
 exact-settlement non-mismatch, legacy-giant and
-accumulation-only overflow fail-fast, and purity), and the audit-history
+accumulation-only overflow fail-fast, and purity), and the
+settlement summary shape check (per-field shape, gap identity,
+and the four count/amount consistencies — `paid <= tasks`,
+`mismatched <= paid`, `unquotedPaid <= paid`,
+`unquotedPaidTotal <= paidTotal` — rejected at all four
+render/parse entry points, boundary equalities still accepted),
+and the audit-history
 SHA-256 hash chain (`verifyHistoryChain`: genesis linkage, tamper/deletion/
 reorder/forgery detection, legacy pass-through, mixed-history rejection,
 parseHistory/replay enforcement, NDJSON round-trip chain preservation,

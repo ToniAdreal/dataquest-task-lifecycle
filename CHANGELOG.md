@@ -45,6 +45,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Settlement summary shape check now rejects self-contradictory
+  summaries (2026-11-20, backlog #1269): `assertSummaryShape`
+  previously verified only per-field shape and the `gap ===
+  quotedTotal - paidTotal` identity, so a hand-built summary such
+  as `{ tasks: 3, paid: 5, mismatched: 9, unquotedPaid: 7,
+  unquotedPaidTotal: 999 }` rendered and parsed as a plausible
+  reconciliation document. The check now also enforces the four
+  count/amount consistencies a real `summarizeTaskSettlements`
+  output always satisfies — `paid <= tasks`, `mismatched <= paid`,
+  `unquotedPaid <= paid`, `unquotedPaidTotal <= paidTotal` — at
+  all four render/parse entry points, which share the check. The
+  test count rises by fourteen (1726 to 1740 tests).
+
 - `payoutMismatch()` compares in integer minor units (2026-11-19,
   backlog #1263): legacy sub-cent pairs (quoted 100.005 / paid
   100.004) used to report a delta-0 mismatch and broke the
