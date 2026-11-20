@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1756 tests, all local
+npm test   # 1768 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1520,7 +1520,11 @@ diff is a comparison, not a validation — it never re-checks that
 either summary's `gap` equals `quotedTotal - paidTotal` — and
 there is no identity guard, because a summary carries no batch id
 at all (unlike escrow's `escrowId` check), so diffing summaries of
-two different batches is the caller's responsibility.
+two different batches is the caller's responsibility. Both inputs
+must still be summaries at all — a missing or unknown field, or a
+non-integer field, throws
+`invalid task settlements summary diff: …` instead of diffing as
+no change or a phantom move (backlog #1276).
 
 ### Payout webhooks
 
@@ -2737,7 +2741,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1756 tests covering the happy path, reject→resubmit
+`npm test` runs 1768 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

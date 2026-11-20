@@ -59,8 +59,24 @@ const CSV_HEADER = SUMMARY_FIELDS.join(",");
  * carry, and a missing field would render as an empty column.
  * Every failure throws `<prefix>: …`, where the prefix names the
  * direction, so a failure's origin is unambiguous.
+ *
+ * `opts.checkConsistency` (default `true`) selects whether the
+ * gap identity and the four cross-field consistencies are checked
+ * at all. The renderers and parsers always check them: a value
+ * that is not a self-consistent summary must fail loudly there
+ * rather than silently degrading in transit. Callers that compare
+ * rather than validate — `diffTaskSettlementsSummaries` — pass
+ * `{ checkConsistency: false }`: the shape is still enforced (a
+ * non-summary never reaches the field compares), but the gap
+ * identity and the cross-field figures are the caller's figures
+ * to compare, not this function's to re-derive (backlog #1094's
+ * comparison-not-validation contract, backlog #1276).
  */
-function assertSummaryShape(summary: unknown, prefix: string): void {
+function assertSummaryShape(
+  summary: unknown,
+  prefix: string,
+  opts?: { checkConsistency?: boolean },
+): void {
   const fail = (reason: string): never => {
     throw new Error(`${prefix}: ${reason}`);
   };
@@ -92,6 +108,9 @@ function assertSummaryShape(summary: unknown, prefix: string): void {
     }
   }
   const typed = summary as TaskSettlementsSummary;
+  if (opts?.checkConsistency === false) {
+    return;
+  }
   if (typed.gap !== typed.quotedTotal - typed.paidTotal) {
     fail(
       `gap ${typed.gap} does not equal quotedTotal ${typed.quotedTotal} minus paidTotal ${typed.paidTotal}`,
@@ -572,9 +591,17 @@ function fieldDiff(
  * fresh object (its entries hold numbers, so there is nothing to
  * detach). This is a comparison, not a validation — it does not
  * re-check that either summary's `gap` equals
- * `quotedTotal - paidTotal`, that its fields are safe integers, or
- * that its figures match any audit history; run an untrusted input
- * through the renderers/parsers when the input itself is untrusted.
+ * `quotedTotal - paidTotal`, that its cross-field figures are
+ * self-consistent, or that its figures match any audit history;
+ * run an untrusted input through the renderers/parsers when the
+ * input itself is untrusted. The shape check still runs, though:
+ * both inputs must be summaries at all (all eight fields present,
+ * no unknown fields, every field a non-negative safe integer
+ * except `gap`), so `{}` against `{}` no longer reports a false
+ * "no change" and a `NaN` field no longer reports a phantom move
+ * — the gap identity and the cross-field consistencies are the
+ * only checks the diff leaves to the renderers/parsers
+ * (backlog #1276).
  *
  *   const before = { tasks: 6, paid: 3, quotedTotal: 650000,
  *     paidTotal: 1634900, gap: -984900, mismatched: 1,
@@ -595,6 +622,17 @@ export function diffTaskSettlementsSummaries(
       "invalid task settlements summary diff: both summaries must be objects",
     );
   }
+  // Shape first: a non-summary must fail here rather than diffing
+  // as "no change" (`{}` vs `{}`) or as a phantom move (`NaN`
+  // never equals itself). Consistency is deliberately not checked —
+  // the gap identity and the cross-field figures stay the
+  // renderers'/parsers' job (backlog #1094, #1276).
+  assertSummaryShape(a, "invalid task settlements summary diff", {
+    checkConsistency: false,
+  });
+  assertSummaryShape(b, "invalid task settlements summary diff", {
+    checkConsistency: false,
+  });
   const diff: TaskSettlementsSummaryDiff = {};
   const tasks = fieldDiff(a.tasks, b.tasks);
   if (tasks !== undefined) diff.tasksChanged = tasks;

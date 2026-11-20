@@ -45,6 +45,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `diffTaskSettlementsSummaries()` shape-checks both inputs first
+  (2026-11-20, backlog #1276): the diff previously only checked
+  that each input was an object and then read eight fields straight
+  off it, so `diffTaskSettlementsSummaries({}, {})` returned `{}`
+  — a false "no change" between two non-summaries — a missing
+  field diffed as no move (`undefined === undefined`), and a `NaN`
+  field reported a phantom move on every call. Both inputs now go
+  through the shared shape check (all eight fields present, no
+  unknown fields, every field a non-negative safe integer except
+  `gap`), throwing
+  `invalid task settlements summary diff: …` before any field
+  compare. The comparison-not-validation contract is untouched:
+  the gap identity and the cross-field consistencies are still
+  not re-checked — a gap that disagrees with the totals, or a
+  summary with `paid > tasks`, still diffs — via a new
+  `checkConsistency: false` option on the shared checker, whose
+  renderer/parser call sites keep the full check. The test count
+  rises by twelve (1756 to 1768 tests).
+
 - `buildPayoutWebhook()` / `verifyPayoutWebhook()` reject unknown
   options keys (2026-11-20, backlog #1273): both entry points read
   only their documented fields, so a typo'd key was silently
