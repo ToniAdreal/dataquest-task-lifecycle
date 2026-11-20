@@ -136,7 +136,12 @@ export interface PayoutWebhook {
   signature: string;
 }
 
-/** Options for {@link buildPayoutWebhook}. All fields optional. */
+/**
+ * Options for {@link buildPayoutWebhook}. All fields optional. An
+ * unknown option key throws a configuration error before any field is
+ * read (`cannot build payout webhook: unknown option "<key>"`, #1273),
+ * so a typo'd gate can never silently fall back to its default.
+ */
 export interface BuildPayoutWebhookOptions {
   /**
    * Payload `at` timestamp. Defaults to the real clock; inject a fixed
@@ -163,6 +168,47 @@ export interface BuildPayoutWebhookOptions {
    * is no reference to carry).
    */
   requirePayoutRef?: boolean;
+}
+
+/** Allowlist of `BuildPayoutWebhookOptions` keys (#1273). */
+const BUILD_PAYOUT_WEBHOOK_OPTION_FIELDS = new Set([
+  "now",
+  "eventId",
+  "requirePayoutRef",
+]);
+
+/** Allowlist of `VerifyPayoutWebhookOptions` keys (#1273). */
+const VERIFY_PAYOUT_WEBHOOK_OPTION_FIELDS = new Set([
+  "secrets",
+  "maxAgeMs",
+  "maxFutureSkewMs",
+  "requireEventId",
+  "now",
+]);
+
+/**
+ * Shared unknown-option scan for the two payout-webhook entry points
+ * (#1273): a typo'd key is a caller bug and must be reported as itself,
+ * never silently dropped — a typo'd `requirePayoutAmout` would
+ * otherwise silently leave the "no reference, no notification" gate
+ * off while the caller believes it is on, and a typo'd `maxAge`
+ * would silently leave the replay window unset. A non-object options
+ * value (a missing options argument, a string, …) has no keys to scan
+ * and falls through to the entry point's own validation, which keeps
+ * its existing behavior (a bare `TypeError` on a `null` options value
+ * is the pre-#1273 behavior and is deliberately unchanged).
+ */
+function assertNoUnknownPayoutWebhookOptions(
+  options: unknown,
+  fields: ReadonlySet<string>,
+  caller: string,
+): void {
+  if (options === null || typeof options !== "object") return;
+  for (const key of Object.keys(options)) {
+    if (!fields.has(key)) {
+      throw new Error(`${caller}: unknown option "${key}"`);
+    }
+  }
 }
 
 function assertSecret(secret: string | Buffer): void {
@@ -226,13 +272,27 @@ function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
  * valid timestamp, an injected `eventId` is not a non-empty string (or
  * is longer than {@link MAX_EVENT_ID_LENGTH} characters), or — with
  * `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
- * entry carries no `payoutRef`.
+ * entry carries no `payoutRef`. An unknown option key throws
+ * `cannot build payout webhook: unknown option "<key>"` before any
+ * field is read (#1273), so a typo'd gate can never silently fall back
+ * to its default.
  */
 export function buildPayoutWebhook(
   task: TaskLifecycle,
   secret: string | Buffer,
   options: BuildPayoutWebhookOptions = {},
 ): PayoutWebhook {
+  // Unknown option keys fail closed (#1273, see
+  // BUILD_PAYOUT_WEBHOOK_OPTION_FIELDS), checked before any field is
+  // read so a typo is reported as itself: a typo'd `requirePayoutAmout`
+  // would otherwise silently leave the payout-ref gate off while the
+  // caller believes it is on, and the notification would go out
+  // reference-less.
+  assertNoUnknownPayoutWebhookOptions(
+    options,
+    BUILD_PAYOUT_WEBHOOK_OPTION_FIELDS,
+    "cannot build payout webhook",
+  );
   if (task.state !== "PAID") {
     throw new Error(
       `cannot build payout webhook: task ${task.id} is in state ${task.state}, only PAID tasks have a completed settlement to announce`,
@@ -502,7 +562,13 @@ export function buildPayoutWebhooks(
   });
 }
 
-/** Options for {@link verifyPayoutWebhook}. All fields optional. */
+/**
+ * Options for {@link verifyPayoutWebhook}. All fields optional. An
+ * unknown option key throws a configuration error before any secret is
+ * read (`cannot verify payout webhook: unknown option "<key>"`, #1273),
+ * so a typo'd freshness window can never silently fall back to
+ * signature-only verification.
+ */
 export interface VerifyPayoutWebhookOptions {
   /**
    * Candidate HMAC secrets for a secret-rotation window: pass
@@ -632,7 +698,9 @@ export interface VerifyPayoutWebhookOptions {
  * and passing neither also throws (there is nothing to verify against).
  * Any candidate that matches authenticates; the freshness gate, when
  * configured, runs after a match exactly as in the single-secret shape,
- * so rotation does not widen the replay window.
+ * so rotation does not widen the replay window. An unknown option key
+ * throws a configuration error (`cannot verify payout webhook: unknown
+ * option "<key>"`) before any secret is read (#1273).
  */
 export function verifyPayoutWebhook(
   body: string | PayoutWebhookPayload,
@@ -640,6 +708,16 @@ export function verifyPayoutWebhook(
   secret: string | Buffer | undefined,
   opts: VerifyPayoutWebhookOptions = {},
 ): boolean {
+  // Unknown option keys fail closed (#1273, see
+  // VERIFY_PAYOUT_WEBHOOK_OPTION_FIELDS), checked before any secret is
+  // read so a typo is reported as itself: a typo'd `maxAge` would
+  // otherwise silently leave the freshness window unset while the
+  // caller believes replays are bounded.
+  assertNoUnknownPayoutWebhookOptions(
+    opts,
+    VERIFY_PAYOUT_WEBHOOK_OPTION_FIELDS,
+    "cannot verify payout webhook",
+  );
   const hasPositional = secret !== undefined;
   const hasSecrets = opts.secrets !== undefined;
   if (hasPositional && hasSecrets) {

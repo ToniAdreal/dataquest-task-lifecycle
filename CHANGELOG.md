@@ -45,6 +45,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `buildPayoutWebhook()` / `verifyPayoutWebhook()` reject unknown
+  options keys (2026-11-20, backlog #1273): both entry points read
+  only their documented fields, so a typo'd key was silently
+  dropped — a typo'd `requirePayoutAmout` left the "no reference, no
+  notification" gate off while the caller believed it was on, and a
+  typo'd `maxAge` left the replay window unset while the caller
+  believed replays were bounded. An unknown key now throws a
+  configuration error naming the key (`cannot build payout webhook:
+  unknown option "<key>"` / `cannot verify payout webhook: unknown
+  option "<key>"`) before any signing or verification work, with the
+  scan first of all checks on both sides. The batch path inherits
+  the check through the single build, and `null` / array options
+  keep their previous behavior. The test count rises by sixteen
+  (1740 to 1756 tests).
+
 - Settlement summary shape check now rejects self-contradictory
   summaries (2026-11-20, backlog #1269): `assertSummaryShape`
   previously verified only per-field shape and the `gap ===

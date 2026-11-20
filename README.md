@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1740 tests, all local
+npm test   # 1756 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1554,7 +1554,12 @@ remains the receiver's adjudication. Opt-in gate: pass
 `PAID` task whose `PAYOUT_COMPLETE` entry carries no `payoutRef`
 (single build throws; the batch path records it as that task's
 `{ taskId, error }` without blocking the rest). Default off, so
-legacy ref-less `PAID` tasks keep building unchanged.
+legacy ref-less `PAID` tasks keep building unchanged. Both entry
+points fail closed on unknown option keys: a typo'd option (say
+`requirePayoutAmout` on the build side or `maxAge` on the verify
+side) throws a configuration error naming the key before any signing
+or verification work, instead of silently falling back to the
+default.
 
 Field-set audit (checked field by field against the audit history
 and escrow's `SettlementWebhookPayload`): every identifier and
@@ -2732,7 +2737,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1740 tests covering the happy path, reject→resubmit
+`npm test` runs 1756 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
