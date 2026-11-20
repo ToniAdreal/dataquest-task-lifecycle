@@ -199,12 +199,16 @@ describe("payout webhook x NDJSON restore", () => {
       entry.payoutAmount = 9999;
     });
     // Field validation passes (9999 is a legal amount), so the
-    // hash chain is what catches it. The chain error carries no
-    // entry index, so it is not retagged with a line number —
-    // asserted exactly as the library reports it.
+    // hash chain is what catches it. The chain error names the first
+    // broken entry (backlog #1285), so retagLine maps it to the
+    // NDJSON line: the mutated entry is the last line, so its line
+    // number equals its seq equals the history length.
+    const lastSeq = task.history.length;
     assert.throws(
       () => historyFromNdjson(tampered),
-      /history hash chain is broken/,
+      new RegExp(
+        `invalid ndjson: line ${lastSeq}: history hash chain is broken \\(an entry was tampered with, deleted, or reordered\\) at entry seq ${lastSeq}`,
+      ),
     );
   });
 

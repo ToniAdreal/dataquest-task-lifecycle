@@ -141,7 +141,7 @@ describe("hash chain: parseHistory enforcement", () => {
     delete mixed[2].prevHash;
     assert.throws(
       () => parseHistory(mixed),
-      /invalid history: hash-chain entries must not be mixed with hashless entries/,
+      /invalid history: entry\[2\]: hash-chain entries must not be mixed with hashless entries at entry seq 3/,
     );
   });
 
@@ -168,7 +168,7 @@ describe("hash chain: parseHistory enforcement", () => {
     tampered[2].actor = "mallory";
     assert.throws(
       () => parseHistory(tampered),
-      /invalid history: history hash chain is broken/,
+      /invalid history: entry\[2\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 3/,
     );
   });
 
@@ -177,7 +177,7 @@ describe("hash chain: parseHistory enforcement", () => {
     tampered[1].note = "forged";
     assert.throws(
       () => replay(tampered),
-      /invalid history: history hash chain is broken/,
+      /invalid history: entry\[1\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 2/,
     );
   });
 
@@ -229,7 +229,7 @@ describe("hash chain: persistence round-trips", () => {
     snapshot.history[1].actor = "mallory";
     assert.throws(
       () => TaskLifecycle.fromJSON(snapshot),
-      /invalid history: history hash chain is broken/,
+      /invalid history: entry\[1\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 2/,
     );
   });
 
@@ -246,7 +246,7 @@ describe("hash chain: persistence round-trips", () => {
     tampered[0].note = "forged";
     assert.throws(
       () => TaskLifecycle.fromHistory("chain-x", tampered),
-      /invalid history: history hash chain is broken/,
+      /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
     );
   });
 

@@ -375,7 +375,7 @@ test("MAC-valid envelope with a malformed snapshot still fails validation", () =
         { v: 1, snapshot: badSnapshot, mac },
         SECRET,
       ),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
 });
 
@@ -444,14 +444,14 @@ test("keyed history chain still needs its auditSecret on signed restore", () => 
   const envelope = keyed.exportSignedSnapshot(SECRET);
   assert.throws(
     () => TaskLifecycle.restoreSignedSnapshot(envelope, SECRET),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
   assert.throws(
     () =>
       TaskLifecycle.restoreSignedSnapshot(envelope, SECRET, {
         auditSecret: "wrong-audit-secret",
       }),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
   const restored = TaskLifecycle.restoreSignedSnapshot(envelope, SECRET, {
     auditSecret: AUDIT_SECRET,
@@ -469,6 +469,6 @@ test("keyed history chain still needs its auditSecret on signed restore", () => 
       TaskLifecycle.restoreSignedSnapshot(plainEnvelope, SECRET, {
         auditSecret: AUDIT_SECRET,
       }),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
 });

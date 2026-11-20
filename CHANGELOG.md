@@ -72,6 +72,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `parseHistory()` names the first entry where a broken hash chain
+  fails (2026-11-20, backlog #1285): a tampered, deleted, or reordered
+  log used to be rejected with one generic sentence ("history hash
+  chain is broken …") that named no entry, so a 200-entry audit log
+  gave the caller nowhere to look — and the NDJSON import could not
+  retag it with a line number, unlike every structural error. The
+  chain check now re-walks the chain on failure and reports
+  `invalid history: entry[N]: history hash chain is broken (…) at
+  entry seq <n>` at the first entry whose `prevHash` does not link or
+  whose `hash` does not recompute; the mixed chained/hashless error
+  names the first entry that breaks the first entry's pattern the same
+  way. `verifyHistoryChain()` keeps its boolean contract — it now
+  shares the same internal walk (`findFirstChainBreak`), so the
+  verdict and the located break can never disagree. The `entry[N]`
+  form is what lets `historyFromNdjson` retag the failure with its
+  NDJSON line number with zero changes on the NDJSON side. The test
+  count rises by seventeen (1770 to 1787 tests).
+
 - `diffTaskSettlementsSummaries()` shape-checks both inputs first
   (2026-11-20, backlog #1276): the diff previously only checked
   that each input was an object and then read eight fields straight

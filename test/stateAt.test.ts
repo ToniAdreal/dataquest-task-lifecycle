@@ -196,10 +196,10 @@ test("stateAtFromHistory: a keyed chain needs its secret, like rehydration", () 
   // No secret (or the wrong one) on a keyed chain is fail-closed.
   assert.throws(
     () => stateAtFromHistory(log, T11),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
   assert.throws(
     () => stateAtFromHistory(log, T11, { auditSecret: "wrong" }),
-    /invalid history: history hash chain is broken/,
+    /invalid history: entry\[0\]: history hash chain is broken \(an entry was tampered with, deleted, or reordered\) at entry seq 1/,
   );
 });

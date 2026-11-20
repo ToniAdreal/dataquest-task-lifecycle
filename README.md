@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1770 tests, all local
+npm test   # 1787 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -944,9 +944,11 @@ exported `GENESIS_PREV_HASH` constant, `"GENESIS"`), and
 — the same convention the sibling `escrow-state-machine-ts` repo uses.
 `parseHistory()` re-verifies the chain whenever entries carry it, so a
 persisted snapshot or NDJSON line that was rewritten, deleted from the
-middle, or reordered fails rehydration (`invalid history: history hash
-chain is broken`) instead of replaying as a clean log; a history mixing
-chained and hashless entries is rejected outright. Histories produced
+middle, or reordered fails rehydration (`invalid history: entry[N]:
+history hash chain is broken (…) at entry seq <n>`, naming the first
+entry whose link or hash fails) instead of replaying as a clean log; a
+history mixing chained and hashless entries is rejected outright, naming
+the first entry that breaks the pattern the same way. Histories produced
 before this feature (no hash fields) still parse — `fromJSON()` /
 `fromHistory()` chain them deterministically on rehydration, so the live
 history is always fully chained.
@@ -2745,7 +2747,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1770 tests covering the happy path, reject→resubmit
+`npm test` runs 1787 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
