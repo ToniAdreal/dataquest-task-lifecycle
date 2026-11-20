@@ -72,6 +72,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `diffTaskSnapshots` shape-checks both snapshots first (2026-11-20,
+  backlog #1294, mirror of the sibling escrow #1295 pattern):
+  a new shared `assertTaskSnapshotShape(snapshot, tag)` runs the
+  shape half of `parseSnapshot` / `parseHistory` — field whitelist,
+  schema version, id, known state, array history, and per-entry
+  shapes (unknown entry fields, positive-integer seq, known event
+  and from/to states, canonical ISO `at`, actor/note/payoutRef/
+  payoutAmount/quotedAmount/prevHash/hash shapes), plus
+  `slaDeadlines`, budgets, role policy, idempotency keys, and the
+  three payout/actor gates — before any comparison, with every
+  failure prefixed `invalid snapshot diff:`. An unknown `state`
+  used to be reported as a real transition, an unknown SLA key as
+  a real deadline move, and a string `idempotencyKeys` was
+  silently spread into a character set (so `"abc"` diffed equal
+  to `["a", "b", "c"]`); a numeric `idempotencyKeys` threw a bare
+  `TypeError`. Comparison-not-validation still holds past shape:
+  transition legality, from/to continuity, timestamp order, seq
+  numbering inside `a` itself, history/state consistency, and the
+  hash chain are still not re-checked. New
+  `test/taskSnapshotDiffShape.test.ts` (13 cases) pins the shape
+  errors, the legal-compare regression, and the boundary (a broken
+  chain and a state/history mismatch still diff, never throw).
+  Mutation check: removing the two shape-assert calls turns 11 of
+  the 13 new tests red, reverted. The test count rises by thirteen
+  (1797 to 1810 tests).
+
 - `PayoutEventDedupe` clock readings are now fail-closed on
   non-finite values (2026-11-20, backlog #1290, same contract as
   the sibling escrow `SettlementEventDedupe` #1289 and the rfc9421

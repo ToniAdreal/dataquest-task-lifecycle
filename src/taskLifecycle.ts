@@ -3529,12 +3529,228 @@ function snapshotPayoutAmount(snapshot: TaskSnapshot): number | undefined {
  * (absent to present), never move: `last` is by construction, not a
  * re-quote rule.
  */
+/**
+ * Quoted (owed) amount recorded in a snapshot: the `quotedAmount` on
+ * the last `ACCEPT` entry, or `undefined` when the snapshot has no
+ * such entry (or that entry carries no amount). This is the same
+ * evidence {@link payoutMismatch} and {@link totalQuoted} read — a
+ * task that was never accepted, or accepted without a quote, has no
+ * quoted amount — except that a missing amount stays `undefined`
+ * here rather than counting as 0, so "no quote recorded" and
+ * "quoted 0" remain distinguishable in a diff. The live machine
+ * permits only one `ACCEPT` per task, so a quote can only appear
+ * (absent to present), never move: `last` is by construction, not a
+ * re-quote rule.
+ */
 function snapshotQuotedAmount(snapshot: TaskSnapshot): number | undefined {
   let quoted: number | undefined;
   for (const entry of snapshot.history) {
     if (entry.event === "ACCEPT") quoted = entry.quotedAmount;
   }
   return quoted;
+}
+
+/**
+ * Shape-only validation of a snapshot, used by
+ * {@link diffTaskSnapshots} (backlog #1294): every check
+ * `parseSnapshot` applies to a snapshot's FORM, and nothing it
+ * applies to the snapshot's TRUTH. It rejects a non-object, an
+ * unsupported schema version, unknown top-level fields, a bad id,
+ * an unknown state, a non-array history, and malformed history
+ * entries (unknown entry fields, a non-integer seq, an unknown event
+ * or from/to state, a non-canonical `at`, or a malformed
+ * actor/note/payoutRef/payoutAmount/quotedAmount/prevHash/hash
+ * field), plus malformed `slaDeadlines`, budgets, role policy,
+ * idempotency keys, and payout/actor gates — the same bars
+ * `parseSnapshot` and `parseHistory` apply, reusing the `assert*`
+ * config helpers where they already take a tag. It deliberately
+ * does NOT check what makes a snapshot a true record of one task:
+ * transition legality, from/to continuity, non-decreasing
+ * timestamps, the chain starting at DRAFT, history ending at the
+ * snapshot state, an empty history implying DRAFT, seq numbering
+ * beyond "a positive integer", or the hash chain — those stay
+ * `fromJSON`'s job, so a diff of two snapshots that are each merely
+ * well-formed still compares them exactly as before. Every failure
+ * throws `<tag>: …` with the caller's prefix, so the diff reports
+ * `invalid snapshot diff: …` while `parseSnapshot` keeps reporting
+ * `invalid snapshot: …`.
+ */
+function assertTaskSnapshotShape(snapshot: unknown, tag: string): void {
+  if (!isRecord(snapshot)) {
+    throw new Error(`${tag}: expected a JSON object`);
+  }
+  if (snapshot.v !== undefined && snapshot.v !== SNAPSHOT_VERSION) {
+    throw new Error(
+      `${tag}: unsupported snapshot version ${String(snapshot.v)}`,
+    );
+  }
+  for (const key of Object.keys(snapshot)) {
+    if (!SNAPSHOT_FIELDS.has(key)) {
+      throw new Error(`${tag}: unknown field "${key}"`);
+    }
+  }
+  if (typeof snapshot.id !== "string" || snapshot.id.length === 0) {
+    throw new Error(`${tag}: id must be a non-empty string`);
+  }
+  if (snapshot.id.length > MAX_TASK_ID_LENGTH) {
+    throw new Error(
+      `${tag}: id must be at most ${MAX_TASK_ID_LENGTH} characters, got ${snapshot.id.length}`,
+    );
+  }
+  if (!STATES.has(snapshot.state as TaskState)) {
+    throw new Error(`${tag}: unknown state ${String(snapshot.state)}`);
+  }
+  if (!Array.isArray(snapshot.history)) {
+    throw new Error(`${tag}: history must be an array`);
+  }
+  for (let i = 0; i < snapshot.history.length; i++) {
+    const raw = snapshot.history[i];
+    const entryTag = `${tag}: entry[${i}]`;
+    if (!isRecord(raw)) {
+      throw new Error(`${entryTag}: entry must be an object`);
+    }
+    for (const key of Object.keys(raw)) {
+      if (!HISTORY_ENTRY_FIELDS.has(key)) {
+        throw new Error(`${entryTag}: unknown field "${key}"`);
+      }
+    }
+    if (
+      typeof raw.seq !== "number" ||
+      !Number.isInteger(raw.seq) ||
+      raw.seq < 1
+    ) {
+      throw new Error(
+        `${entryTag}: seq must be a positive integer, got ${String(raw.seq)}`,
+      );
+    }
+    if (!EVENTS.has(raw.event as TaskEvent)) {
+      throw new Error(`${entryTag}: unknown event ${String(raw.event)}`);
+    }
+    if (!STATES.has(raw.from as TaskState)) {
+      throw new Error(`${entryTag}: unknown from-state ${String(raw.from)}`);
+    }
+    if (!STATES.has(raw.to as TaskState)) {
+      throw new Error(`${entryTag}: unknown to-state ${String(raw.to)}`);
+    }
+    if (!isCanonicalIso(raw.at)) {
+      throw new Error(
+        `${entryTag}: at must be canonical ISO-8601, got ${String(raw.at)}`,
+      );
+    }
+    if (raw.actor !== undefined) {
+      if (typeof raw.actor !== "string" || raw.actor.length === 0) {
+        throw new Error(
+          `${entryTag}: actor must be a non-empty string, got ${JSON.stringify(raw.actor)}`,
+        );
+      }
+      if (raw.actor.length > MAX_ACTOR_LENGTH) {
+        throw new Error(
+          `${entryTag}: actor must be at most ${MAX_ACTOR_LENGTH} characters, got ${raw.actor.length}`,
+        );
+      }
+    }
+    if (raw.note !== undefined) {
+      if (typeof raw.note !== "string") {
+        throw new Error(`${entryTag}: note must be a string`);
+      }
+      if (raw.note.length > MAX_NOTE_LENGTH) {
+        throw new Error(
+          `${entryTag}: note must be at most ${MAX_NOTE_LENGTH} characters, got ${raw.note.length}`,
+        );
+      }
+    }
+    if (raw.payoutRef !== undefined) {
+      if (typeof raw.payoutRef !== "string" || raw.payoutRef.length === 0) {
+        throw new Error(
+          `${entryTag}: payoutRef must be a non-empty string, got ${JSON.stringify(raw.payoutRef)}`,
+        );
+      }
+      if (raw.payoutRef.length > MAX_PAYOUT_REF_LENGTH) {
+        throw new Error(
+          `${entryTag}: payoutRef must be at most ${MAX_PAYOUT_REF_LENGTH} characters, got ${raw.payoutRef.length}`,
+        );
+      }
+    }
+    if (raw.payoutAmount !== undefined) {
+      if (
+        typeof raw.payoutAmount !== "number" ||
+        !Number.isFinite(raw.payoutAmount) ||
+        raw.payoutAmount < 0
+      ) {
+        throw new Error(
+          `${entryTag}: payoutAmount must be a non-negative finite number, got ${String(raw.payoutAmount)}`,
+        );
+      }
+    }
+    if (raw.quotedAmount !== undefined) {
+      if (
+        typeof raw.quotedAmount !== "number" ||
+        !Number.isFinite(raw.quotedAmount) ||
+        raw.quotedAmount < 0
+      ) {
+        throw new Error(
+          `${entryTag}: quotedAmount must be a non-negative finite number, got ${String(raw.quotedAmount)}`,
+        );
+      }
+    }
+    // Hash-chain fields are all-or-nothing per entry, exactly as
+    // parseHistory requires — but the chain CONTENT is not
+    // re-verified here: a well-formed chained entry whose hash is
+    // wrong is still a shape-valid entry, and the diff reports what
+    // changed rather than crying tampering.
+    if (raw.prevHash !== undefined || raw.hash !== undefined) {
+      if (typeof raw.prevHash !== "string" || raw.prevHash.length === 0) {
+        throw new Error(`${entryTag}: prevHash must be a non-empty string`);
+      }
+      if (typeof raw.hash !== "string" || raw.hash.length === 0) {
+        throw new Error(`${entryTag}: hash must be a non-empty string`);
+      }
+    }
+  }
+  // Same bar as parseSnapshot's inline check (not assertSlaDeadlines,
+  // whose messages differ): a record whose keys are known states and
+  // whose values parse as dates.
+  if (snapshot.slaDeadlines !== undefined) {
+    if (!isRecord(snapshot.slaDeadlines)) {
+      throw new Error(`${tag}: slaDeadlines must be an object`);
+    }
+    for (const [key, value] of Object.entries(snapshot.slaDeadlines)) {
+      if (!STATES.has(key as TaskState)) {
+        throw new Error(`${tag}: unknown SLA state ${key}`);
+      }
+      const ms =
+        value instanceof Date ? value.getTime() : Date.parse(String(value));
+      if (Number.isNaN(ms)) {
+        throw new Error(`${tag}: unparseable SLA deadline for ${key}`);
+      }
+    }
+  }
+  assertMaxResubmits(snapshot.maxResubmits, tag);
+  assertMaxDisputes(snapshot.maxDisputes, tag);
+  assertMaxVisitsByState(snapshot.maxVisitsByState, tag);
+  assertRolePolicy(snapshot.rolePolicy, tag);
+  assertIdempotencyKeys(snapshot.idempotencyKeys, tag);
+  if (snapshot.requirePayoutRef !== undefined) {
+    if (typeof snapshot.requirePayoutRef !== "boolean") {
+      throw new Error(
+        `${tag}: requirePayoutRef must be a boolean, got ${JSON.stringify(snapshot.requirePayoutRef)}`,
+      );
+    }
+  }
+  if (snapshot.requirePayoutAmount !== undefined) {
+    if (typeof snapshot.requirePayoutAmount !== "boolean") {
+      throw new Error(
+        `${tag}: requirePayoutAmount must be a boolean, got ${JSON.stringify(snapshot.requirePayoutAmount)}`,
+      );
+    }
+  }
+  if (snapshot.requireActor !== undefined) {
+    if (typeof snapshot.requireActor !== "boolean") {
+      throw new Error(
+        `${tag}: requireActor must be a boolean, got ${JSON.stringify(snapshot.requireActor)}`,
+      );
+    }
+  }
 }
 
 /**
@@ -3657,11 +3873,15 @@ export interface TaskSnapshotDiff {
  *
  * Pure: reads both snapshots, never mutates them, and the returned
  * `historyAppended.entries` and `slaChanged` maps are detached
- * copies. This is a comparison, not a validation — it does not
- * re-check transition legality, seq continuity inside `a` itself, or
- * the hash chain; run a snapshot through `fromJSON` (or its history
- * through {@link verifyHistoryChain}) when the input itself is
- * untrusted.
+ * copies. Shape is checked first — both inputs must be well-formed
+ * snapshots (field whitelist, known state/event, well-shaped history
+ * entries, budgets, policy, keys, and gates) via
+ * {@link assertTaskSnapshotShape} — but this is still a comparison,
+ * not a validation: it does not re-check transition legality, from/to
+ * continuity, timestamp order, seq numbering inside `a` itself,
+ * history/state consistency, or the hash chain; run a snapshot
+ * through `fromJSON` (or its history through
+ * {@link verifyHistoryChain}) when the input itself is untrusted.
  *
  *   const before = task.toJSON();
  *   task.dispatch("PUBLISH", { actor: "researcher" });
@@ -3678,14 +3898,19 @@ export function diffTaskSnapshots(
       "invalid snapshot diff: both snapshots must be objects",
     );
   }
+  // Shape first (backlog #1294): a malformed input fails here with
+  // `invalid snapshot diff: …` instead of being reported as a phantom
+  // change (an unknown `state` read as a real transition, an unknown
+  // SLA key compared as a real deadline move) or throwing a bare
+  // `TypeError` from a field compare (a string `idempotencyKeys`
+  // silently spread into a character set). Comparison, not
+  // validation, still holds for everything past shape — see the
+  // JSDoc above.
+  assertTaskSnapshotShape(a, "invalid snapshot diff");
+  assertTaskSnapshotShape(b, "invalid snapshot diff");
   if (a.id !== b.id) {
     throw new Error(
       `snapshot diff failed: cannot diff snapshots of different tasks (${JSON.stringify(a.id)} vs ${JSON.stringify(b.id)})`,
-    );
-  }
-  if (!Array.isArray(a.history) || !Array.isArray(b.history)) {
-    throw new Error(
-      `snapshot diff failed: history of task ${JSON.stringify(a.id)} must be an array in both snapshots`,
     );
   }
   for (let i = 0; i < a.history.length; i++) {

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1797 tests, all local
+npm test   # 1810 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -932,8 +932,13 @@ consumed or dropped between two stored snapshots is visible in the
 diff). Two equal snapshots diff to `{}`. History is append-only: a
 rewritten, truncated, or seq-breaking later history throws instead of
 being reported as progress, and snapshots of different tasks throw.
-The comparison is pure and does not re-validate transitions or the
-hash chain. See `test/diffTaskSnapshots.test.ts`.
+Both inputs are shape-checked first (field whitelist, known state
+and event, well-shaped history entries, budgets, policy, keys, and
+gates), so a malformed snapshot fails with `invalid snapshot diff: …`
+instead of being read as a phantom change; the comparison itself is
+pure and still does not re-validate transitions, from/to continuity,
+or the hash chain. See `test/diffTaskSnapshots.test.ts` and
+`test/taskSnapshotDiffShape.test.ts`.
 
 ### Hash-chained audit history
 
@@ -2747,7 +2752,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1797 tests covering the happy path, reject→resubmit
+`npm test` runs 1810 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
