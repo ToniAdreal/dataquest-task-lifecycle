@@ -64,6 +64,14 @@
  *      hand-computed summary — counts and all five money figures in
  *      minor units, plus the gap identity — with the empty batch
  *      pinned to the all-zero summary once, outside the timed loop.
+ *      The per-task predicate itself, `isSettlementComplete`, is
+ *      measured on its own row: one complete PAID task (its
+ *      `PAYOUT_COMPLETE` entry carries both a payoutRef and a
+ *      payoutAmount) plus two controls — a PAID task whose
+ *      completion entry carries a payoutRef but no payoutAmount,
+ *      and a non-PAID task carrying a quote — one timed pass is
+ *      three calls, self-checked per iteration for the true /
+ *      false / false verdicts.
  *      This is the batch pass finance reconciliation runs
  *      over a whole task set, as opposed to the per-task webhook paths
  *      above. A combined
@@ -1659,6 +1667,7 @@ import {
   MAX_OUTBOX_ERROR_LENGTH,
   historyToNdjson,
   isOverdue,
+  isSettlementComplete,
   isTerminal,
   mismatchedPayouts,
   nextSlaDeadline,
@@ -2289,6 +2298,74 @@ function buildQuotedNonPaidTask(
     });
   }
   return task;
+}
+
+// isSettlementComplete fixture: the per-task settlement predicate
+// the batch screens call once per task (`reconcilePayouts` and
+// `unreconciledPayouts` both screen through it), measured on its own
+// row — one complete PAID task plus two controls that each break
+// exactly one of the predicate's three conditions:
+//   - BENCH-ISC-01: PAID, PAYOUT_COMPLETE carries payoutRef
+//     "bench-pay-isc-01" and payoutAmount 100 -> complete (true);
+//   - BENCH-ISC-02: PAID, PAYOUT_COMPLETE carries payoutRef
+//     "bench-pay-isc-02" but NO payoutAmount -> incomplete (false);
+//     the ref is kept so the control isolates the missing-amount
+//     axis, the same shape as the demo's DEMO-096;
+//   - BENCH-ISC-03: ACCEPTED (still in flight) carrying a quote,
+//     never PAID -> incomplete (false); the state axis alone decides.
+// A PAYOUT_COMPLETE without a payoutAmount is legal (advisory only),
+// so the missing-amount task is driven through the same lifecycle
+// with the amount omitted at the final step.
+function buildPaidTaskWithoutPayoutAmount(
+  id: string,
+  opts: { quotedAmount?: number; payoutRef?: string },
+): TaskLifecycle {
+  const task = new TaskLifecycle(id);
+  LIFECYCLE.forEach(({ event, actor }, i) => {
+    const extra: {
+      quotedAmount?: number;
+      payoutRef?: string;
+    } = {};
+    if (event === "ACCEPT" && opts.quotedAmount !== undefined)
+      extra.quotedAmount = opts.quotedAmount;
+    if (event === "PAYOUT_COMPLETE" && opts.payoutRef !== undefined)
+      extra.payoutRef = opts.payoutRef;
+    task.dispatch(event, {
+      actor,
+      at: new Date(BASE_MS + i * 1000).toISOString(),
+      ...extra,
+    });
+  });
+  return task;
+}
+const settlementCompleteTask = buildPaidTask("BENCH-ISC-01", {
+  quotedAmount: 100,
+  payoutAmount: 100,
+  payoutRef: "bench-pay-isc-01",
+});
+const settlementIncompleteAmountTask = buildPaidTaskWithoutPayoutAmount(
+  "BENCH-ISC-02",
+  { quotedAmount: 100, payoutRef: "bench-pay-isc-02" },
+);
+const settlementIncompleteStateTask = buildQuotedNonPaidTask(
+  "BENCH-ISC-03",
+  100,
+  false,
+);
+if (
+  settlementCompleteTask.state !== "PAID" ||
+  settlementCompleteTask.history.length !== 8 ||
+  settlementIncompleteAmountTask.state !== "PAID" ||
+  settlementIncompleteAmountTask.history.length !== 8 ||
+  settlementIncompleteStateTask.state !== "ACCEPTED" ||
+  settlementIncompleteStateTask.history.length !== 2 ||
+  isSettlementComplete(settlementCompleteTask) !== true ||
+  isSettlementComplete(settlementIncompleteAmountTask) !== false ||
+  isSettlementComplete(settlementIncompleteStateTask) !== false
+) {
+  throw new Error(
+    "benchmark fixture failed: isSettlementComplete verdicts differ from the hand-computed expectations",
+  );
 }
 
 // totalQuoted fixture: the owed-half summary over a fixed MIXED batch,
@@ -13387,6 +13464,20 @@ function benchTotalPaidOut(): number {
   }, ITERATIONS);
 }
 
+function benchIsSettlementComplete(): number {
+  return measure(() => {
+    if (
+      isSettlementComplete(settlementCompleteTask) !== true ||
+      isSettlementComplete(settlementIncompleteAmountTask) !== false ||
+      isSettlementComplete(settlementIncompleteStateTask) !== false
+    ) {
+      throw new Error(
+        "benchmark self-check failed: isSettlementComplete",
+      );
+    }
+  }, ITERATIONS);
+}
+
 function benchTotalQuoted(): number {
   return measure(() => {
     if (totalQuoted(totalQuotedBatch) !== expectedTotalQuoted) {
@@ -15211,6 +15302,7 @@ const results: Array<{ path: string; ops: number }> = [
   { path: "unreconciledPayouts (12 PAID tasks)", ops: benchUnreconciledPayouts() },
   { path: "NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks)", ops: benchNdjsonUnreconciledPayouts() },
   { path: "totalPaidOut (12 PAID tasks)", ops: benchTotalPaidOut() },
+  { path: "isSettlementComplete (3 verdicts: complete PAID, missing-amount PAID, non-PAID)", ops: benchIsSettlementComplete() },
   { path: "totalQuoted (10 mixed tasks)", ops: benchTotalQuoted() },
   { path: "summarizeTaskSettlements (10 mixed tasks)", ops: benchSummarizeTaskSettlements() },
   { path: "diffTaskSettlementsSummaries (10-task summaries, 4 fields moved)", ops: benchDiffTaskSettlementsSummaries() },

@@ -2936,7 +2936,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred eighteen hot
+`npm run bench` measures locally-observed throughput for the one hundred nineteen hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -2988,7 +2988,12 @@ history export/import (`historyToNdjson` /
 `historyFromNdjson`, whose import path interleaves per-line parsing
 with a full hash-chain re-verification), payout reconciliation
 screening (`mismatchedPayouts` / `unreconciledPayouts` / `totalPaidOut` /
-`totalQuoted` / `summarizeTaskSettlements` over a batch of tasks), summary
+`totalQuoted` / `summarizeTaskSettlements` over a batch of tasks, plus the
+per-task predicate `isSettlementComplete` on its own row — one complete
+PAID task and two controls, a PAID task whose completion entry carries a
+payoutRef but no payoutAmount and a non-PAID task carrying a quote, one
+timed pass is three calls self-checked per iteration for the true /
+false / false verdicts), summary
 comparison (`diffTaskSettlementsSummaries` over two fixed summaries — one
 identical pair, one four-field move) and summary text rendering
 (`renderTaskSettlements` over the same fixed summary — nine lines, pinned
@@ -4154,6 +4159,7 @@ See the throughput row below. One real run on 2026-11-16:
 | unreconciledPayouts (12 PAID tasks) | ~43,779 ops/sec (22.84 µs/op) |
 | NDJSON -> fromHistory -> unreconciledPayouts (12 PAID tasks) | ~213.3 ops/sec (4687.68 µs/op) |
 | totalPaidOut (12 PAID tasks) | ~41,067 ops/sec (24.35 µs/op) |
+| isSettlementComplete (3 verdicts: complete PAID, missing-amount PAID, non-PAID) | ~257,129 ops/sec (3.89 µs/op) |
 | totalQuoted (10 mixed tasks) | ~17,457 ops/sec (57.28 µs/op) |
 | summarizeTaskSettlements (10 mixed tasks) | ~21,195 ops/sec (47.18 µs/op) |
 | diffTaskSettlementsSummaries (10-task summaries, 4 fields moved) | ~821,488 ops/sec (1.22 µs/op) |
@@ -4246,7 +4252,8 @@ shared host under load, so numbers vary run to run — several paths
 swing widely between runs on this host, so treat each figure as an
 order of magnitude, not a precise rate). The PayoutWebhookOutbox stats row above was measured on a
 2026-11-18 run; the retryPayoutWebhookOutbox and budget remaining
-rows were measured on 2026-11-17 runs; the rest of the table is the
+rows were measured on 2026-11-17 runs; the isSettlementComplete row
+was measured on a 2026-11-20 run; the rest of the table is the
 2026-11-16 run. Machine-local
 measurements for capacity planning, not guaranteed throughput —
 run `npm run bench` on your own hardware.

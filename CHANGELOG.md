@@ -11,6 +11,19 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- `isSettlementComplete` benchmark row (2026-11-20, backlog #1282):
+  `npm run bench` now measures the per-task settlement predicate on
+  its own row — one timed pass is three calls over fixed fixtures:
+  a complete PAID task (PAYOUT_COMPLETE with payoutRef
+  "bench-pay-isc-01" and payoutAmount 100), a PAID task whose
+  completion entry carries a payoutRef but no payoutAmount, and a
+  non-PAID task carrying a quote — self-checked per iteration for
+  the true / false / false verdicts, with the fixture shapes and
+  verdicts also pinned once outside the timed loop. The README
+  Benchmarks table gains the row and the hot-path count rises from
+  118 to 119. Measured at ~257,129 ops/sec (3.89 µs/op) on Node
+  v24.22.1, linux/x64.
+
 - CLI demo settlement-complete verdict branch (2026-11-20, backlog
   #1279): `src/demo.ts` runs `isSettlementComplete()` over the
   same six screened tasks after the finance pass and prints all
