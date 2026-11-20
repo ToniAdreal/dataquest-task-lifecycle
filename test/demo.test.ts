@@ -313,6 +313,15 @@ Task DEMO-096: DRAFT
   mismatchedPayouts: DEMO-005 (quoted 4000, paid 3750.5, delta -249.5) (1 hit: settled amount differs from the ACCEPT quote)
   totalPaidOut: 16349 (10098.5 + 2500 + 3750.5 across the PAID tasks; DEMO-096 settled with no recorded amount and contributes 0, the EXPIRED and REJECTED tasks contribute nothing)
 
+Settlement-complete verdicts (isSettlementComplete over the screened batch):
+  DEMO-001: complete (PAID, payoutRef xfer-88f2 + payoutAmount 10098.5)
+  DEMO-002: incomplete (EXPIRED, not PAID)
+  DEMO-003: incomplete (REJECTED, not PAID)
+  DEMO-004: incomplete (PAID, PAYOUT_COMPLETE lacks a payoutRef)
+  DEMO-005: complete (PAID, payoutRef xfer-91c7 + payoutAmount 3750.5)
+  DEMO-096: incomplete (PAID, PAYOUT_COMPLETE lacks a payoutAmount)
+  cross-check: the complete tasks (DEMO-001, DEMO-005) are absent from unreconciledPayouts, and every PAID task the predicate rejects (DEMO-004, DEMO-096) is in it
+
 Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):
   DEMO-085: ACCEPT quoted 9999, then REJECTED in review (a quote on a non-PAID task must not enter the owed total)
   totalQuoted: 6500 (2500 + 4000 across the 2 quoted PAID tasks; DEMO-001 has no quote, DEMO-002 and DEMO-003 are not PAID, DEMO-085 was quoted 9999 but rejected)
@@ -1258,7 +1267,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1101);
+  assert.equal(lines.length, 1110);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -1876,6 +1885,76 @@ test("demo shows the reconciliation screening branch in-process: unreconciled, m
   assert.match(text, /totalPaidOut: 16349 \(10098\.5 \+ 2500 \+ 3750\.5 across the PAID tasks; DEMO-096 settled with no recorded amount and contributes 0/);
 });
 
+test("demo settlement-complete verdicts pin all four states and agree with unreconciledPayouts", async () => {
+  const { settlementCompleteVerdicts, unreconciledFound, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // All four verdicts over the same six demo tasks, in batch order:
+  // complete PAID (DEMO-001, DEMO-005), PAID missing a payoutRef
+  // (DEMO-004), PAID missing a payoutAmount (DEMO-096), and not
+  // PAID at all (DEMO-002 EXPIRED, DEMO-003 REJECTED).
+  assert.deepEqual(settlementCompleteVerdicts, [
+    { id: "DEMO-001", complete: true },
+    { id: "DEMO-002", complete: false },
+    { id: "DEMO-003", complete: false },
+    { id: "DEMO-004", complete: false },
+    { id: "DEMO-005", complete: true },
+    { id: "DEMO-096", complete: false },
+  ]);
+  // Cross-check against the screen the demo just printed: the
+  // complete tasks are absent from unreconciledPayouts, and every
+  // PAID task the predicate rejects is in it (the non-PAID tasks
+  // are never in the screen, so they are excluded from this check).
+  const unreconciledIds = unreconciledFound.map((t) => t.id);
+  assert.deepEqual(unreconciledIds, ["DEMO-004", "DEMO-096"]);
+  for (const { id, complete } of settlementCompleteVerdicts) {
+    if (complete) {
+      assert.ok(!unreconciledIds.includes(id), `${id} is complete and must not be unreconciled`);
+    }
+  }
+  assert.ok(unreconciledIds.includes("DEMO-004"), "DEMO-004 is PAID without a payoutRef and must be flagged");
+  assert.ok(unreconciledIds.includes("DEMO-096"), "DEMO-096 is PAID without a payoutAmount and must be flagged");
+  // The branch prints after the finance pass and before the
+  // quoted-total branch, with the four verdicts verbatim.
+  const verdictsAt = text.indexOf(
+    "Settlement-complete verdicts (isSettlementComplete over the screened batch):",
+  );
+  assert.ok(verdictsAt > text.indexOf("totalPaidOut: 16349"), "verdicts branch must follow the finance pass");
+  assert.ok(
+    verdictsAt <
+      text.indexOf(
+        "Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):",
+      ),
+    "verdicts branch must precede the quoted-total branch",
+  );
+  assert.match(text, /DEMO-001: complete \(PAID, payoutRef xfer-88f2 \+ payoutAmount 10098\.5\)/);
+  assert.match(text, /DEMO-002: incomplete \(EXPIRED, not PAID\)/);
+  assert.match(text, /DEMO-003: incomplete \(REJECTED, not PAID\)/);
+  assert.match(text, /DEMO-004: incomplete \(PAID, PAYOUT_COMPLETE lacks a payoutRef\)/);
+  assert.match(text, /DEMO-005: complete \(PAID, payoutRef xfer-91c7 \+ payoutAmount 3750\.5\)/);
+  assert.match(text, /DEMO-096: incomplete \(PAID, PAYOUT_COMPLETE lacks a payoutAmount\)/);
+  assert.match(
+    text,
+    /cross-check: the complete tasks \(DEMO-001, DEMO-005\) are absent from unreconciledPayouts, and every PAID task the predicate rejects \(DEMO-004, DEMO-096\) is in it/,
+  );
+});
+
+test("demo settlement-complete segment is deterministic: two runs print byte-identical verdict lines", async () => {
+  const verdictLines = (ls: string[]) =>
+    ls.slice(
+      ls.indexOf("Settlement-complete verdicts (isSettlementComplete over the screened batch):"),
+      ls.indexOf("Quoted-total branch (totalQuoted over the screened batch + one rejected task with a quote):") - 1,
+    );
+  const a = await runDemo();
+  const b = await runDemo();
+  const segA = verdictLines(a.lines);
+  // Header + 6 verdicts + cross-check; every value is a fixed
+  // fixture, so no normalization is needed.
+  assert.equal(segA.length, 8);
+  assert.deepEqual(segA, verdictLines(b.lines));
+  assert.deepEqual(a.settlementCompleteVerdicts, b.settlementCompleteVerdicts);
+});
+
 test("demo quotes the owed half of the finance pass: totalQuoted pins 6500 and the gap -9849", async () => {
   const { quotedRejectedTask, totalPaid, totalQuoted, lines } = await runDemo();
   const text = lines.join("\n");
@@ -1945,11 +2024,12 @@ test("demo reconciliation segment is deterministic: two runs print byte-identica
   const a = reconLines((await runDemo()).lines);
   const b = reconLines((await runDemo()).lines);
   // Header + (task header + 8 transitions + note) x3 + 4 screening
-  // lines + 5 quoted-total lines (blank, header, DEMO-085 note,
-  // totalQuoted, gap); every timestamp in the segment is a fixed
-  // literal that never reaches the printed lines, so no
+  // lines + 9 settlement-complete lines (blank, header, 6 verdicts,
+  // cross-check) + 5 quoted-total lines (blank, header, DEMO-085
+  // note, totalQuoted, gap); every timestamp in the segment is a
+  // fixed literal that never reaches the printed lines, so no
   // normalization is needed.
-  assert.equal(a.length, 40);
+  assert.equal(a.length, 49);
   assert.deepEqual(a, b);
 });
 
@@ -5040,7 +5120,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1101);
+  assert.equal(out.trimEnd().split("\n").length, 1110);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);

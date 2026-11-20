@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo settlement-complete verdict branch (2026-11-20, backlog
+  #1279): `src/demo.ts` runs `isSettlementComplete()` over the
+  same six screened tasks after the finance pass and prints all
+  four verdicts — complete PAID (DEMO-001, DEMO-005), PAID missing
+  a `payoutRef` (DEMO-004), PAID missing a `payoutAmount`
+  (DEMO-096), not PAID (DEMO-002 EXPIRED, DEMO-003 REJECTED) —
+  cross-checked in-process against `unreconciledPayouts()` (the
+  complete tasks are absent from the screen, every PAID task the
+  predicate rejects is in it), with the verdicts exposed as the new
+  `DemoResult.settlementCompleteVerdicts` field. The demo output
+  grows by nine lines (1101 to 1110) and the README demo section
+  mentions the branch. The test count rises by two (1768 to 1770
+  tests).
+
 - Snapshot persistence for the three payout/actor gates
   `requirePayoutRef` / `requirePayoutAmount` / `requireActor`
   (2026-11-19, backlog #1257): `toJSON()` writes each gate `true`

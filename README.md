@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1768 tests, all local
+npm test   # 1770 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -77,7 +77,11 @@ quote, one settled under a `payoutRef` but with no `payoutAmount`
 recorded — and screens all six demo tasks with
 `unreconciledPayouts()` / `mismatchedPayouts()` / `totalPaidOut()`:
 each flawed task is flagged by exactly one screen and the paid-out
-total is the hand-computed 16349 — then a quoted-total branch sums
+total is the hand-computed 16349 — a settlement-complete verdict
+branch then runs `isSettlementComplete()` over the same six tasks,
+pinning all four verdicts (complete PAID, PAID missing a
+`payoutRef`, PAID missing a `payoutAmount`, not PAID) and
+cross-checking them against `unreconciledPayouts()` — then a quoted-total branch sums
 the owed half of the same batch with `totalQuoted()`, plus one more
 task ACCEPTed with a quote of 9999 and then REJECTed, pinning the
 owed total 6500 and the quoted-vs-settled gap -9849 — a minor-unit display branch that
@@ -2741,7 +2745,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1768 tests covering the happy path, reject→resubmit
+`npm test` runs 1770 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
