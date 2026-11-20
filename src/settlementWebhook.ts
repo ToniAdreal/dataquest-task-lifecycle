@@ -928,7 +928,11 @@ export interface PayoutEventDedupeOptions {
   maxEntries?: number;
   /**
    * Clock source (milliseconds since the epoch). Defaults to
-   * `Date.now`. Inject a fake clock for deterministic tests.
+   * `Date.now`. Inject a fake clock for deterministic tests. It
+   * must return a finite number of milliseconds since the epoch:
+   * a non-finite reading throws a configuration `Error` from any
+   * method that reads the clock, instead of silently reopening
+   * the deduplication window (backlog #1290).
    */
   now?: () => number;
 }
@@ -1360,6 +1364,37 @@ export class PayoutEventDedupe {
   }
 
   /**
+   * Resolve the "now" for one clock read, fail-closed (backlog
+   * #1290, same contract as the sibling escrow `SettlementEventDedupe`
+   * `resolveNow` #1289 and the rfc9421 `ReplayCache` `resolveNow`
+   * #1288): an explicit `now` wins over the injected clock, and
+   * either value must be a finite number of milliseconds since the
+   * epoch. A non-finite reading throws a configuration `Error`
+   * before any store state is read or written, so a bad clock can
+   * never silently reopen the deduplication window — `NaN` would
+   * make `t - prev < ttlMs` false for every recorded id, and an
+   * `Infinity` reading would make every id look live forever.
+   * `prune(t)` only ever receives a value resolved here.
+   */
+  private resolveNow(now?: number): number {
+    if (now !== undefined) {
+      if (typeof now !== "number" || !Number.isFinite(now)) {
+        throw new Error(
+          `PayoutEventDedupe: now must be a finite number of milliseconds since the epoch, got ${String(now)}`,
+        );
+      }
+      return now;
+    }
+    const t = this.clock();
+    if (typeof t !== "number" || !Number.isFinite(t)) {
+      throw new Error(
+        `PayoutEventDedupe: clock must return a finite number of milliseconds since the epoch, got ${String(t)}`,
+      );
+    }
+    return t;
+  }
+
+  /**
    * Atomically check-and-record an `eventId`: returns `true` when the
    * id was already recorded within the TTL — i.e. this delivery is a
    * duplicate/replay, the same "true = is a replay" contract as the
@@ -1390,7 +1425,7 @@ export class PayoutEventDedupe {
         `PayoutEventDedupe: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
       );
     }
-    const t = this.clock();
+    const t = this.resolveNow();
     const prev = this.seenAt.get(eventId);
     if (prev !== undefined) {
       if (t - prev < this.ttlMs) {
@@ -1437,6 +1472,10 @@ export class PayoutEventDedupe {
    * ago counts as expired. An empty, non-string, or overlong
    * (longer than {@link MAX_EVENT_ID_LENGTH}) `eventId` throws a
    * configuration `Error`, the same caliber as `checkAndRecord`.
+   * A non-finite explicit `now` — or a non-finite injected-clock
+   * reading — throws the same way instead of reporting the id as
+   * unseen: with `NaN`, `t - prev < ttlMs` is false for every
+   * recorded id, so the probe would silently lie.
    *
    * Mirrors escrow's `SettlementEventDedupe.has` (backlog #1176).
    */
@@ -1451,7 +1490,7 @@ export class PayoutEventDedupe {
         `PayoutEventDedupe: eventId must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${eventId.length}`,
       );
     }
-    const t = now ?? this.clock();
+    const t = this.resolveNow(now);
     const prev = this.seenAt.get(eventId);
     if (prev === undefined) return false;
     return t - prev < this.ttlMs;
@@ -1462,7 +1501,7 @@ export class PayoutEventDedupe {
    * dedupe's injected clock.
    */
   get size(): number {
-    const t = this.clock();
+    const t = this.resolveNow();
     let n = 0;
     for (const at of this.seenAt.values()) if (t - at < this.ttlMs) n++;
     return n;
@@ -1503,7 +1542,7 @@ export class PayoutEventDedupe {
    * mutating it does not affect this store.
    */
   exportSnapshot(): PayoutEventDedupeSnapshot {
-    const t = this.clock();
+    const t = this.resolveNow();
     const entries: Array<[string, number]> = [];
     for (const [eventId, at] of this.seenAt) {
       if (t - at < this.ttlMs) entries.push([eventId, at]);
@@ -1637,7 +1676,7 @@ export class PayoutEventDedupe {
     }
 
     const dedupe = new PayoutEventDedupe(opts);
-    const t = dedupe.clock();
+    const t = dedupe.resolveNow();
     // Drop entries whose TTL already ran out against the new clock, and
     // collapse duplicate ids to their last occurrence (position and
     // timestamp), mirroring the recency refresh in `checkAndRecord`.

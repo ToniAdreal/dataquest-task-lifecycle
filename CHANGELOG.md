@@ -72,6 +72,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `PayoutEventDedupe` clock readings are now fail-closed on
+  non-finite values (2026-11-20, backlog #1290, same contract as
+  the sibling escrow `SettlementEventDedupe` #1289 and the rfc9421
+  `ReplayCache` #1288): a new private `resolveNow(now?)` resolves
+  an explicit `now` (for `has`) or the injected clock and throws a
+  configuration `Error` when either is not a finite number of
+  milliseconds since the epoch — `NaN` used to make every
+  `t - prev < ttlMs` comparison false, so a recorded `eventId`
+  looked expired and a retried payout webhook was re-admitted as
+  a first sighting, silently switching replay protection off.
+  `checkAndRecord`, `has`, `size`, `exportSnapshot`, and the
+  `restore()` clock read all go through it (`prune` only ever
+  receives an already-validated value, and the signed-snapshot
+  restore's expiry check already validated its clock via
+  `signedSnapshotRestoreNow`); a failed call leaves the store and
+  the observability counters untouched. New
+  `test/payoutEventDedupeClock.test.ts` (10 cases), test counts
+  1787 -> 1797; stripping the guard turns 8 of the new tests red
+  (mutation-checked).
+
 - `parseHistory()` names the first entry where a broken hash chain
   fails (2026-11-20, backlog #1285): a tampered, deleted, or reordered
   log used to be rejected with one generic sentence ("history hash
