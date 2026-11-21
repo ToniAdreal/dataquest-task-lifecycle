@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo payout amount enforcement segment (2026-11-21, backlog #1314):
+  `src/demo.ts` shows the `requirePayoutAmount` gate the way the
+  payout reference gate is already shown: a default task settles
+  without an amount, an enforced task's amount-less
+  `PAYOUT_COMPLETE` is rejected with the pinned `payout amount
+  required: …` error leaving state and history untouched, a
+  snapshot round-trip keeps the gate (the restored task rejects an
+  amount-less completion the same way), and the restored task then
+  settles with the pinned `payoutAmount` 250 (an integer-cent
+  amount, $250.00) carried verbatim on its last history entry.
+  The verdicts are exposed as the new `DemoResult` fields
+  `requirePayoutAmountDefaultTask`, `requirePayoutAmountTask`,
+  `requirePayoutAmountError`, `requirePayoutAmountStateAfterReject`,
+  `requirePayoutAmountHistoryLengthAfterReject`,
+  `requirePayoutAmountPayoutAmount`, `requirePayoutAmountRestoredTask`
+  and `requirePayoutAmountRestoredError`. The demo output grows by
+  six lines (1115 to 1121) and the README demo section mentions
+  the segment. The test count rises by one (1811 to 1812 tests).
+
 - CLI demo outbox error-cap segment (2026-11-21, backlog #1306):
   `src/demo.ts` shows `truncateOutboxError` in the payout outbox
   segment: a fixed 1500-character failure error is truncated to

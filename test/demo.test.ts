@@ -1032,6 +1032,12 @@ Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE t
   enforced task with the reference: PAYOUT_COMPLETE with payoutRef "xfer-demo-require-ref" at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutRef=xfer-demo-require-ref (the audit trail now names the transfer the settlement claims)
   default task DEMO-025 (requirePayoutRef unset — the advisory default): PAYOUT_COMPLETE without a payoutRef -> PAID; history last entry carries no payoutRef (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)
 
+Payout amount enforcement (requirePayoutAmount: true rejects a PAYOUT_COMPLETE that carries no payoutAmount):
+  default task DEMO-104 (requirePayoutAmount unset — the advisory default): PAYOUT_COMPLETE without a payoutAmount -> PAID; history last entry carries no payoutAmount (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)
+  enforced task DEMO-105 (constructed with requirePayoutAmount: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutAmount -> rejected: "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
+  snapshot round-trip keeps the gate: toJSON() writes requirePayoutAmount: true, and the restored task's PAYOUT_COMPLETE without a payoutAmount -> rejected: "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule)
+  restored task with the amount: PAYOUT_COMPLETE with payoutAmount 250 at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutAmount=250 (the audit trail now records how much the settlement claims)
+
 Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):
   same key, same event (DEMO-026): PUBLISH with idempotencyKey "demo-idem-publish" at <timestamp> -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)
   keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
@@ -1277,7 +1283,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1115);
+  assert.equal(lines.length, 1121);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -5130,7 +5136,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1115);
+  assert.equal(out.trimEnd().split("\n").length, 1121);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -7904,7 +7910,7 @@ test("demo payout reference enforcement segment is deterministic: two runs print
   const segment = (ls: string[]) =>
     ls.slice(
       ls.indexOf("Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):"),
-      ls.indexOf("Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):") - 1,
+      ls.indexOf("Payout amount enforcement (requirePayoutAmount: true rejects a PAYOUT_COMPLETE that carries no payoutAmount):") - 1,
     );
   const a = await runDemo();
   const b = await runDemo();
@@ -7934,6 +7940,160 @@ test("demo payout reference enforcement segment is deterministic: two runs print
   assert.deepEqual(
     a.requirePayoutRefDefaultTask.history,
     b.requirePayoutRefDefaultTask.history,
+  );
+});
+
+test("demo shows the payout amount enforcement segment in-process: amount-less completion rejected, snapshot keeps the gate, restored task settles with the amount, default stays advisory", async () => {
+  const {
+    requirePayoutAmountDefaultTask,
+    requirePayoutAmountTask,
+    requirePayoutAmountError,
+    requirePayoutAmountStateAfterReject,
+    requirePayoutAmountHistoryLengthAfterReject,
+    requirePayoutAmountPayoutAmount,
+    requirePayoutAmountRestoredTask,
+    requirePayoutAmountRestoredError,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/requirePayoutAmount.test.ts, never derived from the
+  // gate itself.
+  assert.equal(requirePayoutAmountDefaultTask.id, "DEMO-104");
+  assert.equal(requirePayoutAmountDefaultTask.state, "PAID");
+  assert.equal(requirePayoutAmountDefaultTask.history.length, 8);
+  const defaultLast =
+    requirePayoutAmountDefaultTask.history[
+      requirePayoutAmountDefaultTask.history.length - 1
+    ];
+  assert.equal(defaultLast.event, "PAYOUT_COMPLETE");
+  assert.equal(defaultLast.seq, 8);
+  assert.equal(defaultLast.payoutAmount, undefined);
+  assert.equal(defaultLast.at, "2026-04-05T09:35:00.000Z");
+  assert.equal(requirePayoutAmountTask.id, "DEMO-105");
+  assert.equal(requirePayoutAmountTask.state, "PAYOUT_PENDING");
+  assert.equal(requirePayoutAmountTask.history.length, 7);
+  assert.equal(
+    requirePayoutAmountError,
+    "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled",
+  );
+  assert.equal(requirePayoutAmountStateAfterReject, "PAYOUT_PENDING");
+  assert.equal(requirePayoutAmountHistoryLengthAfterReject, 7);
+  assert.equal(requirePayoutAmountPayoutAmount, 250);
+  assert.equal(requirePayoutAmountRestoredTask.id, "DEMO-105");
+  assert.equal(requirePayoutAmountRestoredTask.state, "PAID");
+  assert.equal(requirePayoutAmountRestoredTask.history.length, 8);
+  assert.equal(
+    requirePayoutAmountRestoredError,
+    "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled",
+  );
+  const restoredLast =
+    requirePayoutAmountRestoredTask.history[
+      requirePayoutAmountRestoredTask.history.length - 1
+    ];
+  assert.equal(restoredLast.event, "PAYOUT_COMPLETE");
+  assert.equal(restoredLast.seq, 8);
+  assert.equal(restoredLast.payoutAmount, 250);
+  assert.equal(restoredLast.at, "2026-04-06T09:40:00.000Z");
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here under
+  // the same fixed timestamps reproduce every verdict on
+  // their own (the script from the requirePayoutAmount tests).
+  const driveToPayoutPending = (
+    id: string,
+    opts?: { requirePayoutAmount: boolean },
+  ): TaskLifecycle => {
+    const t = new TaskLifecycle(id, opts);
+    for (const [event, actor, at] of [
+      ["PUBLISH", "researcher", "2026-04-07T09:00:00.000Z"],
+      ["ACCEPT", "contributor", "2026-04-07T09:05:00.000Z"],
+      ["START_CAPTURE", "contributor", "2026-04-07T09:10:00.000Z"],
+      ["SUBMIT", "contributor", "2026-04-07T09:15:00.000Z"],
+      ["BEGIN_REVIEW", "reviewer", "2026-04-07T09:20:00.000Z"],
+      ["APPROVE", "reviewer", "2026-04-07T09:25:00.000Z"],
+      ["REQUEST_PAYOUT", "contributor", "2026-04-07T09:30:00.000Z"],
+    ] as const) {
+      t.dispatch(event, { actor, at });
+    }
+    return t;
+  };
+  const independentDefault = driveToPayoutPending("test-rpa-default");
+  independentDefault.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-04-07T09:35:00.000Z",
+  });
+  assert.equal(independentDefault.state, "PAID");
+  assert.equal(
+    independentDefault.history[independentDefault.history.length - 1]
+      .payoutAmount,
+    undefined,
+  );
+  const independentEnforced = driveToPayoutPending("test-rpa-enforced", {
+    requirePayoutAmount: true,
+  });
+  assert.throws(
+    () =>
+      independentEnforced.dispatch("PAYOUT_COMPLETE", {
+        actor: "system",
+        at: "2026-04-07T09:35:00.000Z",
+      }),
+    /payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled/,
+  );
+  assert.equal(independentEnforced.state, "PAYOUT_PENDING");
+  assert.equal(independentEnforced.history.length, 7);
+  const independentRestored = TaskLifecycle.fromJSON(
+    JSON.parse(JSON.stringify(independentEnforced.toJSON())) as unknown,
+  );
+  assert.equal(independentRestored.state, "PAYOUT_PENDING");
+  assert.equal(independentRestored.history.length, 7);
+  assert.throws(
+    () =>
+      independentRestored.dispatch("PAYOUT_COMPLETE", {
+        actor: "system",
+        at: "2026-04-07T09:36:00.000Z",
+      }),
+    /payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled/,
+  );
+  assert.equal(independentRestored.history.length, 7);
+  independentRestored.dispatch("PAYOUT_COMPLETE", {
+    actor: "system",
+    at: "2026-04-07T09:40:00.000Z",
+    payoutAmount: 250,
+  });
+  assert.equal(independentRestored.state, "PAID");
+  assert.equal(
+    independentRestored.history[independentRestored.history.length - 1]
+      .payoutAmount,
+    250,
+  );
+  // The segment follows the payout reference enforcement
+  // segment and prints its lines verbatim (the dispatch
+  // idempotency key segment follows it).
+  const amountAt = text.indexOf(
+    "Payout amount enforcement (requirePayoutAmount: true rejects a PAYOUT_COMPLETE that carries no payoutAmount):",
+  );
+  assert.ok(
+    amountAt >
+      text.indexOf(
+        "Payout reference enforcement (requirePayoutRef: true rejects a PAYOUT_COMPLETE that carries no payoutRef):",
+      ),
+    "payout amount enforcement segment must follow the payout reference enforcement segment",
+  );
+  for (const line of [
+    "  default task DEMO-104 (requirePayoutAmount unset — the advisory default): PAYOUT_COMPLETE without a payoutAmount -> PAID; history last entry carries no payoutAmount (backward compatible: enforcement is opt-in, so an unenforced task still settles on the advisory path)",
+    "  enforced task DEMO-105 (constructed with requirePayoutAmount: true, driven to PAYOUT_PENDING under fixed timestamps): PAYOUT_COMPLETE without a payoutAmount -> rejected: \"payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled\"; state after rejection: PAYOUT_PENDING, history entries: 7 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)",
+    "  snapshot round-trip keeps the gate: toJSON() writes requirePayoutAmount: true, and the restored task's PAYOUT_COMPLETE without a payoutAmount -> rejected: \"payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled\" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule)",
+    "  restored task with the amount: PAYOUT_COMPLETE with payoutAmount 250 at 2026-04-06T09:40:00.000Z -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutAmount=250 (the audit trail now records how much the settlement claims)",
+  ]) {
+    assert.ok(text.includes(line), `missing enforcement line: ${line}`);
+  }
+  assert.ok(
+    text.indexOf(
+      "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+    ) > amountAt,
+    "dispatch idempotency key segment must follow the payout amount enforcement segment",
   );
 });
 
