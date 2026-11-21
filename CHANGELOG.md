@@ -11,6 +11,18 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo outbox error-cap segment (2026-11-21, backlog #1306):
+  `src/demo.ts` shows `truncateOutboxError` in the payout outbox
+  segment: a fixed 1500-character failure error is truncated to
+  exactly 1024 characters ending in the `…[truncated]` marker, a
+  short error passes through verbatim, and a fresh outbox stores
+  the capped form as the pair's `lastError` — the 1024 cap is now
+  visible at record time, not only in the library docs. The
+  verdicts are exposed as the new `DemoResult.outboxErrorTruncation`
+  field. The demo output grows by five lines (1110 to 1115) and the
+  README demo section mentions the segment. The test count rises by
+  one (1810 to 1811 tests).
+
 - `isSettlementComplete` benchmark row (2026-11-20, backlog #1282):
   `npm run bench` now measures the per-task settlement predicate on
   its own row — one timed pass is three calls over fixed fixtures:

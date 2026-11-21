@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1810 tests, all local
+npm test   # 1811 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1974,7 +1974,12 @@ dead-letters at the `maxAttempts` cap of 3, with the exact
 `server responded with status 500` delivery error as its
 `lastError`; a second event then fails once and delivers 200, so
 its success clears its own pair and the ledger ends pending 0,
-dead letter 1. The demo then shows the dead letter coming back:
+dead letter 1. The demo then shows the error cap: a fixed
+1500-character failure error is truncated to exactly 1024
+characters ending in the `…[truncated]` marker, a short error
+passes through verbatim, and a fresh outbox stores the capped
+form as the pair's `lastError`. The demo then shows the dead
+letter coming back:
 `redrive()` at a fixed later clock (13:30) moves the pair back to
 pending with attempts reset to 0, a second redrive while pending is
 rejected with the pinned error, and one scripted 200 after the fix
@@ -2752,7 +2757,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1810 tests covering the happy path, reject→resubmit
+`npm test` runs 1811 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

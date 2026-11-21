@@ -26,6 +26,9 @@ import {
   DEMO_OUTBOX_DEAD_EVENT_ID,
   DEMO_OUTBOX_DEAD_LAST_ERROR,
   DEMO_OUTBOX_ENDPOINT,
+  DEMO_OUTBOX_ERROR_CAP_EVENT_ID,
+  DEMO_OUTBOX_ERROR_MARKER,
+  DEMO_OUTBOX_LONG_ERROR,
   DEMO_OUTBOX_MAX_ATTEMPTS,
   DEMO_OUTBOX_NOW,
   DEMO_OUTBOX_RECOVERED_AT,
@@ -73,6 +76,7 @@ import {
   MAX_EVENT_ID_LENGTH,
   MAX_IDEMPOTENCY_KEY_LENGTH,
   MAX_NOTE_LENGTH,
+  MAX_OUTBOX_ERROR_LENGTH,
   MAX_TASK_ID_LENGTH,
   PayoutEventDedupe,
   PayoutWebhookOutbox,
@@ -112,6 +116,7 @@ import {
   toMinorUnits,
   transitionTable,
   transitionTableJson,
+  truncateOutboxError,
   verifyHistoryChain,
   buildPayoutWebhook,
   deliverPayoutWebhook,
@@ -1245,6 +1250,11 @@ Payout webhook outbox (PayoutWebhookOutbox: failed deliveries stay pending, then
   after 3 failures: pending 0, dead letter 1 (attempts 3, capped at maxAttempts 3) — needs a human
   recovered event evt_demo_outbox_002: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1
 
+Payout webhook outbox error cap (truncateOutboxError: a stored lastError never exceeds 1024 characters):
+  1500-character error truncated to 1024 characters, ending in "…[truncated]"
+  short error passes through verbatim: server responded with status 500
+  recorded in a fresh outbox, the stored lastError is the 1024-character capped form — never the 1500-character original
+
 Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):
   https://billing.example.com/hooks/payout — event evt_demo_outbox_001: dead-lettered at attempts 3, redriven at <timestamp> — back to pending, attempts reset to 0, lastAt stamped with the redrive time
   redriving the pending pair again rejected: PayoutWebhookOutbox: cannot redrive a pending pair (only dead-lettered pairs can be redriven)
@@ -1267,7 +1277,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1110);
+  assert.equal(lines.length, 1115);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -5120,7 +5130,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1110);
+  assert.equal(out.trimEnd().split("\n").length, 1115);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -11085,6 +11095,90 @@ test("demo shows the payout webhook outbox segment in-process: three 500s dead-l
   );
 });
 
+test("demo shows the payout webhook outbox error cap in-process: 1500-character error truncated to 1024 with the marker, short error verbatim, ledger stores the capped form", async () => {
+  const { outboxErrorTruncation, lines } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-pinned fixtures: the long error is exactly 1500 "E"s,
+  // the marker is the library's truncation marker, the cap is
+  // the library's `MAX_OUTBOX_ERROR_LENGTH`.
+  assert.equal(DEMO_OUTBOX_LONG_ERROR, "E".repeat(1500));
+  assert.equal(DEMO_OUTBOX_ERROR_MARKER, "…[truncated]");
+  assert.equal(MAX_OUTBOX_ERROR_LENGTH, 1024);
+
+  const { longErrorLength, truncatedError, shortError, ledgerLastError } =
+    outboxErrorTruncation;
+  assert.equal(longErrorLength, 1500);
+  assert.equal(truncatedError.length, MAX_OUTBOX_ERROR_LENGTH);
+  assert.ok(truncatedError.endsWith(DEMO_OUTBOX_ERROR_MARKER));
+  assert.equal(
+    truncatedError,
+    "E".repeat(
+      MAX_OUTBOX_ERROR_LENGTH - DEMO_OUTBOX_ERROR_MARKER.length,
+    ) + DEMO_OUTBOX_ERROR_MARKER,
+  );
+  assert.equal(shortError, DEMO_OUTBOX_DEAD_LAST_ERROR);
+  assert.equal(ledgerLastError, truncatedError);
+
+  // Independent cross-check: a fresh outbox fed the same long
+  // error through the library entry points directly must store
+  // the same capped form — the segment is not self-certifying.
+  const independent = new PayoutWebhookOutbox({
+    maxAttempts: DEMO_OUTBOX_MAX_ATTEMPTS,
+    now: () => Date.parse(DEMO_OUTBOX_NOW),
+  });
+  independent.recordAttempt({
+    endpoint: DEMO_OUTBOX_ENDPOINT,
+    eventId: DEMO_OUTBOX_ERROR_CAP_EVENT_ID,
+    ok: false,
+    status: 500,
+    error: DEMO_OUTBOX_LONG_ERROR,
+    at: Date.parse(DEMO_OUTBOX_NOW),
+  });
+  assert.equal(independent.pending().length, 1);
+  assert.equal(independent.pending()[0]?.lastError, truncatedError);
+  // And the library function itself, on a differently-built
+  // 1500-character error, caps to the same length and marker.
+  const otherLong = "y".repeat(1500);
+  const otherTruncated = truncateOutboxError(otherLong);
+  assert.equal(otherTruncated.length, MAX_OUTBOX_ERROR_LENGTH);
+  assert.ok(otherTruncated.endsWith(DEMO_OUTBOX_ERROR_MARKER));
+  assert.equal(
+    otherTruncated.slice(
+      0,
+      MAX_OUTBOX_ERROR_LENGTH - DEMO_OUTBOX_ERROR_MARKER.length,
+    ),
+    "y".repeat(MAX_OUTBOX_ERROR_LENGTH - DEMO_OUTBOX_ERROR_MARKER.length),
+  );
+
+  // The printed lines are pinned literals, in order: the
+  // error-cap section follows the outbox segment and precedes
+  // the redrive.
+  const header =
+    "Payout webhook outbox error cap (truncateOutboxError: a stored lastError never exceeds 1024 characters):";
+  const headerAt = text.indexOf(header);
+  assert.ok(
+    headerAt >
+      text.indexOf(
+        `  recovered event ${DEMO_OUTBOX_RECOVERED_EVENT_ID}: 1 failure (pending, attempts 1), then 200 — the success cleared the pair; ledger ends pending 0, dead letter 1`,
+      ),
+    "payout webhook outbox error cap must follow the payout webhook outbox segment",
+  );
+  assert.ok(
+    text.indexOf(
+      "Payout webhook outbox redrive (PayoutWebhookOutbox.redrive: the dead letter comes back to pending):",
+    ) > headerAt,
+    "payout webhook outbox redrive must follow the error cap",
+  );
+  for (const line of [
+    `  1500-character error truncated to 1024 characters, ending in "…[truncated]"`,
+    `  short error passes through verbatim: ${DEMO_OUTBOX_DEAD_LAST_ERROR}`,
+    `  recorded in a fresh outbox, the stored lastError is the 1024-character capped form — never the 1500-character original`,
+  ]) {
+    assert.ok(text.includes(line), `missing outbox error cap line: ${line}`);
+  }
+});
+
 test("demo shows the payout webhook outbox redrive segment in-process: dead-lettered pair returns to pending, then a 200 clears it", async () => {
   const {
     outbox,
@@ -11398,11 +11492,13 @@ test("demo payout webhook outbox segment is deterministic: two runs print byte-i
   const b = await runDemo();
   const segA = segment(a.lines);
   // Header + endpoint + after-2 + after-3 + recovered lines,
-  // then the blank line and the redrive header + 3 redrive
-  // lines; every value is a pinned literal, so no
+  // then the blank line and the error-cap header + 3 error-cap
+  // lines, then the blank line and the redrive header + 3
+  // redrive lines; every value is a pinned literal, so no
   // normalization is needed.
-  assert.equal(segA.length, 10);
+  assert.equal(segA.length, 15);
   assert.deepEqual(segA, segment(b.lines));
+  assert.deepEqual(a.outboxErrorTruncation, b.outboxErrorTruncation);
   assert.deepEqual(a.outboxPendingAfterTwo, b.outboxPendingAfterTwo);
   assert.deepEqual(a.outboxDeadAfterThree, b.outboxDeadAfterThree);
   assert.deepEqual(a.outboxPendingFinal, b.outboxPendingFinal);
