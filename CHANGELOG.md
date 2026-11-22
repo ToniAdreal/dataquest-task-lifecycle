@@ -124,6 +124,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `verifyPayoutWebhook` fails closed on a non-serializable object body
+  (2026-11-22, backlog #1318, mirror of the sibling escrow #1317 fix):
+  an object body holding a `BigInt` value, a circular reference, or a
+  throwing `toJSON` used to escape `canonicalJson` (bare
+  `JSON.stringify`) as an unhandled `TypeError` (or the rethrown
+  `toJSON` error), breaking the documented never-throws promise.
+  Serialization failure now returns `false` — such a body could never
+  have produced a matching signature — while string bodies bypass
+  serialization entirely and configuration errors (empty secrets and
+  the like) still throw. The `verifyPayoutWebhook` JSDoc states the
+  fail-closed rule. New
+  `test/verifyPayoutWebhookNonSerializableBody.test.ts` (10 cases)
+  pins the three hostile shapes, the malformed-signature and
+  options-form paths, and the valid-object / string-body / config-error
+  regressions. Mutation check: removing the guard turns 6 of the 10
+  new tests red, reverted. The test count rises by ten
+  (1813 to 1823 tests).
+
 - `diffTaskSnapshots` shape-checks both snapshots first (2026-11-20,
   backlog #1294, mirror of the sibling escrow #1295 pattern):
   a new shared `assertTaskSnapshotShape(snapshot, tag)` runs the

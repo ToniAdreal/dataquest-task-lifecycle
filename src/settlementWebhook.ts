@@ -651,8 +651,11 @@ export interface VerifyPayoutWebhookOptions {
  * Prefer passing the raw body `string`; a parsed object is re-stringified
  * (fine in-process, but raw bytes are the safe transport path).
  * Malformed signatures return `false` rather than throwing, so a hostile
- * input can never turn verification into an unhandled exception. The
- * comparison runs in constant time (`timingSafeEqual`).
+ * input can never turn verification into an unhandled exception. The same
+ * holds for an object body that cannot be serialized (a `BigInt` value,
+ * a circular reference, a throwing `toJSON`): it returns `false` instead
+ * of throwing — such a body could never have produced a matching
+ * signature. The comparison runs in constant time (`timingSafeEqual`).
  *
  * Note: `eventId` is not validated separately by default — it is part
  * of the signed body, so any tampering with it breaks the signature
@@ -809,7 +812,22 @@ export function verifyPayoutWebhook(
   }
   const match = /^sha256=([0-9a-f]{64})$/.exec(signature);
   if (!match) return false;
-  const bodyString = typeof body === "string" ? body : canonicalJson(body);
+  // An object body that cannot be serialized (BigInt values, circular
+  // references, a throwing toJSON) can never have produced a matching
+  // signature: fail closed as `false`, never throw. `JSON.stringify`
+  // throws `TypeError` for BigInt/circular inputs and rethrows whatever
+  // a hostile `toJSON` throws, so the catch must be untyped. String
+  // bodies bypass serialization entirely and are unaffected.
+  let bodyString: string;
+  if (typeof body === "string") {
+    bodyString = body;
+  } else {
+    try {
+      bodyString = canonicalJson(body);
+    } catch {
+      return false;
+    }
+  }
   const actual = Buffer.from(match[1], "hex");
   // Each candidate is compared in constant time; the first match wins.
   // timingSafeEqual throws on length mismatch; a forged 64-hex string that
