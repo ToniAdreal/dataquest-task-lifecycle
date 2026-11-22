@@ -28,8 +28,10 @@ import {
  *   and no signature is produced or checked in those cases
  * - every documented key still works, in full combination, on both
  *   sides; `{}` is a valid control on both sides
- * - `null` / array options keep their pre-#1273 behavior (a bare
- *   `TypeError` for `null`, empty-options behavior for an array)
+ * - `null` / array options no longer keep their pre-#1273 behavior:
+ *   backlog #1330 fails them closed with a configuration error
+ *   (`cannot build/verify payout webhook: opts must be an object`),
+ *   never a bare `TypeError` and never empty-options behavior
  */
 
 /** Drive a task from DRAFT all the way to PAID. */
@@ -164,7 +166,7 @@ test("build: unknown key is reported before the non-PAID state error", () => {
   );
 });
 
-test("build: null options keep the pre-#1273 bare TypeError", () => {
+test("build: null options throw a config error, not a bare TypeError (#1330)", () => {
   const task = toPaid("task-build-null", {
     payoutRef: "xfer-6",
     payoutAmount: 5000,
@@ -176,24 +178,39 @@ test("build: null options keep the pre-#1273 bare TypeError", () => {
         SECRET,
         null as unknown as BuildPayoutWebhookOptions,
       ),
-    TypeError,
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!(err instanceof TypeError));
+      assert.equal(
+        err.message,
+        "cannot build payout webhook: opts must be an object",
+      );
+      return true;
+    },
   );
 });
 
-test("build: array options behave like empty options", () => {
+test("build: array options throw a config error, not empty-options behavior (#1330)", () => {
   const task = toPaid("task-build-array", {
     payoutRef: "xfer-7",
     payoutAmount: 5000,
   });
-  const { payload, signature } = buildPayoutWebhook(
-    task,
-    SECRET,
-    [] as unknown as BuildPayoutWebhookOptions,
-  );
-  assert.equal(payload.event, "PAYOUT_COMPLETE");
-  assert.equal(
-    verifyPayoutWebhook(JSON.stringify(payload), signature, SECRET),
-    true,
+  assert.throws(
+    () =>
+      buildPayoutWebhook(
+        task,
+        SECRET,
+        [] as unknown as BuildPayoutWebhookOptions,
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!(err instanceof TypeError));
+      assert.equal(
+        err.message,
+        "cannot build payout webhook: opts must be an object",
+      );
+      return true;
+    },
   );
 });
 
@@ -287,7 +304,7 @@ test("verify: unknown key throws even with a forged signature (never false)", ()
   );
 });
 
-test("verify: null opts keep the pre-#1273 bare TypeError", () => {
+test("verify: null opts throw a config error, not a bare TypeError (#1330)", () => {
   const task = toPaid("task-verify-null", {
     payoutRef: "xfer-14",
     payoutAmount: 5000,
@@ -301,23 +318,40 @@ test("verify: null opts keep the pre-#1273 bare TypeError", () => {
         SECRET,
         null as unknown as VerifyPayoutWebhookOptions,
       ),
-    TypeError,
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!(err instanceof TypeError));
+      assert.equal(
+        err.message,
+        "cannot verify payout webhook: opts must be an object",
+      );
+      return true;
+    },
   );
 });
 
-test("verify: array opts behave like empty options", () => {
+test("verify: array opts throw a config error, not empty-options behavior (#1330)", () => {
   const task = toPaid("task-verify-array", {
     payoutRef: "xfer-15",
     payoutAmount: 5000,
   });
   const { body, signature } = signedWebhook(task);
-  assert.equal(
-    verifyPayoutWebhook(
-      body,
-      signature,
-      SECRET,
-      [] as unknown as VerifyPayoutWebhookOptions,
-    ),
-    true,
+  assert.throws(
+    () =>
+      verifyPayoutWebhook(
+        body,
+        signature,
+        SECRET,
+        [] as unknown as VerifyPayoutWebhookOptions,
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!(err instanceof TypeError));
+      assert.equal(
+        err.message,
+        "cannot verify payout webhook: opts must be an object",
+      );
+      return true;
+    },
   );
 });

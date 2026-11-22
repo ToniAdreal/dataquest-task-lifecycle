@@ -124,6 +124,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Settlement-webhook entry points reject null/non-object inputs with
+  a configuration error (2026-11-22, backlog #1330, the follow-up
+  #1273 explicitly deferred): `buildPayoutWebhook`,
+  `buildPayoutWebhooks`, `verifyPayoutWebhook`,
+  `deliverPayoutWebhook`, `deliverPayoutWebhookToMany`,
+  `retryPayoutWebhookOutbox`, and the `PayoutEventDedupe` /
+  `PayoutWebhookOutbox` constructors (plus their `restore()` /
+  `fromSnapshot()` / `restoreSignedSnapshot()` paths, which inherit
+  the constructor guard) all read their `opts` — and, where
+  applicable, `task`, `webhook`, or `attempt` — with no shape check,
+  so a `null` in any of those positions died as a bare `TypeError`
+  (`Cannot read properties of null (reading 'now' | 'secrets' |
+  'timeoutMs' | 'maxRounds' | 'state' | 'payload' | 'ttlMs' |
+  'maxAttempts')`, or `Cannot destructure property 'endpoint' of
+  'attempt' as it is null`). A shared `assertOptionsObject` /
+  `assertObjectInput` guard now throws `<caller>: opts must be an
+  object` (or `…: task must be an object` / `…: webhook must be an
+  object` / `…: attempt must be an object`) before any field is read,
+  with zero fetch calls and zero state change; the batch build turns
+  a `null` task into that task's `{ taskId: "unknown", error }` with
+  the new text instead of the bare `TypeError`, and still builds the
+  rest. `undefined` opts keeps meaning "defaults" everywhere. New
+  `test/settlementWebhookNullInputs.test.ts` (24 cases) pins the
+  shape, including the signed-restore fail-fast ordering; the test
+  count rises by twenty-four (1852 to 1876 tests).
+
 - `buildPayoutWebhook` rejects a non-string/Buffer signing secret
   with a configuration error (2026-11-22, backlog #1327, mirror of
   escrow #1272): `assertSecret` used to check only

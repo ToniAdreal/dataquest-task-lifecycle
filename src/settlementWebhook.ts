@@ -193,10 +193,8 @@ const VERIFY_PAYOUT_WEBHOOK_OPTION_FIELDS = new Set([
  * otherwise silently leave the "no reference, no notification" gate
  * off while the caller believes it is on, and a typo'd `maxAge`
  * would silently leave the replay window unset. A non-object options
- * value (a missing options argument, a string, …) has no keys to scan
- * and falls through to the entry point's own validation, which keeps
- * its existing behavior (a bare `TypeError` on a `null` options value
- * is the pre-#1273 behavior and is deliberately unchanged).
+ * value has no keys to scan: it never reaches this scan, because the
+ * entry point's `assertOptionsObject` guard (#1330) throws first.
  */
 function assertNoUnknownPayoutWebhookOptions(
   options: unknown,
@@ -231,6 +229,44 @@ function assertSecret(secret: unknown): void {
     throw new Error(
       "cannot build payout webhook: signing secret must not be empty",
     );
+  }
+}
+
+/**
+ * Shared shape guard for the settlement-webhook entry points (backlog
+ * #1330): an options argument must be an object — `null`, an array, a
+ * number, a string, … is a caller bug and must be reported as itself,
+ * never as the bare `TypeError` the first field read would otherwise
+ * throw (`Cannot read properties of null (reading 'now')`, …). The
+ * guard runs before any field is read; an omitted options argument
+ * never reaches it (the default parameter turns it into `{}`), and
+ * `undefined` passed explicitly takes the same default path. The
+ * same caliber covers the other non-object inputs (`task`,
+ * `webhook`, `attempt`) via `assertObjectInput` below.
+ */
+function assertOptionsObject(options: unknown, caller: string): void {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options)
+  ) {
+    throw new Error(`${caller}: opts must be an object`);
+  }
+}
+
+/**
+ * Same caliber as {@link assertOptionsObject}, for a named non-object
+ * input: a `null` task, webhook, or attempt is a caller bug and must
+ * be reported as a configuration error naming the value, never as the
+ * bare `TypeError` its first field read would throw.
+ */
+function assertObjectInput(
+  value: unknown,
+  name: string,
+  caller: string,
+): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${caller}: ${name} must be an object`);
   }
 }
 
@@ -288,7 +324,10 @@ function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
  * valid timestamp, an injected `eventId` is not a non-empty string (or
  * is longer than {@link MAX_EVENT_ID_LENGTH} characters), or — with
  * `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
- * entry carries no `payoutRef`. An unknown option key throws
+ * entry carries no `payoutRef`. A null/non-object `task` or `options`
+ * (#1330) throws a configuration error (`cannot build payout webhook:
+ * task must be an object` / `…: opts must be an object`) before any
+ * field is read, never a bare `TypeError`. An unknown option key throws
  * `cannot build payout webhook: unknown option "<key>"` before any
  * field is read (#1273), so a typo'd gate can never silently fall back
  * to its default.
@@ -298,6 +337,13 @@ export function buildPayoutWebhook(
   secret: string | Buffer,
   options: BuildPayoutWebhookOptions = {},
 ): PayoutWebhook {
+  // A null/non-object task or options is a caller bug (#1330): fail
+  // closed with a configuration error before any field is read, so a
+  // `null` task never dies as `Cannot read properties of null
+  // (reading 'state')` and a `null` options value never dies reading
+  // 'now'.
+  assertObjectInput(task, "task", "cannot build payout webhook");
+  assertOptionsObject(options, "cannot build payout webhook");
   // Unknown option keys fail closed (#1273, see
   // BUILD_PAYOUT_WEBHOOK_OPTION_FIELDS), checked before any field is
   // read so a typo is reported as itself: a typo'd `requirePayoutAmout`
@@ -486,6 +532,14 @@ export function buildPayoutWebhooks(
       "cannot build payout webhooks: tasks must be an array",
     );
   }
+  // Call-level options are validated once up front like the secret:
+  // a null options value is a caller bug (#1330) and throws for the
+  // whole batch before any task is attempted. A null task inside the
+  // list is different — it is a per-task failure, recorded as
+  // `{ taskId: "unknown", error: "cannot build payout webhook: task
+  // must be an object" }` by the single build's guard below, and the
+  // rest of the batch still builds.
+  assertOptionsObject(options, "cannot build payout webhooks");
   // Call-level configuration, validated once up front: an empty
   // secret would fail every task identically, so it throws for the
   // whole batch instead of being recorded per task.
@@ -719,7 +773,9 @@ export interface VerifyPayoutWebhookOptions {
  * configured, runs after a match exactly as in the single-secret shape,
  * so rotation does not widen the replay window. An unknown option key
  * throws a configuration error (`cannot verify payout webhook: unknown
- * option "<key>"`) before any secret is read (#1273).
+ * option "<key>"`) before any secret is read (#1273). A null/non-object
+ * `opts` (#1330) throws `cannot verify payout webhook: opts must be
+ * an object` before any secret is read, never a bare `TypeError`.
  */
 export function verifyPayoutWebhook(
   body: string | PayoutWebhookPayload,
@@ -727,6 +783,10 @@ export function verifyPayoutWebhook(
   secret: string | Buffer | undefined,
   opts: VerifyPayoutWebhookOptions = {},
 ): boolean {
+  // A null/non-object options value is a caller bug (#1330): fail
+  // closed before the unknown-key scan (which has nothing to scan on
+  // a non-object) and before any secret is read.
+  assertOptionsObject(opts, "cannot verify payout webhook");
   // Unknown option keys fail closed (#1273, see
   // VERIFY_PAYOUT_WEBHOOK_OPTION_FIELDS), checked before any secret is
   // read so a typo is reported as itself: a typo'd `maxAge` would
@@ -1377,6 +1437,11 @@ export class PayoutEventDedupe {
   private evictions = 0;
 
   constructor(opts: PayoutEventDedupeOptions = {}) {
+    // A null/non-object options value is a caller bug (#1330): fail
+    // closed before any field is read, never as `Cannot read
+    // properties of null (reading 'ttlMs')`. `restore()` /
+    // `fromSnapshot()` inherit this guard through this constructor.
+    assertOptionsObject(opts, "PayoutEventDedupe");
     const ttlMs = opts.ttlMs ?? 3_600_000;
     const maxEntries = opts.maxEntries ?? 10_000;
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
@@ -1797,6 +1862,11 @@ export class PayoutEventDedupe {
     secret: string | Buffer,
     opts: PayoutEventDedupeOptions = {},
   ): PayoutEventDedupe {
+    // A null/non-object options value is a caller bug (#1330): fail
+    // closed before the envelope is touched — `opts.now` is read
+    // below for the expiry check, and the unsigned `restore()` at
+    // the end would otherwise be the first place to reject it.
+    assertOptionsObject(opts, "PayoutEventDedupe");
     const secretBytes = signedSnapshotSecretBytes(secret);
     const fail = (detail: string): never => {
       throw new Error(
@@ -2275,6 +2345,11 @@ export class PayoutWebhookOutbox {
   >();
 
   constructor(opts: PayoutWebhookOutboxOptions = {}) {
+    // A null/non-object options value is a caller bug (#1330): fail
+    // closed before any field is read, never as `Cannot read
+    // properties of null (reading 'maxAttempts')`. `restore()` /
+    // `fromSnapshot()` inherit this guard through this constructor.
+    assertOptionsObject(opts, "PayoutWebhookOutbox");
     const maxAttempts = opts.maxAttempts ?? 3;
     if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
       throw new Error(
@@ -2314,6 +2389,10 @@ export class PayoutWebhookOutbox {
    * exactly the deliveries that need it most.
    */
   recordAttempt(attempt: PayoutWebhookOutboxAttempt): void {
+    // A null/non-object attempt is a caller bug (#1330): fail closed
+    // before destructuring, never as `Cannot destructure property
+    // 'endpoint' of 'attempt' as it is null`.
+    assertObjectInput(attempt, "attempt", "PayoutWebhookOutbox");
     const { endpoint, eventId, ok } = attempt;
     if (typeof endpoint !== "string" || endpoint.length === 0) {
       throw new Error(
@@ -2870,6 +2949,11 @@ export class PayoutWebhookOutbox {
     secret: string | Buffer,
     opts: PayoutWebhookOutboxOptions = {},
   ): PayoutWebhookOutbox {
+    // A null/non-object options value is a caller bug (#1330): fail
+    // closed before the envelope is touched — `opts.now` is read
+    // below for the expiry check, and the unsigned `restore()` at
+    // the end would otherwise be the first place to reject it.
+    assertOptionsObject(opts, "PayoutWebhookOutbox");
     const secretBytes = outboxSignedSnapshotSecretBytes(secret);
     const fail = (detail: string): never => {
       throw new Error(
@@ -3157,6 +3241,9 @@ export interface PayoutWebhookOutboxRetrySummary {
  *   acknowledged, or slept. A dry run never changes the ledger,
  *   so rehearsing and then running the live retry still delivers
  *   every pair.
+ * - A null/non-object `opts` (#1330) throws
+ *   `retryPayoutWebhookOutbox: opts must be an object` before any
+ *   pair is touched, never a bare `TypeError`.
  *
  * Honest limits: the runner is in-process only — it retries the
  * pairs this process's outbox holds, and a process that dies loses
@@ -3183,6 +3270,10 @@ export async function retryPayoutWebhookOutbox(
       "retryPayoutWebhookOutbox: deliverOne must be a function",
     );
   }
+  // A null/non-object options value is a caller bug (#1330): fail
+  // closed before `maxRounds` is read, never as `Cannot read
+  // properties of null (reading 'maxRounds')`.
+  assertOptionsObject(opts, "retryPayoutWebhookOutbox");
   const maxRounds = opts.maxRounds ?? 1;
   if (!Number.isInteger(maxRounds) || maxRounds < 1) {
     throw new Error(
@@ -3643,6 +3734,12 @@ interface ResolvedDeliverOptions {
 function resolveDeliverOptions(
   opts: DeliverPayoutWebhookOptions,
 ): ResolvedDeliverOptions {
+  // A null/non-object options value is a caller bug (#1330): fail
+  // closed before `timeoutMs` is read, never as `Cannot read
+  // properties of null (reading 'timeoutMs')`. This is the shared
+  // gate for both the single delivery and the fan-out's call-level
+  // options.
+  assertOptionsObject(opts, "cannot deliver payout webhook");
   const timeoutMs = opts.timeoutMs ?? 5000;
   const maxAttempts = opts.maxAttempts ?? 3;
   const backoffMs = opts.backoffMs ?? 1000;
@@ -3765,11 +3862,25 @@ async function sleepWithSignal(
   }
 }
 
+/**
+ * Deliver one signed payout webhook to one endpoint.
+ *
+ * A null/non-object `webhook` or `opts` (#1330) throws a configuration
+ * error (`cannot deliver payout webhook: webhook must be an object` /
+ * `…: opts must be an object`) before any request is made, never a
+ * bare `TypeError`.
+ */
 export async function deliverPayoutWebhook(
   url: string,
   webhook: PayoutWebhook,
   opts: DeliverPayoutWebhookOptions = {},
 ): Promise<DeliverWebhookResult> {
+  // A null/non-object webhook is a caller bug (#1330): fail closed
+  // before any field is read, never as `Cannot read properties of
+  // null (reading 'payload')` inside the signing serialization.
+  // The options guard lives in `resolveDeliverOptions` below, so a
+  // null options value fails the same way before any request.
+  assertObjectInput(webhook, "webhook", "cannot deliver payout webhook");
   const {
     timeoutMs,
     maxAttempts,
@@ -4115,6 +4226,10 @@ export async function deliverPayoutWebhookToMany(
       "cannot deliver payout webhook to many endpoints: endpoints must be a non-empty array",
     );
   }
+  // A null/non-object task is a caller bug (#1330): fail closed
+  // before any field is read, never as `Cannot read properties of
+  // null (reading 'state')` in the PAID check below.
+  assertObjectInput(task, "task", "cannot build payout webhook");
   // Global delivery options are call-level configuration: validate them
   // once, up front, with the same rules as a single delivery. (Per-
   // endpoint overrides are validated per endpoint, inside the fan-out,

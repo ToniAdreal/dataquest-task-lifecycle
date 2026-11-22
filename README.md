@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1852 tests, all local
+npm test   # 1876 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1602,7 +1602,15 @@ secret that is not a string or Buffer (a number, `null`, an object,
 …) throws `cannot build payout webhook: signing secret must be a
 string or Buffer` before any signing work, instead of dying inside
 `createHmac` as a bare `TypeError`; an empty string or Buffer still
-reports `must not be empty`. The batch build shares the guard (a
+reports `must not be empty`. The same fail-closed shape rule covers
+the other inputs: a `null`, array, number, or string `opts` (and a
+`null`/array `task`, `webhook`, or `attempt`) throws a configuration
+error naming the value (`…: opts must be an object`, `…: task must
+be an object`, …) before any field is read, never a bare `TypeError`
+— the batch build turns a `null` task into that task's
+`{ taskId: "unknown", error }` and still builds the rest, and the
+dedupe/outbox constructors and their `restore()` /
+`restoreSignedSnapshot()` paths inherit the same guard. The batch build shares the guard (a
 wrong-type secret throws for the whole batch), and the fan-out
 inherits it per endpoint (a bad endpoint secret fails only that
 endpoint, with zero fetch calls).
@@ -2788,7 +2796,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1852 tests covering the happy path, reject→resubmit
+`npm test` runs 1876 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
