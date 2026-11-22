@@ -3131,7 +3131,11 @@ export interface PayoutWebhookOutboxRetryOptions {
    * on the attempts the runner records. Defaults to `Date.now`.
    * Inject a fake clock for deterministic tests. This is the
    * runner's clock only — the outbox keeps the clock it was built
-   * with for attempts recorded without an explicit `at`.
+   * with for attempts recorded without an explicit `at`. The
+   * runner resolves it once per round, before any pair in that
+   * round is delivered, and a non-finite reading throws a
+   * configuration error there (backlog #1333) instead of
+   * surfacing mid-round from `recordAttempt`.
    */
   now?: () => number;
   /**
@@ -3207,6 +3211,33 @@ export interface PayoutWebhookOutboxRetrySummary {
 }
 
 /**
+ * Resolve one reading of the retry runner's clock, fail-closed
+ * (backlog #1333, same contract as {@link PayoutEventDedupe}'s
+ * `resolveNow` #1290 and the sibling escrow
+ * `retrySettlementWebhookOutbox` #1332): the reading must be a
+ * finite number of milliseconds since the epoch. A bad clock
+ * throws a configuration `Error` here — at the round boundary,
+ * before any pair in that round is delivered — instead of
+ * surfacing mid-round as `recordAttempt`'s "at must be a finite
+ * number", which escapes the per-pair worker, rejects the
+ * runner's `Promise.all`, and kills the whole multi-pair run
+ * with no summary. The resolved value is the `at` stamped on
+ * every attempt the round records, so a clock that goes bad
+ * mid-round cannot corrupt this round's ledger: the failure
+ * surfaces at the next round's boundary, with earlier rounds'
+ * results kept.
+ */
+function resolveRunnerNow(clock: () => number): number {
+  const t = clock();
+  if (typeof t !== "number" || !Number.isFinite(t)) {
+    throw new Error(
+      `retryPayoutWebhookOutbox: now must return a finite number of milliseconds since the epoch, got ${String(t)}`,
+    );
+  }
+  return t;
+}
+
+/**
  * Re-deliver a {@link PayoutWebhookOutbox}'s pending pairs — the
  * opt-in retry loop for the failure ledger, so callers do not have to
  * hand-write the same loop (and hand-write its two easiest mistakes:
@@ -3228,6 +3259,11 @@ export interface PayoutWebhookOutboxRetrySummary {
  *   crashes the run. A `deliverOne` that resolves to a non-boolean
  *   is a caller bug and throws before anything is recorded for
  *   that pair.
+ * - The runner clock is resolved once per round, before any pair
+ *   in that round is delivered: a non-finite reading throws a
+ *   configuration error and the run fails there, with earlier
+ *   rounds' attempts kept in the ledger (backlog #1333). A dry
+ *   run never reads the clock.
  * - Between rounds the runner sleeps the exponential backoff
  *   (`backoffMs * 2^(r-1)`, plus opt-in `jitterMs`); with the
  *   default `maxRounds: 1` there is no sleep at all.
@@ -3375,6 +3411,12 @@ export async function retryPayoutWebhookOutbox(
     }
     const entries = outbox.pending();
     if (entries.length === 0) break;
+    // Resolve the runner clock once for this round, before any
+    // pair is delivered (backlog #1333): a non-finite reading
+    // throws a configuration error here, and the resolved value
+    // stamps every attempt this round records, so a clock that
+    // goes bad mid-round cannot corrupt this round's ledger.
+    const roundNow = resolveRunnerNow(clock);
     // Bounded pool over this round's snapshot (default serial): a
     // worker takes the next entry only when one settles, and the
     // single-worker loop assigns indices without awaiting between
@@ -3400,7 +3442,7 @@ export async function retryPayoutWebhookOutbox(
             eventId: entry.eventId,
             ok: false,
             error: err instanceof Error ? err.message : String(err),
-            at: clock(),
+            at: roundNow,
           });
           continue;
         }
@@ -3418,7 +3460,7 @@ export async function retryPayoutWebhookOutbox(
             endpoint: entry.endpoint,
             eventId: entry.eventId,
             ok: false,
-            at: clock(),
+            at: roundNow,
           });
         }
       }

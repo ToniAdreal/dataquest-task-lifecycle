@@ -124,6 +124,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `retryPayoutWebhookOutbox` fails closed on a non-finite runner
+  clock (2026-11-22, backlog #1333, mirror of the sibling escrow
+  `retrySettlementWebhookOutbox` #1332): the runner used to check
+  `opts.now` only as "is a function" and never inspect what it
+  returned, so both failure paths called `clock()` inside
+  `recordAttempt({ …, at: clock() })` and a `NaN`/`Infinity` clock
+  threw "at must be a finite number" out of the per-pair worker,
+  rejecting the runner's `Promise.all` and killing the whole
+  multi-pair run with no summary while the pair stayed pending and
+  unrecorded — exactly the deliveries that most need the ledger.
+  The clock is now resolved once per round, before any pair in
+  that round is delivered, mirroring `PayoutEventDedupe.resolveNow`
+  (#1290): a non-finite reading throws
+  `retryPayoutWebhookOutbox: now must return a finite number …`
+  as a configuration error, and the resolved value stamps every
+  attempt the round records. A clock that goes bad mid-run fails
+  at the next round's boundary with earlier rounds' attempts kept;
+  a dry run never reads the clock, and an empty pending list
+  returns an empty summary without reading it. New
+  `test/payoutWebhookOutboxRetryClock.test.ts` (10 cases), and the
+  test count rises by ten (1876 to 1886 tests).
+
 - Settlement-webhook entry points reject null/non-object inputs with
   a configuration error (2026-11-22, backlog #1330, the follow-up
   #1273 explicitly deferred): `buildPayoutWebhook`,
