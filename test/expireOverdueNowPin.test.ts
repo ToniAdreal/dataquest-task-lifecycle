@@ -147,29 +147,41 @@ describe("expireOverdueTasks pins the screening now (#1252)", () => {
     assert.equal(twin.state, "OPEN");
   });
 
-  it("an invalid now screens nothing and never throws a bare RangeError", () => {
+  it("an invalid now throws fail-fast before any screening or dispatch (overturns #1248, backlog #1334)", () => {
+    // #1248 pinned the opposite ("screens nothing and never throws").
+    // #1334 overturns it to align with escrow #1259: a broken
+    // watchdog clock must fail loudly, never silently report an empty
+    // batch as "nothing overdue" — and the guard throws a config
+    // error before any toISOString(), so no bare RangeError either.
     const task = openOverdueTask("invalid-now");
     const before = JSON.stringify(task.history);
 
-    assert.deepEqual(expireOverdueTasks([task], new Date(Number.NaN)), []);
-    assert.deepEqual(
-      expireOverdueTasks([task], new Date(Number.NaN), undefined, {
-        dryRun: true,
-      }),
-      [],
+    assert.throws(
+      () => expireOverdueTasks([task], new Date(Number.NaN)),
+      /invalid now: expected a valid Date/,
     );
-    assert.deepEqual(expireOverdueTasks([], new Date(Number.NaN)), []);
+    assert.throws(
+      () =>
+        expireOverdueTasks([task], new Date(Number.NaN), undefined, {
+          dryRun: true,
+        }),
+      /invalid now: expected a valid Date/,
+    );
+    assert.throws(
+      () => expireOverdueTasks([], new Date(Number.NaN)),
+      /invalid now: expected a valid Date/,
+    );
     assert.equal(task.state, "OPEN");
     assert.equal(JSON.stringify(task.history), before);
   });
 
-  it("an invalid now with an explicit at still screens nothing and does not throw", () => {
+  it("an invalid now with an explicit at still throws (overturns #1248, backlog #1334)", () => {
     const task = openOverdueTask("invalid-now-pinned");
-    // The explicit pin short-circuits the now fallback, and the
-    // invalid screening instant matches no deadline either way.
-    assert.deepEqual(
-      expireOverdueTasks([task], new Date(Number.NaN), LATER_AT),
-      [],
+    // The pin no longer short-circuits the screening instant: the
+    // guard fires at screening time, before the pin is materialized.
+    assert.throws(
+      () => expireOverdueTasks([task], new Date(Number.NaN), LATER_AT),
+      /invalid now: expected a valid Date/,
     );
     assert.equal(task.state, "OPEN");
   });

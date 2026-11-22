@@ -241,8 +241,20 @@ export function isTerminal(state: TaskState): boolean {
  * and false for terminal states — a completed/abandoned/expired task is
  * no longer "overdue", even if its deadline passed. Advisory only: it
  * never transitions the task; a watchdog dispatches EXPIRE explicitly.
+ *
+ * An invalid `now` (not a Date, or an invalid Date) throws
+ * `invalid now: expected a valid Date` fail-fast, before any deadline
+ * is read (backlog #1334, overturning #1248's silent-empty decision
+ * to align with escrow #1259): a broken watchdog clock must fail
+ * loudly, never silently report "nothing overdue". This is the single
+ * funnel every other `now` entry in this file reads through —
+ * {@link expiredTasks}, the `overdue` axis of {@link tasksByFilters},
+ * and {@link expireOverdueTasks} all inherit the guard.
  */
 export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new Error("invalid now: expected a valid Date");
+  }
   const deadline = task.getSlaDeadline(task.state);
   if (deadline === undefined) return false;
   if (task.isTerminal) return false;
@@ -259,7 +271,12 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
  *   for (const task of expiredTasks(allTasks)) task.dispatch("EXPIRE", { actor: "system" });
  *
  * Pure: reads the tasks, never mutates or dispatches. The `now` default
- * is the real clock, so unit tests pin it to a fixed date.
+ * is the real clock, so unit tests pin it to a fixed date. An invalid
+ * `now` throws `invalid now: expected a valid Date` fail-fast — even
+ * for an empty batch, so a broken clock can never silently screen an
+ * empty list as "nothing overdue" (backlog #1334; the guard is checked
+ * here, before the filter, because an empty batch would otherwise
+ * never reach {@link isOverdue}).
  *
  * NOTE: this returns every overdue task, including ones `EXPIRE` cannot
  * legally fire on (see {@link expireOverdueTasks}).
@@ -268,6 +285,9 @@ export function expiredTasks(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): TaskLifecycle[] {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new Error("invalid now: expected a valid Date");
+  }
   return tasks.filter((task) => isOverdue(task, now));
 }
 
@@ -770,7 +790,13 @@ export function tasksByFilters(
       `invalid tasksByFilters: overdue must be a boolean, got ${JSON.stringify(filters.overdue)}`,
     );
   }
-  if (filters.overdue !== undefined && !Number.isFinite(now.getTime())) {
+  // Same guard shape as `isOverdue` (backlog #1334): the `instanceof`
+  // check keeps a non-Date `now` on the fail-fast config error instead
+  // of dying as a bare TypeError from `now.getTime()`.
+  if (
+    filters.overdue !== undefined &&
+    (!(now instanceof Date) || Number.isNaN(now.getTime()))
+  ) {
     throw new Error("invalid now: expected a valid Date");
   }
   return tasks.filter((task) => {
@@ -1009,9 +1035,16 @@ function predictExpireOverdueTask(
  * last entry. An invalid `at` (a non-Date/non-string value, an
  * invalid Date, a non-canonical string) throws `invalid at: …`
  * before any task is screened or dispatched, so a bad pin can
- * never half-stamp a batch. An invalid `now` screens nothing (the
- * overdue comparison is false for a NaN instant) and never throws:
- * the pin is only materialized when the batch is non-empty.
+ * never half-stamp a batch. An invalid `now` (not a Date, or an
+ * invalid Date) throws `invalid now: expected a valid Date` before
+ * any task is screened or dispatched (backlog #1334, overturning
+ * #1248's silent-empty decision to align with escrow #1259): a
+ * broken watchdog clock must fail loudly, never silently screen an
+ * empty batch as "nothing overdue" and fail later on a bare
+ * RangeError. The guard lives in {@link isOverdue}, which the
+ * screening funnel ({@link expiredTasks}) reads through; the pin
+ * below is therefore only ever materialized from a proven-valid
+ * instant.
  *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
@@ -1063,14 +1096,14 @@ export function expireOverdueTasks(
   const screened = expiredTasks(tasks, now);
   // Omitted, the pin stays the screening `now` (the #552 semantic,
   // mirrored from escrow's expireOverdueEscrows). Resolved after
-  // screening: an invalid `now` screens nothing, so the pin is only
-  // materialized when the batch is non-empty — and a non-empty batch
-  // proves `now` is a valid instant — so this never throws a bare
-  // RangeError for it. (Escrow resolves the same expression
-  // unconditionally and does throw RangeError on an invalid `now`;
-  // this executor keeps the documented intent instead of the bug.)
-  const atIso =
-    atOpt ?? (screened.length === 0 ? undefined : now.toISOString());
+  // screening: `now` was validated fail-fast at entry — `expiredTasks`
+  // funnels through `isOverdue`'s guard (backlog #1334, overturning
+  // #1248) — so this toISOString() cannot throw a bare RangeError for
+  // an invalid `now`. (Before #1334 the pin was conditional on a
+  // non-empty batch, which kept the RangeError away by screening
+  // nothing instead; the guard, not the conditional pin, is what
+  // closes that hole now — same shape as escrow #1259.)
+  const atIso = atOpt ?? now.toISOString();
   if (opts?.dryRun === true) {
     // Predict against the resolved audit timestamp — the `at` pin
     // when given, else the screening `now` — so the rehearsal and

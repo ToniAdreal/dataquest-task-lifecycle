@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1886 tests, all local
+npm test   # 1899 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -612,7 +612,13 @@ stateDiagram-v2
 A state may carry an optional SLA deadline (`TaskLifecycle.setSlaDeadline`,
 per-state, stored as normalized ISO). `isOverdue(task, now)` answers
 "is the task past its deadline right now" — `false` when no deadline is
-set, `false` in terminal states, and true at/after the deadline.
+set, `false` in terminal states, and true at/after the deadline. An
+invalid `now` (not a Date, or an invalid Date) throws
+`invalid now: expected a valid Date` instead of silently answering
+`false`: a broken watchdog clock must fail loudly, never report
+"nothing overdue" (backlog #1334; the same guard covers
+`expiredTasks`, the `overdue` axis of `tasksByFilters`, and
+`expireOverdueTasks`).
 
 Relationship to `EXPIRE`: the deadline is **advisory only** and never moves
 the task by itself — there is no timer, no background scheduler. Expiry
@@ -715,8 +721,11 @@ last entry. An invalid `at`
 (a non-Date/non-string value, an invalid Date, a non-canonical
 string) throws `invalid at: …` before any task is screened or
 dispatched, so a bad pin can never half-stamp a batch. An invalid
-`now` screens nothing and never throws: the pin is only materialized
-when the batch is non-empty.
+`now` (not a Date, or an invalid Date) throws
+`invalid now: expected a valid Date` before any task is screened or
+dispatched (backlog #1334, overturning #1248's silent-empty decision
+to align with escrow #1259): a broken watchdog clock fails loudly
+instead of silently screening an empty batch as "nothing overdue".
 
 For rehearsing a batch before expiring it for real, pass
 `{ dryRun: true }` as a fourth argument:
@@ -2796,7 +2805,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1886 tests covering the happy path, reject→resubmit
+`npm test` runs 1899 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

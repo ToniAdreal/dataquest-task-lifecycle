@@ -124,6 +124,43 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `isOverdue` / `expiredTasks` fail fast on an invalid `now`
+  (2026-11-22, backlog #1334, overturning #1248's silent-empty
+  decision to align with escrow #1259): `isOverdue` used to read
+  `now` with no validation, so an invalid Date silently answered
+  `false` ("nothing overdue") and a non-Date died as a bare
+  `TypeError` from `now.getTime()` — while every other `now` entry
+  in the file (`tasksApproachingDeadline`, `staleTasks`,
+  `nextSlaDeadline`, `nextTaskDeadline`, `payoutAging`, the
+  `overdue` axis of `tasksByFilters`) already threw
+  `invalid now: expected a valid Date`. The guard
+  (`!(now instanceof Date) || Number.isNaN(now.getTime())`, escrow
+  #1259's exact shape) now sits at the top of `isOverdue` — the
+  single funnel `expiredTasks`, the `tasksByFilters` overdue axis
+  and `expireOverdueTasks` all read through — and is checked again
+  at the top of `expiredTasks` itself, because an empty batch would
+  otherwise never reach `isOverdue` through the filter. The
+  `tasksByFilters` overdue pre-check takes the same guard shape, so
+  a string `now` now throws the config error instead of a bare
+  `TypeError`. `expireOverdueTasks` inherits the fail-fast through
+  screening (live and dry run throw before any task is touched,
+  even with an explicit `at` pin or an empty batch) and its pin
+  resolution is now the unconditional `atOpt ?? now.toISOString()`
+  — the pre-#1334 conditional pin existed only to keep a bare
+  `RangeError` away by screening nothing, and the guard closes
+  that hole instead. The #1248 decision is overturned deliberately:
+  a watchdog that silently reports "nothing overdue" on a broken
+  clock is a false-negative safety failure, and #1248's stated goal
+  (never a bare RangeError) is preserved — the guard throws before
+  any `toISOString()` runs. One correction to the item's acceptance:
+  an explicit `undefined` `now` cannot throw, because the
+  parameters carry a `new Date()` default — it falls back to the
+  real clock, and the tests pin that behaviour instead. New
+  `test/isOverdueInvalidNow.test.ts` (13 cases), the two invalid-now
+  cases in `test/expireOverdueNowPin.test.ts` rewritten to the new
+  contract, and the test count rises by thirteen (1886 to 1899
+  tests).
+
 - `retryPayoutWebhookOutbox` fails closed on a non-finite runner
   clock (2026-11-22, backlog #1333, mirror of the sibling escrow
   `retrySettlementWebhookOutbox` #1332): the runner used to check
@@ -412,11 +449,15 @@ change type; no entry describes a feature that is not in the history.
   check too — a task whose last entry sits after the screening
   `now` now fails per task instead of expiring with a
   wall-clock stamp earlier than its own history. An invalid `now`
-  still screens nothing and never throws: the pin is only
-  materialized when the batch is non-empty (escrow resolves the
-  same expression unconditionally and does throw a bare
-  RangeError on an invalid `now`; this executor keeps the
-  documented intent instead of the bug). The watchdog tests'
+  then screened nothing and never threw: the pin was only
+  materialized when the batch was non-empty (escrow resolved the
+  same expression unconditionally and did throw a bare RangeError
+  on an invalid `now`; this executor kept the documented intent
+  instead of the bug). That silent-empty reading is superseded by
+  #1334 (2026-11-22): an invalid `now` now throws
+  `invalid now: expected a valid Date` fail-fast, aligning with
+  escrow #1259 — the #1248 decision is overturned, see the #1334
+  entry in [Unreleased]/Fixed. The watchdog tests'
   fixtures now pin their dispatch timestamps before the fixed
   screening instant, and the test count rises by eight (1664 to
   1672 tests).
