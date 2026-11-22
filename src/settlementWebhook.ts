@@ -211,7 +211,22 @@ function assertNoUnknownPayoutWebhookOptions(
   }
 }
 
-function assertSecret(secret: string | Buffer): void {
+/**
+ * Signing-secret shape guard (#1327, mirroring escrow #1272): the
+ * secret must be a non-empty string or Buffer. A number, `null`, or
+ * any other shape is a caller bug and must be reported as itself —
+ * without this guard a numeric secret slides past the length check
+ * and dies inside `createHmac` as a bare `TypeError`, and `null`
+ * dies reading `.length`. The guard runs before any signing work in
+ * both the single build and the batch build, and the fan-out inherits
+ * it per endpoint through the single build.
+ */
+function assertSecret(secret: unknown): void {
+  if (typeof secret !== "string" && !Buffer.isBuffer(secret)) {
+    throw new Error(
+      "cannot build payout webhook: signing secret must be a string or Buffer",
+    );
+  }
   if (secret.length === 0) {
     throw new Error(
       "cannot build payout webhook: signing secret must not be empty",
@@ -268,7 +283,8 @@ function quotedAmountFromHistory(task: TaskLifecycle): number | undefined {
 /**
  * Build the signed payout webhook for a PAID task.
  *
- * Throws when the task is not PAID, the secret is empty, `now` is not a
+ * Throws when the task is not PAID, the secret is not a string or
+ * Buffer or is empty (#1327), `now` is not a
  * valid timestamp, an injected `eventId` is not a non-empty string (or
  * is longer than {@link MAX_EVENT_ID_LENGTH} characters), or — with
  * `options.requirePayoutRef` set — the task's PAYOUT_COMPLETE
@@ -415,9 +431,9 @@ export type BuildPayoutWebhooksResult =
  *
  * Call-level configuration errors DO throw before any task is
  * attempted — those are caller bugs, not per-task outcomes: a
- * non-array `tasks`, an empty secret (validated with the single
- * build's rules, never swallowed per task), an invalid shared `now`,
- * or a non-function `eventIdFactory`.
+ * non-array `tasks`, a non-string/Buffer or empty secret (validated
+ * with the single build's rules, never swallowed per task), an
+ * invalid shared `now`, or a non-function `eventIdFactory`.
  *
  * One exception to per-item isolation: a repeated `taskId` aborts
  * the whole batch. Two entries for the same task would produce two

@@ -124,6 +124,23 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `buildPayoutWebhook` rejects a non-string/Buffer signing secret
+  with a configuration error (2026-11-22, backlog #1327, mirror of
+  escrow #1272): `assertSecret` used to check only
+  `secret.length === 0`, so a numeric secret slid past the length
+  check and died inside `createHmac` as a bare `TypeError`, and
+  `null`/`undefined` died reading `.length`. A wrong-type secret now
+  throws `cannot build payout webhook: signing secret must be a
+  string or Buffer` before any signing work; an empty string or
+  Buffer still reports `must not be empty`. The batch build shares
+  the guard (a wrong-type secret throws for the whole batch, zero
+  webhooks) and the fan-out inherits it per endpoint through the
+  single build (a bad endpoint secret fails only that endpoint,
+  with the new message and zero fetch calls, while the other
+  endpoints still deliver). New
+  `test/buildPayoutWebhookSecretShape.test.ts` (13 cases) pins the
+  shape; the test count rises by thirteen (1839 to 1852 tests).
+
 - `summarizeTaskSettlements` rejects a duplicated task id
   (2026-11-22, backlog #1324, mirror of the sibling escrow #1268
   fix): the same task passed twice — the same object, or two objects

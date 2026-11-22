@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1839 tests, all local
+npm test   # 1852 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1597,7 +1597,15 @@ points fail closed on unknown option keys: a typo'd option (say
 `requirePayoutAmout` on the build side or `maxAge` on the verify
 side) throws a configuration error naming the key before any signing
 or verification work, instead of silently falling back to the
-default.
+default. The signing secret itself is validated the same way: a
+secret that is not a string or Buffer (a number, `null`, an object,
+…) throws `cannot build payout webhook: signing secret must be a
+string or Buffer` before any signing work, instead of dying inside
+`createHmac` as a bare `TypeError`; an empty string or Buffer still
+reports `must not be empty`. The batch build shares the guard (a
+wrong-type secret throws for the whole batch), and the fan-out
+inherits it per endpoint (a bad endpoint secret fails only that
+endpoint, with zero fetch calls).
 
 Field-set audit (checked field by field against the audit history
 and escrow's `SettlementWebhookPayload`): every identifier and
@@ -2780,7 +2788,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1839 tests covering the happy path, reject→resubmit
+`npm test` runs 1852 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
