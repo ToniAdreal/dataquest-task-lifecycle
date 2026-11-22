@@ -124,6 +124,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `parsePayoutRetryAfter` fails closed on a non-finite `nowMs`
+  (2026-11-22, backlog #1320, mirror of the sibling escrow #1319 fix):
+  an HTTP-date branch `Math.max(0, when - NaN)` used to return NaN,
+  which `retryDelayMs` passed through to `setTimeout(NaN)` — silently
+  collapsing a server-prescribed 429 backoff into an immediate retry.
+  A non-finite clock (NaN, Infinity, or a non-number) now throws a
+  plain configuration `Error` naming `parsePayoutRetryAfter` and
+  `nowMs`, before any parsing, so the delay-seconds path and an absent
+  value fail closed too. New `test/parsePayoutRetryAfterClock.test.ts`
+  (8 cases) pins the four hostile clocks, the delay-seconds and
+  absent-value paths, and the finite-clock / default-clock regressions.
+  Mutation check: removing the guard turns 6 of the 8 new tests red,
+  reverted. The test count rises by eight (1823 to 1831 tests).
+
 - `verifyPayoutWebhook` fails closed on a non-serializable object body
   (2026-11-22, backlog #1318, mirror of the sibling escrow #1317 fix):
   an object body holding a `BigInt` value, a circular reference, or a

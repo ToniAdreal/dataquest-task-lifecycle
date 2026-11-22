@@ -3471,11 +3471,22 @@ export interface DeliverWebhookResult {
  * Returns `undefined` when the value is absent or unparsable, in which
  * case the caller falls back to exponential backoff. A past HTTP-date
  * yields 0 (retry immediately) rather than a negative sleep.
+ * `nowMs` must be a finite epoch-millisecond number: a non-finite clock
+ * (NaN, Infinity, or a non-number) throws instead of letting the HTTP-date
+ * branch return NaN, which `retryDelayMs` would pass through to
+ * `setTimeout(NaN)` — silently collapsing a server-prescribed 429 backoff
+ * into an immediate retry. The check runs before any parsing, so the
+ * delay-seconds path and an absent value fail closed on a broken clock too.
  */
 export function parsePayoutRetryAfter(
   value: string | null | undefined,
   nowMs: number = Date.now(),
 ): number | undefined {
+  if (typeof nowMs !== "number" || !Number.isFinite(nowMs)) {
+    throw new Error(
+      `parsePayoutRetryAfter: nowMs must be a finite epoch-millisecond number, got ${String(nowMs)}`,
+    );
+  }
   if (value === null || value === undefined) return undefined;
   const trimmed = value.trim();
   if (/^\d+(\.\d+)?$/.test(trimmed)) {
