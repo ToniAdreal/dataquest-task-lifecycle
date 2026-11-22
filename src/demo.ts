@@ -335,6 +335,20 @@
  * its last history entry — the fail-fast settlement gate
  * a reader has only seen asserted by the
  * requirePayoutAmount tests so far —
+ * and an actor attribution enforcement segment:
+ * a dedicated task under the default (the option unset)
+ * dispatches PUBLISH without an actor into OPEN — the
+ * advisory default stays backward compatible — while a
+ * second dedicated task constructed with
+ * `requireActor: true` rejects an actor-less PUBLISH
+ * with the pinned `actor required: …` error, leaving
+ * its state and history untouched; the same dispatch
+ * with actor "researcher" then succeeds, and a snapshot
+ * round-trip keeps the gate — the restored task rejects
+ * an actor-less ACCEPT the same way before accepting
+ * one with an actor — the fail-fast audit-attribution
+ * gate a reader has only seen asserted by the
+ * requireActor tests so far —
  * and finally a dispatch idempotency key segment:
  * a dedicated task dispatches under fixed timestamps
  * with pinned `idempotencyKey`s — the same key sent
@@ -1435,6 +1449,24 @@ export interface DemoResult {
   requirePayoutAmountRestoredTask: TaskLifecycle;
   /** Error from the restored task's amount-less PAYOUT_COMPLETE. */
   requirePayoutAmountRestoredError: string;
+  /** Default task of the actor attribution enforcement segment (DEMO-106). */
+  requireActorDefaultTask: TaskLifecycle;
+  /** Enforced task of the actor attribution enforcement segment (DEMO-107). */
+  requireActorTask: TaskLifecycle;
+  /** Error from DEMO-107's actor-less PUBLISH ("" if accepted). */
+  requireActorError: string;
+  /** DEMO-107's state right after the rejection (DRAFT). */
+  requireActorStateAfterReject: TaskState;
+  /** DEMO-107's history length right after the rejection (0). */
+  requireActorHistoryLengthAfterReject: number;
+  /** DEMO-107 restored from its snapshot (rejects actor-less ACCEPT, then accepts one with an actor). */
+  requireActorRestoredTask: TaskLifecycle;
+  /** Error from the restored task's actor-less ACCEPT. */
+  requireActorRestoredError: string;
+  /** Restored task's state right after the rejection (OPEN). */
+  requireActorRestoredStateAfterReject: TaskState;
+  /** Restored task's history length right after the rejection (1). */
+  requireActorRestoredHistoryLengthAfterReject: number;
   /** Main task of the closing dispatch idempotency segment (DEMO-026). */
   idempotencyTask: TaskLifecycle;
   /** Pinned key DEMO-026's PUBLISH consumes ("demo-idem-publish"). */
@@ -7746,6 +7778,144 @@ export async function runDemo(): Promise<DemoResult> {
     `  restored task with the amount: PAYOUT_COMPLETE with payoutAmount ${requirePayoutAmountPayoutAmount} at 2026-04-06T09:40:00.000Z -> ${requirePayoutAmountRestoredTask.state}; history last entry: seq ${requirePayoutAmountRestoredLastEntry.seq} PAYOUT_COMPLETE payoutAmount=${requirePayoutAmountRestoredLastEntry.payoutAmount} (the audit trail now records how much the settlement claims)`,
   );
 
+  // Actor attribution enforcement segment (closing): the
+  // amount segment above proves *how much* a settlement
+  // claims; this one proves *who* made each change. The
+  // opt-in constructor switch `requireActor: true`
+  // (taskLifecycle, unit-tested since the requireActor
+  // tests landed) makes every `dispatch()` without an
+  // `actor` throw `actor required: …` and append nothing,
+  // so no state change can enter the audit trail without
+  // a named actor — the counterpart to the advisory
+  // default, under which an anonymous dispatch is legal
+  // and the entry simply omits the actor. The gate
+  // complements `rolePolicy`: a policy only constrains
+  // the events it lists, while `requireActor` constrains
+  // all of them. Like the payout gates it is task
+  // configuration persisted in the snapshot (#1257), so
+  // a rehydrated task enforces the same rule. Two
+  // dedicated tasks are driven under fixed literal
+  // timestamps — no network, no randomness, no wall
+  // clock:
+  //   - DEMO-106 is constructed with the option unset
+  //     (the advisory default); its actor-less PUBLISH
+  //     at 2026-04-08T09:00:00.000Z succeeds into OPEN
+  //     and its single history entry carries no actor —
+  //     enforcement is opt-in and the default stays
+  //     backward compatible;
+  //   - DEMO-107 is constructed with
+  //     `requireActor: true`; its actor-less PUBLISH at
+  //     2026-04-09T09:00:00.000Z is rejected with the
+  //     pinned error and its state stays DRAFT with 0
+  //     history entries; the same PUBLISH at 09:01 with
+  //     actor "researcher" then succeeds into OPEN, and
+  //     the history's single entry (seq 1) carries that
+  //     actor verbatim. The enforced task is snapshotted
+  //     at that point and restored with
+  //     `TaskLifecycle.fromJSON()` — the restored task's
+  //     actor-less ACCEPT at 09:05 is rejected with the
+  //     same pinned error, so the gate survived the
+  //     round-trip — and the same ACCEPT at 09:10 with
+  //     actor "contributor" then succeeds into ACCEPTED,
+  //     its history's last entry (seq 2) carrying that
+  //     actor verbatim.
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs and the requireActor tests,
+  // never derived from the gate itself. The segment
+  // asserts all of this here, outside the printed lines:
+  // an enforcement verdict that drifted would fail the
+  // demo itself, not just a test.
+  const requireActorDefaultTask = new TaskLifecycle("DEMO-106");
+  requireActorDefaultTask.dispatch("PUBLISH", {
+    at: "2026-04-08T09:00:00.000Z",
+  });
+  const requireActorTask = new TaskLifecycle("DEMO-107", {
+    requireActor: true,
+  });
+  let requireActorError = "";
+  try {
+    requireActorTask.dispatch("PUBLISH", {
+      at: "2026-04-09T09:00:00.000Z",
+    });
+  } catch (err) {
+    requireActorError = err instanceof Error ? err.message : String(err);
+  }
+  const requireActorStateAfterReject = requireActorTask.state;
+  const requireActorHistoryLengthAfterReject =
+    requireActorTask.history.length;
+  requireActorTask.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-09T09:01:00.000Z",
+  });
+  const requireActorSnapshot = requireActorTask.toJSON();
+  const requireActorRestoredTask = TaskLifecycle.fromJSON(
+    JSON.parse(JSON.stringify(requireActorSnapshot)) as unknown,
+  );
+  let requireActorRestoredError = "";
+  try {
+    requireActorRestoredTask.dispatch("ACCEPT", {
+      at: "2026-04-09T09:05:00.000Z",
+    });
+  } catch (err) {
+    requireActorRestoredError =
+      err instanceof Error ? err.message : String(err);
+  }
+  const requireActorRestoredStateAfterReject = requireActorRestoredTask.state;
+  const requireActorRestoredHistoryLengthAfterReject =
+    requireActorRestoredTask.history.length;
+  requireActorRestoredTask.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-09T09:10:00.000Z",
+  });
+  const requireActorDefaultLastEntry =
+    requireActorDefaultTask.history[requireActorDefaultTask.history.length - 1];
+  const requireActorLastEntry =
+    requireActorTask.history[requireActorTask.history.length - 1];
+  const requireActorRestoredLastEntry =
+    requireActorRestoredTask.history[
+      requireActorRestoredTask.history.length - 1
+    ];
+  if (
+    requireActorDefaultTask.state !== "OPEN" ||
+    requireActorDefaultTask.history.length !== 1 ||
+    requireActorDefaultLastEntry.event !== "PUBLISH" ||
+    requireActorDefaultLastEntry.actor !== undefined ||
+    requireActorDefaultLastEntry.at !== "2026-04-08T09:00:00.000Z" ||
+    requireActorError !==
+      "actor required: dispatch must carry a non-empty actor when requireActor is enabled" ||
+    requireActorStateAfterReject !== "DRAFT" ||
+    requireActorHistoryLengthAfterReject !== 0 ||
+    requireActorTask.state !== "OPEN" ||
+    requireActorTask.history.length !== 1 ||
+    requireActorLastEntry.event !== "PUBLISH" ||
+    requireActorLastEntry.seq !== 1 ||
+    requireActorLastEntry.actor !== "researcher" ||
+    requireActorLastEntry.at !== "2026-04-09T09:01:00.000Z" ||
+    requireActorSnapshot.requireActor !== true ||
+    requireActorRestoredTask.id !== "DEMO-107" ||
+    requireActorRestoredError !== requireActorError ||
+    requireActorRestoredStateAfterReject !== "OPEN" ||
+    requireActorRestoredHistoryLengthAfterReject !== 1 ||
+    requireActorRestoredTask.state !== "ACCEPTED" ||
+    requireActorRestoredTask.history.length !== 2 ||
+    requireActorRestoredLastEntry.event !== "ACCEPT" ||
+    requireActorRestoredLastEntry.seq !== 2 ||
+    requireActorRestoredLastEntry.actor !== "contributor" ||
+    requireActorRestoredLastEntry.at !== "2026-04-09T09:10:00.000Z"
+  ) {
+    throw new Error(
+      "demo fixture broken: requireActor enforcement does not match the hand-pinned contract (the default task must still publish without an actor, the enforced task must reject an actor-less PUBLISH with the pinned error and leave state and history untouched, the same dispatch with an actor must succeed and record it, the snapshot must carry the gate and the restored task must reject an actor-less ACCEPT the same way, and the restored task must then accept with the pinned actor carried verbatim on its last history entry)",
+    );
+  }
+  lines.push(
+    "",
+    "Actor attribution enforcement (requireActor: true rejects a dispatch that carries no actor):",
+    `  default task DEMO-106 (requireActor unset — the advisory default): PUBLISH without an actor -> ${requireActorDefaultTask.state}; history last entry carries no actor (backward compatible: enforcement is opt-in, so an unenforced task still attributes nothing and dispatches on the advisory path)`,
+    `  enforced task DEMO-107 (constructed with requireActor: true): PUBLISH without an actor -> rejected: "${requireActorError}"; state after rejection: ${requireActorStateAfterReject}, history entries: ${requireActorHistoryLengthAfterReject} (nothing was appended — the gate is fail-fast, checked before the audit entry is written)`,
+    `  enforced task with an actor: PUBLISH with actor "researcher" at 2026-04-09T09:01:00.000Z -> ${requireActorTask.state}; history last entry: seq ${requireActorLastEntry.seq} PUBLISH actor=${requireActorLastEntry.actor} (the audit trail now names who made the change)`,
+    `  snapshot round-trip keeps the gate: toJSON() writes requireActor: true, and the restored task's ACCEPT without an actor -> rejected: "${requireActorRestoredError}" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule); ACCEPT with actor "contributor" at 2026-04-09T09:10:00.000Z -> ${requireActorRestoredTask.state}; history last entry: seq ${requireActorRestoredLastEntry.seq} ACCEPT actor=${requireActorRestoredLastEntry.actor}`,
+  );
+
   // Dispatch idempotency key segment (closing): the payout
   // flows above are exactly the flows whose callers retry —
   // a webhook redelivery, a client timeout, a queue replay.
@@ -11188,7 +11358,7 @@ export async function runDemo(): Promise<DemoResult> {
     `  ${DEMO_LIMIT_IDEMPOTENCY_TASK_ID}: idempotencyKey of exactly 256 characters accepted — PUBLISH lands, and the same-key retry is a no-op (state OPEN, history 1)`,
   );
 
-  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, dedupeProbeHasUnseen, dedupeProbeFirst, dedupeProbeStatsAfterRecord, dedupeProbeHasSeen, dedupeProbeStatsAfterHas, dedupeProbeHasAgain, dedupeProbeHasExpired, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeSignedSnapshotSource, dedupeSignedSnapshotFirst, dedupeSignedSnapshotDuplicate, dedupeSignedSnapshot, dedupeSignedSnapshotTamperedError, dedupeSignedSnapshotRestored, dedupeSignedSnapshotStatsAfterRestore, dedupeSignedSnapshotHasSeen, dedupeSignedSnapshotHasUnseen, dedupeSignedSnapshotStatsAfterHas, dedupeSignedSnapshotRestoredSeen, dedupeSignedSnapshotRestoredUnseen, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requireEventIdWebhook, requireEventIdKeyedWithGate, requireEventIdKeyedWithoutGate, requireEventIdKeylessWithGate, requireEventIdKeylessWithoutGate, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, requirePayoutAmountDefaultTask, requirePayoutAmountTask, requirePayoutAmountError, requirePayoutAmountStateAfterReject, requirePayoutAmountHistoryLengthAfterReject, requirePayoutAmountPayoutAmount, requirePayoutAmountRestoredTask, requirePayoutAmountRestoredError, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, settlementCompleteVerdicts, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, settlementSummaryCsv, settlementSummaryJson, settlementSummaryCsvRoundTrip, settlementSummaryCsvReRendered, settlementSummaryJsonRoundTrip, settlementSummaryJsonReRendered, settlementSummaryRejectedCsvError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, nextTaskNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, remainingBudgetTask, remainingBudgetInitial, remainingBudgetInRejected, remainingBudgetAfterResubmit, remainingBudgetResubmitError, remainingBudgetStateAfterResubmitReject, remainingBudgetHistoryLengthAfterResubmitReject, remainingBudgetAfterDispute, remainingBudgetDisputeError, remainingBudgetStateAfterDisputeReject, remainingBudgetHistoryLengthAfterDisputeReject, remainingBudgetDefaultTask, remainingBudgetDefaultReadings, budgetUsedTask, budgetUsedInitial, budgetUsedInRejected, budgetUsedAfterResubmit, budgetUsedAfterResubmitRemaining, budgetUsedAfterDispute, budgetUsedDefaultTask, budgetUsedDefaultInitial, budgetUsedDefaultReadings, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, outboxRetryOutbox, outboxRetrySummary, outboxRetryDeliverCalls, outboxRetryPendingAfterLive, outboxRetryDeadAfterLive, outboxRetryDryRunSummary, outboxRetryDryRunPendingAfter, outboxErrorTruncation, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
+  return { task, historyChainVerified, tamperedChainVerified, tamperedPayoutAmount, overdueTask, overdueFound, disputeTask, webhook, webhookVerified, dedupeFirst, dedupeRedelivery, dedupeAfterTtl, dedupeProbeHasUnseen, dedupeProbeFirst, dedupeProbeStatsAfterRecord, dedupeProbeHasSeen, dedupeProbeStatsAfterHas, dedupeProbeHasAgain, dedupeProbeHasExpired, batchResults, batchVerified, fanoutResult, fanoutCalls, singleDeliveryEndpoint, singleDeliveryResult, singleDeliveryCalls, singleDeliveryBodyVerifies, onErrorTask, onErrorReports, onErrorProbeTask, dedupeSnapshotSource, dedupeSnapshotFirst, dedupeSnapshotDuplicate, dedupeSnapshot, dedupeSnapshotRestored, dedupeSnapshotStatsAfterRestore, dedupeSnapshotRestoredSeen, dedupeSnapshotRestoredUnseen, dedupeSnapshotTamperedError, dedupeSignedSnapshotSource, dedupeSignedSnapshotFirst, dedupeSignedSnapshotDuplicate, dedupeSignedSnapshot, dedupeSignedSnapshotTamperedError, dedupeSignedSnapshotRestored, dedupeSignedSnapshotStatsAfterRestore, dedupeSignedSnapshotHasSeen, dedupeSignedSnapshotHasUnseen, dedupeSignedSnapshotStatsAfterHas, dedupeSignedSnapshotRestoredSeen, dedupeSignedSnapshotRestoredUnseen, dedupeStatsDedupe, dedupeStatsOutcomes, dedupeStatsSnapshots, dedupeStatsAfterMutation, dedupeClearDedupe, dedupeClearEventId, dedupeClearOutcomes, dedupeClearStatsBefore, dedupeClearStatsAfterClear, dedupeClearStatsAfterReRecord, retryAfterDeliveryEndpoint, retryAfterDeliveryResult, retryAfterDeliveryCalls, retryAfterDeliverySleeps, retryAfterDeliveryBodyVerifies, rotationNewWebhook, rotationOldWebhook, rotationNewUnderRotation, rotationOldUnderRotation, rotationNewUnderOldOnly, rotationUnderUnrelatedList, rotationBothError, abortDeliveryEndpoint, abortPreResult, abortPreFetchCalls, abortWaitResult, abortWaitFetchCalls, abortWaitSleeps, freshnessWebhook, freshnessMaxAgeMs, freshnessMaxFutureSkewMs, freshnessWithinWindow, freshnessAtBoundary, freshnessBeyondWindow, freshnessBeyondWindowSignatureOnly, freshnessFutureBeyondSkew, requireEventIdWebhook, requireEventIdKeyedWithGate, requireEventIdKeyedWithoutGate, requireEventIdKeylessWithGate, requireEventIdKeylessWithoutGate, requirePayoutRefTask, requirePayoutRefError, requirePayoutRefStateAfterReject, requirePayoutRefHistoryLengthAfterReject, requirePayoutRefPayoutRef, requirePayoutRefDefaultTask, requirePayoutAmountDefaultTask, requirePayoutAmountTask, requirePayoutAmountError, requirePayoutAmountStateAfterReject, requirePayoutAmountHistoryLengthAfterReject, requirePayoutAmountPayoutAmount, requirePayoutAmountRestoredTask, requirePayoutAmountRestoredError, requireActorDefaultTask, requireActorTask, requireActorError, requireActorStateAfterReject, requireActorHistoryLengthAfterReject, requireActorRestoredTask, requireActorRestoredError, requireActorRestoredStateAfterReject, requireActorRestoredHistoryLengthAfterReject, idempotencyTask, idempotencyPublishKey, idempotencyDuplicateReturn, idempotencyHistoryLengthAfterDuplicate, idempotencyNotificationEvents, idempotencyCrossEventReturn, idempotencyStaleReturn, idempotencyHistoryLengthAfterRetries, idempotencyRetryTask, idempotencyFailedError, idempotencyRetryKey, auditSecretTask, auditSecretVerified, auditSecretWrongVerified, auditSecretTamperedVerified, auditSecretUnkeyedVerified, rolePolicyTask, rolePolicy: DEMO_ROLE_POLICY, rolePolicyPublishUnauthorizedError, rolePolicyPublishMissingActorError, rolePolicyStateAfterPublishRejects, rolePolicyHistoryLengthAfterPublishRejects, rolePolicyArbitrateUnauthorizedError, rolePolicyArbitrateMissingActorError, rolePolicyStateAfterArbitrateRejects, rolePolicyHistoryLengthAfterArbitrateRejects, rolePolicyDefaultTask, seededIdempotencyTask, seededIdempotencyKeys: DEMO_SEEDED_IDEMPOTENCY_KEYS, seededIdempotencySnapshotKeysAfterSeed, seededIdempotencyNoopReturn, seededIdempotencyStateAfterNoop, seededIdempotencyHistoryLengthAfterNoop, seededIdempotencyNotificationCountAfterNoop, seededIdempotencyNotificationEvents, seededIdempotencySnapshotKeysAfterFreshKeys, seededIdempotencyEmptySeedError, seededIdempotencyDefaultTask, seededIdempotencyDefaultSnapshotKeys, timeoutDeliveryEndpoint, timeoutDeliveryTimeoutMs, timeoutDeliveryResult, timeoutDeliveryFetchCalls, timeoutDeliveryInvalidError, timeoutDeliveryInvalidFetchCalls, timeoutDeliveryLooseResult, timeoutDeliveryLooseFetchCalls, fanoutTimeoutCallTimeoutMs, fanoutTimeoutOverrideMs, fanoutTimeoutResult, fanoutTimeoutHangFetchCalls, fanoutTimeoutFastFetchCalls, fanoutTimeoutInvalidResult, fanoutTimeoutInvalidFetchCalls, fanoutTimeoutPlainResult, fanoutLimitsMaxEndpoints, fanoutLimitsOverallDeadlineMs, fanoutLimitsOverCapError, fanoutLimitsOverCapFetchCalls, fanoutLimitsDeadlineResult, fanoutLimitsDeadlineFetchCalls, expectedSeqTask, expectedSeqGuardedReturn, expectedSeqConflictTask, expectedSeqConflictError, expectedSeqConflictStateAfter, expectedSeqConflictHistoryLengthAfter, expectedSeqEmptyTask, expectedSeqEmptyReturn, expectedSeqIllegalTask, expectedSeqNegativeError, expectedSeqFractionError, expectedSeqUnguardedTask, expectedSeqUnguardedReturn, settlementGuardTask, settlementGuardConflictError, settlementGuardStateAfterConflict, settlementGuardHistoryLengthAfterConflict, settlementGuardWebhookRefusalError, settlementGuardPaidReturn, settlementGuardKey, settlementGuardWebhook, settlementGuardWebhookVerified, settlementGuardRepeatReturn, settlementGuardHistoryLengthAfterRepeat, patrolTasks, patrolStaleSelected, patrolStaleActionResults, patrolStaleNotifiedIds, patrolStaleConfigError, constructorGuardChecks, constructorGuardTask, historyImmutabilityChecks, retryAfterParsed, unreconciledTask, mismatchedTask, refNoAmountTask, quotedRejectedTask, unreconciledFound, mismatchedFound, settlementCompleteVerdicts, totalPaid, totalQuoted: totalQuotedValue, formatMinorUnitsCases, formatMinorUnitsTotal, minorUnitsConversion: { major: totalPaid, minor: minorUnitsMinor, roundTrip: minorUnitsRoundTrip }, minorUnitsFractionalError, parseMinorUnitsCases, parseMinorUnitsTotal, parseMinorUnitsQuotedTotal, parseMinorUnitsRejected, settlementSummaryBefore, settlementSummaryAfter, settlementSummaryDiff, settlementSummaryCorrectedTask, settlementSummaryRenderedBefore, settlementSummaryRenderedAfter, settlementSummaryCsv, settlementSummaryJson, settlementSummaryCsvRoundTrip, settlementSummaryCsvReRendered, settlementSummaryJsonRoundTrip, settlementSummaryJsonReRendered, settlementSummaryRejectedCsvError, subscriptionTask, subscriptionNotifications, subscriptionMatchesHistory, subscriptionCountAfterUnsubscribe, listenerCountTask, listenerCountTimeline, listenerCountKept, listenerCountDropped, staleDwellTasks, staleFound, staleExpiredFound, approachingTasks, approachingFound, approachingOverdueFound, nextSlaTasks, nextSlaNext, nextSlaTieTasks, nextSlaTieNext, nextTaskNext, actorFilterTasks, actorFilterModerator, actorFilterContributor, actorFilterOpenState, eventFilterTasks, eventFilterDisputed, eventFilterResubmitted, eventFilterExpired, combinedFilterTasks, combinedFilterReviewedRejected, combinedFilterReviewed, payoutRefTasks, payoutRefFound, payoutRefOtherFound, visitBudgetTask, visitBudgetCap: VISIT_BUDGET_CAP, visitBudgetError, visitBudgetStateAfterReject, visitBudgetHistoryLengthAfterReject, visitBudgetDefaultTask, visitBudgetDefaultResubmitRounds, remainingBudgetTask, remainingBudgetInitial, remainingBudgetInRejected, remainingBudgetAfterResubmit, remainingBudgetResubmitError, remainingBudgetStateAfterResubmitReject, remainingBudgetHistoryLengthAfterResubmitReject, remainingBudgetAfterDispute, remainingBudgetDisputeError, remainingBudgetStateAfterDisputeReject, remainingBudgetHistoryLengthAfterDisputeReject, remainingBudgetDefaultTask, remainingBudgetDefaultReadings, budgetUsedTask, budgetUsedInitial, budgetUsedInRejected, budgetUsedAfterResubmit, budgetUsedAfterResubmitRemaining, budgetUsedAfterDispute, budgetUsedDefaultTask, budgetUsedDefaultInitial, budgetUsedDefaultReadings, staleActionTasks, staleActionResults, expireExecutionTasks, expireExecutionFound, expireExecutionResults, expireExecutionEntryRefs, ndjsonText, replayedTask, replayDerivedState, stateAtTask, stateAtBeforeFirst, stateAtAtPublish, stateAtBetweenAcceptAndCapture, stateAtAtCapture, stateAtAfterCapture, stateAtFromHistoryAtCapture, stateAtInvalidError, allowedEventsByState, mainTaskAllowedEvents, parsedHistoryEntries, parsedHistoryMatchesMainPrefix, parsedHistoryInvalidRejected, parsedHistoryInvalidError, transitionTableJsonText, transitionTableEdges, stateDiagramText, stateDiagramEdgeCount, readmeDiagramInSync: readmeDiagramInSyncValue, snapshotJsonText, snapshotBytes, restoredTask, snapshotResubmitUsed, payoutMismatchDetail, payoutMismatchSettled, snapshotVersion, snapshotVersionFutureError, snapshotVersionRestoredState, noteLimitTask, noteLengthLimit, noteLimitBoundaryLength, noteLimitOverLength, noteLimitError, noteLimitStateAfter, noteLimitHistoryLengthAfter, overdueStandaloneTask, overdueStandaloneNoDeadlineTask, overdueStandaloneTerminalTask, overdueStandaloneDeadline, overdueStandaloneVerdicts, terminalByState, terminalStates, noOutEdgeStates, slaClearTask, slaClearDeadline, slaClearOtherDeadlines, slaClearOverdueBefore, slaClearOverdueAfterStateClear, slaClearAcceptedAfterStateClear, slaClearOthersAfterStateClear, slaClearAfterAllClear, idempotencyHeaderTask, idempotencyHeaderWebhook, idempotencyHeaderEventId, idempotencyHeaderFirst, idempotencyHeaderRetry, idempotencyHeaderCalls, idempotencyHeaderFirstResult, idempotencyHeaderRetryResult, idempotencyHeaderBodyVerifies, eventIdHeaderTask, eventIdHeaderWebhook, eventIdHeaderEventId, eventIdHeaderFirst, eventIdHeaderRetry, eventIdHeaderIdempotencyFirst, eventIdHeaderIdempotencyRetry, eventIdHeaderCalls, eventIdHeaderFirstResult, eventIdHeaderRetryResult, eventIdHeaderBodyVerifies, jitterTask, jitterWebhook, jitterEventId, jitterResult, jitterSleeps, jitterCalls, exactResult, exactSleeps, exactCalls, hintResult, hintSleeps, hintCalls, jitterBodyVerifies, watchdogReminderTasks, watchdogReminderSelected, watchdogReminderResults, watchdogReminderNotifiedIds, reconcileTasks, reconcileLedger, reconcileMatched, reconcileTaskOnly, reconcileLedgerOnly, reconcileAmountMismatch, reconcileUnreconciled, snapshotDiffTask, snapshotDiff, snapshotDiffIdentical, payoutAgingTasks, payoutAging: payoutAgingResult, outbox, outboxPendingAfterTwo, outboxDeadAfterTwo, outboxPendingAfterThree, outboxDeadAfterThree, outboxDeadWebhook, outboxRecoveredWebhook, outboxRecoveredDelivery, outboxDeadFetchCalls: outboxDeadCalls.length, outboxRecoveredFetchCalls: outboxRecoveredCalls.length, outboxPendingFinal, outboxDeadFinal, outboxRedriveDeadBefore, outboxRedrivePendingAfter, outboxRedriveDeadAfter, outboxRedrivePendingError, outboxRedriveDelivery, outboxRedriveFetchCalls: outboxRedriveCalls.length, outboxPendingAfterRedrive, outboxDeadAfterRedrive, outboxRetryOutbox, outboxRetrySummary, outboxRetryDeliverCalls, outboxRetryPendingAfterLive, outboxRetryDeadAfterLive, outboxRetryDryRunSummary, outboxRetryDryRunPendingAfter, outboxErrorTruncation, limitActorTask, limitActorError, limitActorStateAfterReject, limitActorHistoryLengthAfterReject, limitActorBoundaryState, limitActorBoundaryHistoryLength, limitEventIdError, limitEventIdWebhook, limitEventIdVerified, limitTaskIdError, limitTaskIdBoundaryTask, limitIdempotencyTask, limitIdempotencyError, limitIdempotencyStateAfterReject, limitIdempotencyHistoryLengthAfterReject, limitIdempotencyDuplicateReturn, limitIdempotencyHistoryLengthAfterDuplicate, lines };
 }
 
 async function main(): Promise<void> {

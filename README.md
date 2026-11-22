@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1812 tests, all local
+npm test   # 1813 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -514,7 +514,16 @@ history untouched; a snapshot round-trip keeps the gate (the restored
 task rejects an amount-less completion the same way) and the restored
 task then settles with the pinned `payoutAmount` 250 — the fail-fast
 settlement gate, shown instead of only asserted by the
-requirePayoutAmount tests. — and a closing dispatch
+requirePayoutAmount tests. — and a closing actor attribution
+enforcement segment that drives a dedicated task under the default
+(the option unset) still publishing without an actor, while a second
+dedicated task constructed with `requireActor: true` rejects an
+actor-less PUBLISH with the pinned `actor required: …` error leaving
+state and history untouched; the same dispatch with actor "researcher"
+then succeeds, and a snapshot round-trip keeps the gate (the restored
+task rejects an actor-less ACCEPT the same way) before accepting one
+with actor "contributor" — the fail-fast audit-attribution gate, shown
+instead of only asserted by the requireActor tests. — and a closing dispatch
 idempotency key segment that dispatches a dedicated
 task under fixed timestamps with pinned
 `idempotencyKey`s: the same key sent twice for the
@@ -2767,7 +2776,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1812 tests covering the happy path, reject→resubmit
+`npm test` runs 1813 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

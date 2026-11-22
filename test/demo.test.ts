@@ -1038,6 +1038,12 @@ Payout amount enforcement (requirePayoutAmount: true rejects a PAYOUT_COMPLETE t
   snapshot round-trip keeps the gate: toJSON() writes requirePayoutAmount: true, and the restored task's PAYOUT_COMPLETE without a payoutAmount -> rejected: "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule)
   restored task with the amount: PAYOUT_COMPLETE with payoutAmount 250 at <timestamp> -> PAID; history last entry: seq 8 PAYOUT_COMPLETE payoutAmount=250 (the audit trail now records how much the settlement claims)
 
+Actor attribution enforcement (requireActor: true rejects a dispatch that carries no actor):
+  default task DEMO-106 (requireActor unset — the advisory default): PUBLISH without an actor -> OPEN; history last entry carries no actor (backward compatible: enforcement is opt-in, so an unenforced task still attributes nothing and dispatches on the advisory path)
+  enforced task DEMO-107 (constructed with requireActor: true): PUBLISH without an actor -> rejected: "actor required: dispatch must carry a non-empty actor when requireActor is enabled"; state after rejection: DRAFT, history entries: 0 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)
+  enforced task with an actor: PUBLISH with actor "researcher" at <timestamp> -> OPEN; history last entry: seq 1 PUBLISH actor=researcher (the audit trail now names who made the change)
+  snapshot round-trip keeps the gate: toJSON() writes requireActor: true, and the restored task's ACCEPT without an actor -> rejected: "actor required: dispatch must carry a non-empty actor when requireActor is enabled" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule); ACCEPT with actor "contributor" at <timestamp> -> ACCEPTED; history last entry: seq 2 ACCEPT actor=contributor
+
 Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):
   same key, same event (DEMO-026): PUBLISH with idempotencyKey "demo-idem-publish" at <timestamp> -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)
   keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
@@ -1283,7 +1289,7 @@ Caller string length limits (dispatch actor, webhook eventId, task id, dispatch 
 
 test("demo lines match the pre-refactor golden output, line for line", async () => {
   const { lines } = await runDemo();
-  assert.equal(lines.length, 1121);
+  assert.equal(lines.length, 1127);
   assert.equal(normalize(lines.join("\n")), GOLDEN_DEMO_OUTPUT);
 });
 
@@ -5136,7 +5142,7 @@ test("CLI entry point still runs as a subprocess and prints the same golden outp
     { encoding: "utf8" },
   );
 
-  assert.equal(out.trimEnd().split("\n").length, 1121);
+  assert.equal(out.trimEnd().split("\n").length, 1127);
   assert.equal(normalize(out.trimEnd()), GOLDEN_DEMO_OUTPUT);
   assert.match(out, /Task DEMO-001: DRAFT/);
   assert.match(out, /verifyPayoutWebhook: ok/);
@@ -8094,6 +8100,156 @@ test("demo shows the payout amount enforcement segment in-process: amount-less c
       "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
     ) > amountAt,
     "dispatch idempotency key segment must follow the payout amount enforcement segment",
+  );
+});
+
+test("demo shows the actor attribution enforcement segment in-process: actor-less dispatch rejected, snapshot keeps the gate, restored task accepts with an actor, default stays advisory", async () => {
+  const {
+    requireActorDefaultTask,
+    requireActorTask,
+    requireActorError,
+    requireActorStateAfterReject,
+    requireActorHistoryLengthAfterReject,
+    requireActorRestoredTask,
+    requireActorRestoredError,
+    requireActorRestoredStateAfterReject,
+    requireActorRestoredHistoryLengthAfterReject,
+    lines,
+  } = await runDemo();
+  const text = lines.join("\n");
+
+  // Hand-written expectations — written out here from the
+  // TaskLifecycleOptions docs in src/taskLifecycle.ts and
+  // test/requireActor.test.ts, never derived from the
+  // gate itself.
+  assert.equal(requireActorDefaultTask.id, "DEMO-106");
+  assert.equal(requireActorDefaultTask.state, "OPEN");
+  assert.equal(requireActorDefaultTask.history.length, 1);
+  const defaultLast =
+    requireActorDefaultTask.history[
+      requireActorDefaultTask.history.length - 1
+    ];
+  assert.equal(defaultLast.event, "PUBLISH");
+  assert.equal(defaultLast.seq, 1);
+  assert.equal(defaultLast.actor, undefined);
+  assert.equal(defaultLast.at, "2026-04-08T09:00:00.000Z");
+  assert.equal(requireActorTask.id, "DEMO-107");
+  assert.equal(requireActorTask.state, "OPEN");
+  assert.equal(requireActorTask.history.length, 1);
+  assert.equal(
+    requireActorError,
+    "actor required: dispatch must carry a non-empty actor when requireActor is enabled",
+  );
+  assert.equal(requireActorStateAfterReject, "DRAFT");
+  assert.equal(requireActorHistoryLengthAfterReject, 0);
+  const enforcedLast =
+    requireActorTask.history[requireActorTask.history.length - 1];
+  assert.equal(enforcedLast.event, "PUBLISH");
+  assert.equal(enforcedLast.seq, 1);
+  assert.equal(enforcedLast.actor, "researcher");
+  assert.equal(enforcedLast.at, "2026-04-09T09:01:00.000Z");
+  assert.equal(requireActorRestoredTask.id, "DEMO-107");
+  assert.equal(requireActorRestoredTask.state, "ACCEPTED");
+  assert.equal(requireActorRestoredTask.history.length, 2);
+  assert.equal(
+    requireActorRestoredError,
+    "actor required: dispatch must carry a non-empty actor when requireActor is enabled",
+  );
+  assert.equal(requireActorRestoredStateAfterReject, "OPEN");
+  assert.equal(requireActorRestoredHistoryLengthAfterReject, 1);
+  const restoredLast =
+    requireActorRestoredTask.history[
+      requireActorRestoredTask.history.length - 1
+    ];
+  assert.equal(restoredLast.event, "ACCEPT");
+  assert.equal(restoredLast.seq, 2);
+  assert.equal(restoredLast.actor, "contributor");
+  assert.equal(restoredLast.at, "2026-04-09T09:10:00.000Z");
+  // Independent checks built in the test — the demo segment
+  // is not self-certifying: fresh tasks driven here under
+  // the same fixed timestamps reproduce every verdict on
+  // their own (the script from the requireActor tests).
+  const independentDefault = new TaskLifecycle("test-ra-default");
+  independentDefault.dispatch("PUBLISH", {
+    at: "2026-04-10T09:00:00.000Z",
+  });
+  assert.equal(independentDefault.state, "OPEN");
+  assert.equal(
+    independentDefault.history[independentDefault.history.length - 1].actor,
+    undefined,
+  );
+  const independentEnforced = new TaskLifecycle("test-ra-enforced", {
+    requireActor: true,
+  });
+  assert.throws(
+    () =>
+      independentEnforced.dispatch("PUBLISH", {
+        at: "2026-04-10T09:00:00.000Z",
+      }),
+    /actor required: dispatch must carry a non-empty actor when requireActor is enabled/,
+  );
+  assert.equal(independentEnforced.state, "DRAFT");
+  assert.equal(independentEnforced.history.length, 0);
+  independentEnforced.dispatch("PUBLISH", {
+    actor: "researcher",
+    at: "2026-04-10T09:01:00.000Z",
+  });
+  assert.equal(independentEnforced.state, "OPEN");
+  assert.equal(
+    independentEnforced.history[independentEnforced.history.length - 1]
+      .actor,
+    "researcher",
+  );
+  const independentRestored = TaskLifecycle.fromJSON(
+    JSON.parse(JSON.stringify(independentEnforced.toJSON())) as unknown,
+  );
+  assert.equal(independentRestored.state, "OPEN");
+  assert.equal(independentRestored.history.length, 1);
+  assert.throws(
+    () =>
+      independentRestored.dispatch("ACCEPT", {
+        at: "2026-04-10T09:05:00.000Z",
+      }),
+    /actor required: dispatch must carry a non-empty actor when requireActor is enabled/,
+  );
+  assert.equal(independentRestored.state, "OPEN");
+  assert.equal(independentRestored.history.length, 1);
+  independentRestored.dispatch("ACCEPT", {
+    actor: "contributor",
+    at: "2026-04-10T09:10:00.000Z",
+  });
+  assert.equal(independentRestored.state, "ACCEPTED");
+  assert.equal(
+    independentRestored.history[independentRestored.history.length - 1]
+      .actor,
+    "contributor",
+  );
+  // The segment follows the payout amount enforcement
+  // segment and prints its lines verbatim (the dispatch
+  // idempotency key segment follows it).
+  const actorAt = text.indexOf(
+    "Actor attribution enforcement (requireActor: true rejects a dispatch that carries no actor):",
+  );
+  assert.ok(
+    actorAt >
+      text.indexOf(
+        "Payout amount enforcement (requirePayoutAmount: true rejects a PAYOUT_COMPLETE that carries no payoutAmount):",
+      ),
+    "actor attribution enforcement segment must follow the payout amount enforcement segment",
+  );
+  for (const line of [
+    "  default task DEMO-106 (requireActor unset — the advisory default): PUBLISH without an actor -> OPEN; history last entry carries no actor (backward compatible: enforcement is opt-in, so an unenforced task still attributes nothing and dispatches on the advisory path)",
+    "  enforced task DEMO-107 (constructed with requireActor: true): PUBLISH without an actor -> rejected: \"actor required: dispatch must carry a non-empty actor when requireActor is enabled\"; state after rejection: DRAFT, history entries: 0 (nothing was appended — the gate is fail-fast, checked before the audit entry is written)",
+    "  enforced task with an actor: PUBLISH with actor \"researcher\" at 2026-04-09T09:01:00.000Z -> OPEN; history last entry: seq 1 PUBLISH actor=researcher (the audit trail now names who made the change)",
+    "  snapshot round-trip keeps the gate: toJSON() writes requireActor: true, and the restored task's ACCEPT without an actor -> rejected: \"actor required: dispatch must carry a non-empty actor when requireActor is enabled\" (the gate is task configuration persisted in the snapshot, not audit data — a rehydrated task enforces the same rule); ACCEPT with actor \"contributor\" at 2026-04-09T09:10:00.000Z -> ACCEPTED; history last entry: seq 2 ACCEPT actor=contributor",
+  ]) {
+    assert.ok(text.includes(line), `missing enforcement line: ${line}`);
+  }
+  assert.ok(
+    text.indexOf(
+      "Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):",
+    ) > actorAt,
+    "dispatch idempotency key segment must follow the actor attribution enforcement segment",
   );
 });
 

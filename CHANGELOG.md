@@ -11,6 +11,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- CLI demo actor attribution enforcement segment (2026-11-22, backlog #1315):
+  `src/demo.ts` shows the `requireActor` gate the way the payout
+  gates are already shown: a default task publishes without an
+  actor, an enforced task's actor-less PUBLISH is rejected with the
+  pinned `actor required: …` error leaving state and history
+  untouched, the same dispatch with actor "researcher" then
+  succeeds and records it, a snapshot round-trip keeps the gate
+  (the restored task rejects an actor-less ACCEPT the same way),
+  and the restored task then accepts with actor "contributor"
+  carried verbatim on its last history entry. The verdicts are
+  exposed as the new `DemoResult` fields
+  `requireActorDefaultTask`, `requireActorTask`,
+  `requireActorError`, `requireActorStateAfterReject`,
+  `requireActorHistoryLengthAfterReject`,
+  `requireActorRestoredTask`, `requireActorRestoredError`,
+  `requireActorRestoredStateAfterReject` and
+  `requireActorRestoredHistoryLengthAfterReject`. The demo output
+  grows by six lines (1121 to 1127) and the README demo section
+  mentions the segment. The test count rises by one (1812 to
+  1813 tests).
+
 - CLI demo payout amount enforcement segment (2026-11-21, backlog #1314):
   `src/demo.ts` shows the `requirePayoutAmount` gate the way the
   payout reference gate is already shown: a default task settles
