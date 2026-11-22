@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1831 tests, all local
+npm test   # 1839 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1459,7 +1459,11 @@ paid 1634900, gap -984900, 1 mismatched (DEMO-005, delta -249.5),
 quote). Single-currency by construction — tasks carry no currency
 field, so a batch mixing currencies must be grouped by currency by
 the caller first — and overflow is fail-fast, like the two helpers
-it builds on. An empty batch returns an all-zero summary.
+it builds on. A task id appearing twice in the batch throws
+(`invalid summarizeTaskSettlements: duplicate task "<id>"`) before
+any figure is summed, whatever the tasks' states — the same
+fail-closed rule `reconcilePayouts` applies. An empty batch returns
+an all-zero summary.
 
 The summary also has canonical text forms, so a caller doing batch
 reconciliation no longer has to hand-write the export — the escrow
@@ -2776,7 +2780,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1831 tests covering the happy path, reject→resubmit
+`npm test` runs 1839 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

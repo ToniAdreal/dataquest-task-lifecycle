@@ -1966,6 +1966,18 @@ export interface TaskSettlementsSummary {
  * snapshots stay readable (their acceptance is unchanged); only
  * summarizing them fails, loudly.
  *
+ * Fail-fast, before any figure is summed: a task id appearing twice
+ * in the batch throws `invalid summarizeTaskSettlements: duplicate
+ * task "<id>"` and returns no summary — the same task counted twice
+ * would double its quote and its settled amount in the totals (and a
+ * non-`PAID` duplicate would still inflate the `tasks` count, since
+ * every task in the batch is counted). The check covers every task
+ * regardless of state, mirroring the escrow-side
+ * `summarizeSettlementReports` rule (backlog #1268) and this repo's
+ * own {@link reconcilePayouts} duplicate-task pre-scan (backlog
+ * #1253): a duplicated id is a caller bug, not a summary detail, so
+ * it fails closed the way those two already do.
+ *
  * Pure: reads the tasks, never mutates or dispatches. An empty input
  * returns an all-zero summary.
  */
@@ -1976,6 +1988,22 @@ export function summarizeTaskSettlements(
     new Error(
       "task settlements summary computation overflowed: inputs too large",
     );
+  // A task id may appear only once in the batch: the same object
+  // passed twice, or two objects sharing one id, would otherwise be
+  // counted twice and double the batch totals. Checked before any
+  // accumulation, so the duplicate-task error is the one the caller
+  // sees even when the batch also carries an overflowing amount —
+  // and before any figure is summed, so no partial summary is ever
+  // returned.
+  const seenTaskIds = new Set<string>();
+  for (const task of tasks) {
+    if (seenTaskIds.has(task.id)) {
+      throw new Error(
+        `invalid summarizeTaskSettlements: duplicate task ${JSON.stringify(task.id)}`,
+      );
+    }
+    seenTaskIds.add(task.id);
+  }
   let paid = 0;
   let quotedTotal = 0;
   let paidTotal = 0;

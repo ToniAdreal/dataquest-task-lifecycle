@@ -124,6 +124,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `summarizeTaskSettlements` rejects a duplicated task id
+  (2026-11-22, backlog #1324, mirror of the sibling escrow #1268
+  fix): the same task passed twice — the same object, or two objects
+  sharing one id — used to be counted twice, doubling its quote and
+  its settled amount in the totals. A repeated id now throws
+  `invalid summarizeTaskSettlements: duplicate task "<id>"` before
+  any figure is summed, and returns no summary. The check covers
+  every task regardless of state, because even a non-`PAID`
+  duplicate inflates the `tasks` count; it also runs before the
+  overflow check, so a duplicated id is the error the caller sees
+  even when the batch carries an overflowing amount. This matches
+  the repo's own `reconcilePayouts` duplicate-task pre-scan
+  (backlog #1253). New
+  `test/summarizeTaskSettlementsDuplicates.test.ts` (8 cases) pins
+  the same-object and same-id PAID duplicates, the non-`PAID`
+  duplicates, the first-repeated-id naming, the distinct-tasks
+  regression, the empty/single-task paths, and the
+  duplicate-before-overflow ordering. Mutation check: removing the
+  guard turns 6 of the 8 new tests red, reverted. The test count
+  rises by eight (1831 to 1839 tests).
+
 - `parsePayoutRetryAfter` fails closed on a non-finite `nowMs`
   (2026-11-22, backlog #1320, mirror of the sibling escrow #1319 fix):
   an HTTP-date branch `Math.max(0, when - NaN)` used to return NaN,
