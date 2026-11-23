@@ -271,7 +271,12 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
  *   for (const task of expiredTasks(allTasks)) task.dispatch("EXPIRE", { actor: "system" });
  *
  * Pure: reads the tasks, never mutates or dispatches. The `now` default
- * is the real clock, so unit tests pin it to a fixed date. An invalid
+ * is the real clock, so unit tests pin it to a fixed date. A non-array
+ * batch, or a batch entry that is not a `TaskLifecycle`, throws
+ * `invalid expiredTasks: …` fail-fast, before the `now` check
+ * (backlog #1342, shared guard {@link assertTaskInstanceBatch}): a
+ * `null` batch used to die as a bare `TypeError`, and a `[null]`
+ * batch died inside `isOverdue` reading `getSlaDeadline`. An invalid
  * `now` throws `invalid now: expected a valid Date` fail-fast — even
  * for an empty batch, so a broken clock can never silently screen an
  * empty list as "nothing overdue" (backlog #1334; the guard is checked
@@ -285,6 +290,7 @@ export function expiredTasks(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): TaskLifecycle[] {
+  assertTaskInstanceBatch("expiredTasks", tasks);
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
@@ -730,12 +736,19 @@ export interface TasksByFiltersOptions {
  * instead of surfacing a `TypeError` from the first property read.
  * Mirrors the escrow state machine's `escrowsByFilters`, which has
  * the same `state`/`actor`/`event`/`overdue` axes and no `payoutRef` counterpart.
+ * The batch itself is guarded first: a non-array batch, or an entry
+ * that is not a `TaskLifecycle`, throws `invalid tasksByFilters: …`
+ * before any filter is validated (backlog #1342, shared guard
+ * {@link assertTaskInstanceBatch}) — without it,
+ * `tasksByFilters([null], {})` silently returned `[null]` when no
+ * filter axis was set.
  */
 export function tasksByFilters(
   tasks: readonly TaskLifecycle[],
   filters: TasksByFiltersOptions,
   now: Date = new Date(),
 ): TaskLifecycle[] {
+  assertTaskInstanceBatch("tasksByFilters", tasks);
   if (
     typeof filters !== "object" ||
     filters === null ||
@@ -1044,7 +1057,10 @@ function predictExpireOverdueTask(
  * RangeError. The guard lives in {@link isOverdue}, which the
  * screening funnel ({@link expiredTasks}) reads through; the pin
  * below is therefore only ever materialized from a proven-valid
- * instant.
+ * instant. The batch guard is likewise inherited from that funnel
+ * (backlog #1342): a non-array batch, or a non-task entry, throws
+ * `invalid expiredTasks: …` before any screening — no duplicate
+ * guard here.
  *
  * Same semantics as the manual pattern: nothing auto-migrates. Expiry
  * only happens through an explicit, auditable dispatch that lands in the
@@ -1481,12 +1497,21 @@ export function isSettlementComplete(task: TaskLifecycle): boolean {
  * what reconciliation should flag, not silently pass.
  *
  * Pure: reads the tasks, never mutates or dispatches. An empty input
- * returns an empty array. The screen itself is {@link isSettlementComplete}:
+ * returns an empty array. A non-array batch, or a batch entry that is
+ * not task-shaped, throws `invalid unreconciledPayouts: …`
+ * fail-fast (backlog #1342, shape guard {@link assertTaskBatch},
+ * the same guard as the other settlement readers, backlog #1341):
+ * a `null` batch used to die as a bare `TypeError` reading `filter`,
+ * and a `[null]` batch died reading `state`. The guard is a shape
+ * check, not `instanceof TaskLifecycle`, so the #893 defensive
+ * stand-in — a PAID task with no `PAYOUT_COMPLETE` entry at all —
+ * still passes. The screen itself is {@link isSettlementComplete}:
  * this helper returns the `PAID` tasks for which that predicate is false.
  */
 export function unreconciledPayouts(
   tasks: readonly TaskLifecycle[],
 ): TaskLifecycle[] {
+  assertTaskBatch(tasks, "unreconciledPayouts");
   return tasks.filter(
     (task) => task.state === "PAID" && !isSettlementComplete(task),
   );
@@ -1546,6 +1571,10 @@ export interface PayoutAgingResult {
  * Pure: reads the tasks, never mutates or dispatches. An invalid
  * `now` fails fast instead of returning an empty result. The `now`
  * default is the real clock, so unit tests pin it to a fixed date.
+ * The batch guard is inherited from {@link unreconciledPayouts}
+ * (backlog #1342): a non-array batch, or a non-task entry, throws
+ * the same `invalid unreconciledPayouts: …` error — no duplicate
+ * guard here.
  *
  *   const aging = payoutAging(allTasks, now);
  *   // chase over30Days first, then days7To30, then under7Days
@@ -1718,6 +1747,47 @@ export function parseMinorUnits(text: string): number {
   const minorUnits = Number(total);
   if (minorUnits === 0) return 0;
   return match[1] === "-" ? -minorUnits : minorUnits;
+}
+
+/**
+ * Shared batch guard for the batch selectors that need real instances
+ * ({@link expiredTasks}, {@link tasksByFilters}): the batch must be
+ * an array, and every entry must be a `TaskLifecycle` — checked with
+ * `instanceof`, not a shape scan, following escrow's
+ * `assertEscrowBatch` (backlog #1340). The selectors read `state`,
+ * `history`, `isTerminal`, and `getSlaDeadline()`, which only a real
+ * `TaskLifecycle` guarantees: `expiredTasks` (and the `overdue` axis
+ * of `tasksByFilters`) calls `isOverdue`, which dies as a bare
+ * `TypeError` on a shape-only stand-in. No caller in this repo
+ * (tests included) passes a plain-object stand-in to either
+ * selector. `unreconciledPayouts` deliberately does NOT use this
+ * guard: it reads only `state` and `history` (via
+ * {@link isSettlementComplete}), and the #893 defensive stand-in —
+ * a PAID task with no `PAYOUT_COMPLETE` entry at all — flows
+ * through it (and {@link payoutAging}), so it uses the shape guard
+ * {@link assertTaskBatch} instead, like the other settlement
+ * readers (backlog #1341). The guard runs first, before any
+ * filter-parameter validation, so a malformed batch is never masked
+ * by (or mistaken for) a bad filter value. {@link expireOverdueTasks}
+ * inherits the guard through the funnel it screens with
+ * ({@link expiredTasks}) (backlog #1342).
+ */
+function assertTaskInstanceBatch(
+  fnName: string,
+  tasks: readonly TaskLifecycle[],
+): void {
+  if (!Array.isArray(tasks)) {
+    throw new Error(
+      `invalid ${fnName}: tasks must be an array, got ${tasks === null ? "null" : typeof tasks}`,
+    );
+  }
+  for (let i = 0; i < tasks.length; i++) {
+    if (!(tasks[i] instanceof TaskLifecycle)) {
+      throw new Error(
+        `invalid ${fnName}: tasks[${i}] must be a TaskLifecycle, got ${tasks[i] === null ? "null" : typeof tasks[i]}`,
+      );
+    }
+  }
 }
 
 /**

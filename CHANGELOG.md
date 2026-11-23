@@ -124,6 +124,31 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Batch selectors reject malformed batches instead of dying as a
+  bare `TypeError` or silently passing a `null` through (2026-11-23,
+  backlog #1342): `unreconciledPayouts()` / `expiredTasks()` /
+  `tasksByFilters()` validated only their secondary parameters, so a
+  `null` batch died as `reading 'filter'`, a `[null]` batch died
+  reading `state` (or `getSlaDeadline`, inside `isOverdue`), and
+  worse, `tasksByFilters([null], {})` silently returned `[null]`
+  when no filter axis was set. `expiredTasks()` and
+  `tasksByFilters()` now fail fast through the shared
+  `assertTaskInstanceBatch` guard — an `instanceof TaskLifecycle`
+  check, following escrow's `assertEscrowBatch` (backlog #1340),
+  because the selectors read `isTerminal` and `getSlaDeadline()`,
+  which only a real task guarantees; a non-array batch throws
+  `invalid <fn>: tasks must be an array, got …`, a non-task entry
+  throws naming its index, and the guard runs before any
+  filter-parameter validation, so a malformed batch is never masked
+  by a bad filter value. `unreconciledPayouts()` instead uses the
+  shape guard `assertTaskBatch` (backlog #1341): it reads only
+  `state` and `history`, and the #893 defensive stand-in — a PAID
+  task with no `PAYOUT_COMPLETE` entry at all — flows through it,
+  so a shape-only stand-in still reads. `payoutAging()` and
+  `expireOverdueTasks()` inherit the guard through the selector they
+  call, with no duplicate guard of their own. The test count rises
+  by sixteen (1950 to 1966 tests).
+
 - Settlement read helpers reject malformed inputs instead of dying
   as a bare `TypeError` or silently answering (2026-11-23, backlog
   #1341): `totalPaidOut()` / `totalQuoted()` iterated their batch
