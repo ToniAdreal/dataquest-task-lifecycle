@@ -320,7 +320,13 @@ export function expiredTasks(
  * default is the real clock, so unit tests pin it to a fixed date.
  * `withinMs` must be a non-negative finite number of milliseconds;
  * an invalid value (or an invalid `now`) fails fast instead of
- * silently returning an empty list.
+ * silently returning an empty list. A non-array batch, or a batch
+ * entry that is not a `TaskLifecycle`, throws
+ * `invalid tasksApproachingDeadline: …` fail-fast, before the
+ * `withinMs` check (backlog #1350, shared guard
+ * {@link assertTaskInstanceBatch}): the filter reads `isTerminal`
+ * and `getSlaDeadline()`, which only a real task guarantees — a
+ * `null` batch used to die as a bare `TypeError`.
  *
  *   const atRisk = tasksApproachingDeadline(allTasks, 24 * 3600_000, now);
  *   // nudge the assignee / reassign, before the deadline passes
@@ -330,6 +336,7 @@ export function tasksApproachingDeadline(
   withinMs: number,
   now: Date = new Date(),
 ): TaskLifecycle[] {
+  assertTaskInstanceBatch("tasksApproachingDeadline", tasks);
   if (
     typeof withinMs !== "number" ||
     !Number.isFinite(withinMs) ||
@@ -559,12 +566,19 @@ export function tasksByState(
  * never match, so anonymous work is never attributed to anyone. An
  * empty or non-string actor fails fast instead of silently returning
  * an empty list, so a typo or a missing variable cannot masquerade
- * as "this actor touched nothing".
+ * as "this actor touched nothing". A non-array batch, or a batch
+ * entry that is not a task-shaped object (a string `id`, a string
+ * `state`, and an array `history`), throws
+ * `invalid tasksByActor: …` fail-fast, before the actor check
+ * (backlog #1350, shared guard {@link assertTaskBatch}): the filter
+ * reads only `state` and `history`, so the #893 defensive stand-in
+ * keeps passing — a `null` batch used to die as a bare `TypeError`.
  */
 export function tasksByActor(
   tasks: readonly TaskLifecycle[],
   actor: string,
 ): TaskLifecycle[] {
+  assertTaskBatch(tasks, "tasksByActor");
   if (typeof actor !== "string" || actor.length === 0) {
     throw new Error(
       `invalid tasksByActor: actor must be a non-empty string, got ${JSON.stringify(actor)}`,
@@ -605,12 +619,20 @@ export function tasksByActor(
  * exact and case-sensitive, like the stored reference itself. An
  * empty or non-string reference fails fast instead of silently
  * returning an empty list, so a typo or a missing variable cannot
- * masquerade as "no task settled under this transfer".
+ * masquerade as "no task settled under this transfer". A non-array
+ * batch, or a batch entry that is not a task-shaped object (a string
+ * `id`, a string `state`, and an array `history`), throws
+ * `invalid tasksByPayoutRef: …` fail-fast, before the reference
+ * check (backlog #1350, shared guard {@link assertTaskBatch}): the
+ * filter reads only `state` and `history`, so the #893 defensive
+ * stand-in keeps passing — a `null` batch used to die as a bare
+ * `TypeError`.
  */
 export function tasksByPayoutRef(
   tasks: readonly TaskLifecycle[],
   payoutRef: string,
 ): TaskLifecycle[] {
+  assertTaskBatch(tasks, "tasksByPayoutRef");
   if (typeof payoutRef !== "string" || payoutRef.length === 0) {
     throw new Error(
       `invalid tasksByPayoutRef: payoutRef must be a non-empty string, got ${JSON.stringify(payoutRef)}`,
@@ -650,11 +672,19 @@ export function tasksByPayoutRef(
  * TaskEvent set, including a state name such as "DISPUTED") fails
  * fast instead of silently returning an empty list, so a typo
  * ("DISPUT") cannot masquerade as "no task ever saw this event".
+ * A non-array batch, or a batch entry that is not a task-shaped
+ * object (a string `id`, a string `state`, and an array `history`),
+ * throws `invalid tasksByEvent: …` fail-fast, before the event
+ * check (backlog #1350, shared guard {@link assertTaskBatch}): the
+ * filter reads only `state` and `history`, so the #893 defensive
+ * stand-in keeps passing — a `null` batch used to die as a bare
+ * `TypeError`.
  */
 export function tasksByEvent(
   tasks: readonly TaskLifecycle[],
   event: TaskEvent,
 ): TaskLifecycle[] {
+  assertTaskBatch(tasks, "tasksByEvent");
   if (!EVENTS.has(event)) {
     throw new Error(
       `invalid tasksByEvent: unknown event "${String(event)}"`,
@@ -1203,7 +1233,12 @@ function assertMaxAgeByState(
  * state too long" (e.g. nobody picked up an OPEN task, a review has been
  * pending for a week). Pure: reads the tasks, never mutates or dispatches.
  * The `now` default is the real clock, so unit tests pin it to a fixed
- * date.
+ * date. A non-array batch, or a batch entry that is not a
+ * `TaskLifecycle`, throws `invalid staleTasks: …` fail-fast, before
+ * the budget check (backlog #1350, shared guard
+ * {@link assertTaskInstanceBatch}): the filter reads `isTerminal`,
+ * `state`, and `history`, which only a real task guarantees — a
+ * `null` batch used to die as a bare `TypeError`.
  *
  *   const stale = staleTasks(allTasks, {
  *     IN_REVIEW: 7 * 24 * 3600_000, // a week
@@ -1226,6 +1261,7 @@ export function staleTasks(
   maxAgeByState: Partial<Record<TaskState, number>>,
   now: Date = new Date(),
 ): TaskLifecycle[] {
+  assertTaskInstanceBatch("staleTasks", tasks);
   assertMaxAgeByState(maxAgeByState);
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {

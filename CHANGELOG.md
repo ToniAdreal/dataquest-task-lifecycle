@@ -124,6 +124,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Single-axis batch selectors reject malformed batches instead of
+  dying as a bare `TypeError` (2026-11-23, backlog #1350): the
+  remaining five selectors from backlog #1342 —
+  `tasksByPayoutRef()` / `tasksByActor()` / `tasksByEvent()` /
+  `tasksApproachingDeadline()` / `staleTasks()` — validated only
+  their secondary parameters, so a `null` batch died as `reading
+  'filter'` and a `[null]` batch died reading `history` (the first
+  three) or `isTerminal` (the last two). The first three now fail
+  fast through the shared shape guard `assertTaskBatch` (backlog
+  #1341): they read only `state` and `history`, so the #893
+  defensive stand-in — a PAID task with no `PAYOUT_COMPLETE` entry
+  at all — keeps passing. The last two fail fast through the shared
+  `assertTaskInstanceBatch` guard (backlog #1342): they read
+  `isTerminal` and `getSlaDeadline()`, which only a real task
+  guarantees, so a shape-only stand-in is rejected. In all five the
+  guard runs before any secondary-parameter validation, so a
+  malformed batch is never masked by a bad filter value. The test
+  count rises by fifteen (1973 to 1988 tests).
+
 - Delivery timers obey the Node `setTimeout` ceiling (2026-11-23,
   backlog #1345, mirroring escrow #1326): Node stores timer delays
   in a 32-bit signed integer, so a wait past `2^31 - 1` ms (~24.8
