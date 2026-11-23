@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1930 tests, all local
+npm test   # 1950 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1425,6 +1425,14 @@ which parse fine but were never writable through `dispatch()`: quoted
 100.005 / paid 100.004 reports `delta: -0.01`, while 100.001 / 100.002
 rounds to the same cent and is no mismatch — so the
 `summarizeTaskSettlements()` gap identity holds for legacy pairs too.
+All four settlement readers fail fast on malformed input instead of
+dying as a bare `TypeError` or silently answering: `totalPaidOut()`,
+`totalQuoted()`, and `mismatchedPayouts()` throw
+`invalid <fn>: tasks must be an array` on a non-array batch and name
+the first non-task entry, and `payoutMismatch()` throws
+`invalid payoutMismatch: task must be a TaskLifecycle` on a task that
+is not a task-shaped object — a string batch used to silently answer
+0, and a plain `{}` used to silently answer `undefined`.
 
 The batch form of the owed half is `totalQuoted()`: it sums the last
 `ACCEPT` quote across `PAID` tasks in integer minor units, the exact
@@ -2818,7 +2826,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1930 tests covering the happy path, reject→resubmit
+`npm test` runs 1950 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -1721,6 +1721,70 @@ export function parseMinorUnits(text: string): number {
 }
 
 /**
+ * Shared shape guard for the settlement read helpers
+ * ({@link totalPaidOut}, {@link totalQuoted}, {@link payoutMismatch}):
+ * a batch must be an array, and every entry must be a task-shaped
+ * object — a string `id`, a string `state`, and an array `history` —
+ * or it throws naming the first offending index. The guard is a shape
+ * check, not `instanceof TaskLifecycle`, following
+ * {@link reconcilePayouts} (backlog #1337): the codebase deliberately
+ * passes defensive stand-ins shaped like a task (a PAID task with no
+ * `PAYOUT_COMPLETE` entry at all, backlog #893), and those must keep
+ * passing. The three legs are all required: the readers below touch
+ * `state` and `history`, and an entry missing the `id` leg would be
+ * indistinguishable from a task the caller meant to reconcile — the
+ * same reasoning that made `reconcilePayouts` reject an id-only
+ * object instead of letting it slip through as "nothing to
+ * reconcile". Checked before any figure is read, so the shape error
+ * is the one the caller sees even when the batch also carries an
+ * overflowing amount.
+ */
+function assertTaskBatch(
+  tasks: unknown,
+  fnName: string,
+): asserts tasks is readonly TaskLifecycle[] {
+  if (!Array.isArray(tasks)) {
+    throw new Error(`invalid ${fnName}: tasks must be an array`);
+  }
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    if (
+      task === null ||
+      typeof task !== "object" ||
+      typeof (task as TaskLifecycle).id !== "string" ||
+      typeof (task as TaskLifecycle).state !== "string" ||
+      !Array.isArray((task as TaskLifecycle).history)
+    ) {
+      throw new Error(
+        `invalid ${fnName}: tasks[${i}] must be a task object with a string id, string state, and array history, got ${JSON.stringify(task)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Single-task form of {@link assertTaskBatch}, for
+ * {@link payoutMismatch}: a non-object task, or one missing the
+ * string `id` / string `state` / array `history` legs, is a caller
+ * bug — without the guard a `null` task died as a bare `TypeError`
+ * and a plain `{}` silently answered `undefined` ("no mismatch to
+ * report" for a task that was never a task). The message names the
+ * function and the expected type; the entry-level detail lives in
+ * the batch guard above.
+ */
+function assertTask(task: unknown, fnName: string): asserts task is TaskLifecycle {
+  if (
+    task === null ||
+    typeof task !== "object" ||
+    typeof (task as TaskLifecycle).id !== "string" ||
+    typeof (task as TaskLifecycle).state !== "string" ||
+    !Array.isArray((task as TaskLifecycle).history)
+  ) {
+    throw new Error(`invalid ${fnName}: task must be a TaskLifecycle`);
+  }
+}
+
+/**
  * Reconciliation helper: sum the actual settled payout amounts across a
  * batch of `PAID` tasks. For each task it reads the `payoutAmount`
  * recorded on its `PAYOUT_COMPLETE` entry (see {@link DispatchOptions})
@@ -1762,9 +1826,17 @@ export function parseMinorUnits(text: string): number {
  * read side: legacy snapshots stay readable (their acceptance is
  * unchanged); only summing them fails, loudly.
  *
+ * Fail-fast, before any figure is summed (backlog #1341): a
+ * non-array batch throws `invalid totalPaidOut: tasks must be an
+ * array`, and a non-task entry throws naming its index — a string
+ * batch used to iterate its characters and silently answer 0 ("zero
+ * paid out"), and a `null` entry died as a bare `TypeError`. See
+ * {@link assertTaskBatch} for the shape the guard checks.
+ *
  * Pure: reads the tasks, never mutates or dispatches.
  */
 export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
+  assertTaskBatch(tasks, "totalPaidOut");
   let totalMinorUnits = 0;
   for (const task of tasks) {
     if (task.state !== "PAID") continue;
@@ -1867,9 +1939,16 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
  * Do not read the gap as a pure per-task mismatch sum on a batch that
  * may contain quoteless settled tasks.
  *
+ * Fail-fast, before any figure is summed (backlog #1341): the same
+ * {@link assertTaskBatch} guard as {@link totalPaidOut} — a non-array
+ * batch throws `invalid totalQuoted: tasks must be an array`, and a
+ * non-task entry throws naming its index. A string batch used to
+ * silently answer 0 the same way.
+ *
  * Pure: reads the tasks, never mutates or dispatches.
  */
 export function totalQuoted(tasks: readonly TaskLifecycle[]): number {
+  assertTaskBatch(tasks, "totalQuoted");
   let totalMinorUnits = 0;
   for (const task of tasks) {
     if (task.state !== "PAID") continue;
@@ -2140,6 +2219,15 @@ export interface PayoutMismatch {
  * returning a poisoned delta: fail-fast, the same converter contract
  * `totalQuoted` and `totalPaidOut` rely on.
  *
+ * Fail-fast, before any field is read (backlog #1341): a task that
+ * is not a task-shaped object throws
+ * `invalid payoutMismatch: task must be a TaskLifecycle` — a `null`
+ * task used to die as a bare `TypeError`, and a plain `{}` silently
+ * answered `undefined`, which is the same answer a genuinely
+ * un-mismatched task gives. The guard checks the shape, not the
+ * class, the same way {@link assertTaskBatch} does, so a defensive
+ * stand-in shaped like a task (backlog #893) still passes.
+ *
  * Returns `undefined` — "no mismatch to report" — when:
  *  - the task is not `PAID` (nothing has settled yet, or never will);
  *  - either amount was never recorded (no `ACCEPT` quote, or no
@@ -2151,6 +2239,7 @@ export interface PayoutMismatch {
  * Pure: reads the task, never mutates or dispatches.
  */
 export function payoutMismatch(task: TaskLifecycle): PayoutMismatch | undefined {
+  assertTask(task, "payoutMismatch");
   if (task.state !== "PAID") return undefined;
   let quoted: number | undefined;
   let paid: number | undefined;
@@ -2184,10 +2273,21 @@ export function payoutMismatch(task: TaskLifecycle): PayoutMismatch | undefined 
  * Tasks that are not `PAID`, lack either recorded amount, or settled
  * exactly as quoted are never selected. Pure: reads the tasks, never
  * mutates or dispatches. An empty input returns an empty array.
+ * Fail-fast (backlog #1341, same-family sibling of the three guarded
+ * readers): the batch itself is checked by {@link assertTaskBatch}
+ * before filtering, so a non-array batch throws
+ * `invalid mismatchedPayouts: tasks must be an array` instead of
+ * dying as a bare `filter` TypeError, and a malformed entry throws
+ * naming its index.
  */
 export function mismatchedPayouts(
   tasks: readonly TaskLifecycle[],
 ): TaskLifecycle[] {
+  // Same-family sibling of the #1341 guards: without this, a
+  // non-array batch died as a bare `filter` TypeError here while its
+  // entries were already guarded one level down, inside
+  // payoutMismatch.
+  assertTaskBatch(tasks, "mismatchedPayouts");
   return tasks.filter((task) => payoutMismatch(task) !== undefined);
 }
 

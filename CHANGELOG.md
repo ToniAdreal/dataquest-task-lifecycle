@@ -124,6 +124,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Settlement read helpers reject malformed inputs instead of dying
+  as a bare `TypeError` or silently answering (2026-11-23, backlog
+  #1341): `totalPaidOut()` / `totalQuoted()` iterated their batch
+  with no shape check, so `null` died as `tasks is not iterable`,
+  a `null` entry died reading `state`, and worse, a string batch
+  iterated its characters and silently answered 0 ("zero paid out"
+  / "zero quoted"); `payoutMismatch()` dereferenced its task the
+  same way, so `null` died reading `state` and a plain `{}` silently
+  answered `undefined` — the same answer a genuinely un-mismatched
+  task gives. All three now fail fast through the shared
+  `assertTaskBatch` / `assertTask` guards: a non-array batch throws
+  `invalid <fn>: tasks must be an array`, a non-task entry throws
+  naming its index, and a malformed single task throws
+  `invalid payoutMismatch: task must be a TaskLifecycle`. The guard
+  is a shape check — a string `id`, a string `state`, and an array
+  `history` — not `instanceof TaskLifecycle`, following
+  `reconcilePayouts` (backlog #1337), so a defensive stand-in
+  shaped like a task (backlog #893) still reads. The batch form
+  `mismatchedPayouts()` carries the same guard as a same-family
+  sibling: without it a non-array batch died as a bare `filter`
+  TypeError while its entries were already guarded one level down.
+  Legal batches keep exactly their old figures. New
+  `test/settlementReadShape.test.ts` (20 cases, including the
+  string-batch silent-0 and `{}` silent-`undefined` probes, the
+  stand-ins still passing, and the `mismatchedPayouts` sibling),
+  and the test count rises by twenty (1930 to 1950 tests).
+
 - `verifyHistoryChain` rejects non-array histories and non-object
   entries instead of dying as a bare `TypeError` (2026-11-23,
   backlog #1339): the boolean verifier delegated straight to
