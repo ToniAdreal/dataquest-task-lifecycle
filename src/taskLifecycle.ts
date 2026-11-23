@@ -2332,23 +2332,39 @@ export interface ReconcilePayoutsResult {
  *    no recorded amount cannot be checked against a ledger by
  *    amount.
  *
- * Fail-fast, before any pairing: a task id appearing twice in the
- * batch throws `duplicate task` — the same task object passed twice,
- * or two objects sharing one id, would otherwise be counted as two
- * tasks sharing a reference and double the batch sum (a ledger row
+ * Fail-fast, before any pairing: the batch itself must be an array,
+ * and every entry must be a task object carrying a string `id`, a
+ * string `state`, and an array `history` — anything else throws
+ * `tasks[<i>] must be a task object with a string id, string state,
+ * and array history`, naming the first offending index. The guard
+ * checks the shape the function actually reads, not the class: the
+ * codebase deliberately passes defensive stand-ins shaped like a
+ * task (a PAID task with no `PAYOUT_COMPLETE` entry at all, backlog
+ * #893), so an `instanceof TaskLifecycle` check would reject a
+ * tested contract. A shape narrower than this would not be enough
+ * either: an id-only object would never pair and land in no group,
+ * so without the `state`/`history` legs it would slip through
+ * silently, letting the batch report "nothing to reconcile". The
+ * task-side shape check runs before any ledger validation, so the
+ * task error is the one the caller sees even when the ledger is also
+ * malformed — the same precedence the duplicate-task check below
+ * already had. A task id appearing twice in the batch throws
+ * `duplicate task` — the same task object passed twice, or two
+ * objects sharing one id, would otherwise be counted as two tasks
+ * sharing a reference and double the batch sum (a ledger row
  * recording exactly the doubled sum would then "match" money that
- * was paid once). A ledger row that is not an object, carries an
- * empty, non-string, or overlong (longer than
- * {@link MAX_PAYOUT_REF_LENGTH} characters) `payoutRef`, or carries a
- * non-finite, negative, or sub-cent (more than 2 decimal places)
- * `payoutAmount` throws, and a reference
- * appearing twice in the ledger throws `duplicate ledger payoutRef`
- * — a duplicated ledger row would otherwise make "matched" ambiguous
- * (which row did the task pair with?). The task side needs no other
- * such check: duplicate references across distinct tasks are
- * legitimate batch settlements, as above. One more fail-fast lives in
- * the pairing itself: summing a shared reference's amounts in minor
- * units can overflow on legacy giant amounts (the same
+ * was paid once). The ledger must likewise be an array
+ * (`ledger must be an array`), and a ledger row that is not an
+ * object, carries an empty, non-string, or overlong (longer than
+ * {@link MAX_PAYOUT_REF_LENGTH} characters) `payoutRef`, or carries
+ * a non-finite, negative, or sub-cent (more than 2 decimal places)
+ * `payoutAmount` throws, and a reference appearing twice in the
+ * ledger throws `duplicate ledger payoutRef` — a duplicated ledger
+ * row would otherwise make "matched" ambiguous (which row did the
+ * task pair with?). Duplicate references across distinct tasks stay
+ * legitimate batch settlements, as above. One more fail-fast lives
+ * in the pairing itself: summing a shared reference's amounts in
+ * minor units can overflow on legacy giant amounts (the same
  * {@link totalPaidOut} overflow contract), and that throws instead
  * of silently wrapping the sum — a single-task reference never sums,
  * so it never throws here.
@@ -2361,20 +2377,44 @@ export function reconcilePayouts(
   tasks: readonly TaskLifecycle[],
   ledger: readonly LedgerPayout[],
 ): ReconcilePayoutsResult {
-  // A task id may appear only once in the batch: the same object
-  // passed twice, or two objects sharing one id, would otherwise be
-  // counted as two tasks sharing a reference and double the batch
-  // sum. Checked before any ledger validation, so the duplicate-task
-  // error is the one the caller sees even when the ledger is also
-  // malformed — and before any pairing, so no group is ever placed.
+  if (!Array.isArray(tasks)) {
+    throw new Error("invalid reconcilePayouts: tasks must be an array");
+  }
+  // A task entry must be a task-shaped object: the duplicate-id scan
+  // below reads task.id and the pairing loop reads task.state and
+  // task.history, so a null, a primitive, or an object missing any of
+  // those legs would either die as a bare TypeError or — worse — slip
+  // through silently (a non-PAID-looking entry never pairs and never
+  // lands in any group, so the batch reports "nothing to
+  // reconcile"). The check is a shape check, not instanceof: the
+  // codebase deliberately passes defensive stand-ins shaped like a
+  // task (backlog #893), and those must keep passing. Checked in
+  // input order, before the duplicate-id scan and before any ledger
+  // validation, so the first malformed entry is the error the caller
+  // sees even when the ledger is also malformed.
   const seenTaskIds = new Set<string>();
-  for (const task of tasks) {
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    if (
+      task === null ||
+      typeof task !== "object" ||
+      typeof task.id !== "string" ||
+      typeof task.state !== "string" ||
+      !Array.isArray(task.history)
+    ) {
+      throw new Error(
+        `invalid reconcilePayouts: tasks[${i}] must be a task object with a string id, string state, and array history, got ${JSON.stringify(task)}`,
+      );
+    }
     if (seenTaskIds.has(task.id)) {
       throw new Error(
         `invalid reconcilePayouts: duplicate task ${JSON.stringify(task.id)}`,
       );
     }
     seenTaskIds.add(task.id);
+  }
+  if (!Array.isArray(ledger)) {
+    throw new Error("invalid reconcilePayouts: ledger must be an array");
   }
 
   const ledgerByRef = new Map<string, LedgerPayout>();

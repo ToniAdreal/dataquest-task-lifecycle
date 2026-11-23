@@ -124,6 +124,32 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `reconcilePayouts` rejects malformed task entries and non-array
+  inputs (2026-11-23, backlog #1337): the duplicate-task pre-scan
+  used to dereference `task.id` with no guard, while the ledger side
+  of the same function validates strictly — so `reconcilePayouts([null], [])`
+  died as a bare `TypeError`, a string tasks value silently returned
+  five empty groups (each character read as a task with
+  `id === undefined` / `state === undefined`), and a plain object
+  with a string id slipped through the same way, landing in no group
+  at all. The batch must now be an array (`tasks must be an array` /
+  `ledger must be an array`), and every entry must be a task-shaped
+  object — a string `id`, a string `state`, and an array `history` —
+  or it throws naming the first offending index, before the
+  duplicate-id scan and before any ledger validation (so the task
+  error is the one the caller sees even when the ledger is also
+  malformed, the precedence the duplicate-task check already had).
+  The guard is deliberately a shape check, not `instanceof
+  TaskLifecycle`: the first attempt at this item used `instanceof`
+  and broke the three `payoutAgingReconcileConsistency` tests, which
+  deliberately pass a plain-object defensive stand-in (a PAID task
+  with no `PAYOUT_COMPLETE` entry at all, backlog #893) — the shape
+  the function actually reads is the contract, and the stand-in
+  keeps reconciling into `unreconciled`. New
+  `test/reconcilePayoutsTaskShape.test.ts` (14 cases, including the
+  stand-in still passing), and the test count rises by fourteen
+  (1899 to 1913 tests).
+
 - `isOverdue` / `expiredTasks` fail fast on an invalid `now`
   (2026-11-22, backlog #1334, overturning #1248's silent-empty
   decision to align with escrow #1259): `isOverdue` used to read

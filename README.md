@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1899 tests, all local
+npm test   # 1913 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1312,8 +1312,13 @@ ledger row of 199.996 can never be rounded into a match against a
 200.00 batch total); a task id appearing twice in the batch throws too
 (`duplicate task`), whether it is the same object passed twice or
 two objects sharing one id — counting one task twice would double
-the batch sum, so the batch is rejected before any pairing. Pure,
-like the other screens.
+the batch sum, so the batch is rejected before any pairing. A task
+entry that is not a task-shaped object — null, a primitive, or an
+object missing a string `id`, a string `state`, or an array `history`
+— throws too, naming the first offending index, as does a non-array
+tasks or ledger value; a plain object shaped like a task (a defensive
+stand-in with no completion entry at all) still reconciles and lands
+in `unreconciled`. Pure, like the other screens.
 
 ### Payout amounts
 
@@ -2805,7 +2810,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1899 tests covering the happy path, reject→resubmit
+`npm test` runs 1913 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
