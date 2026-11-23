@@ -124,6 +124,30 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `verifyHistoryChain` rejects non-array histories and non-object
+  entries instead of dying as a bare `TypeError` (2026-11-23,
+  backlog #1339): the boolean verifier delegated straight to
+  `findFirstChainBreak`, which dereferenced `history.length` and
+  `history.map` with no shape check — while its sibling
+  `parseHistory` throws `invalid history: history must be an array`
+  and `replay` inherits that guard, so the verifier was the only
+  history entry point without one. `verifyHistoryChain(null)` died
+  as `TypeError: Cannot read properties of null (reading 'length')`,
+  and worse, `verifyHistoryChain(["x"])` silently returned `true`:
+  a string entry carries no hash fields, so the walk read it as a
+  fully hashless legacy history. The verifier now throws in the same
+  words as `parseHistory` — a non-array history throws
+  `invalid history: history must be an array`, a non-object entry
+  throws `invalid history: entry[N]: entry must be an object`
+  naming the first offending index — checked in the same order as
+  `parseHistory` (the `auditSecret` configuration error first, then
+  the shape guards). A well-shaped history whose chain is broken
+  still returns `false`, never throws. New
+  `test/verifyHistoryChainShape.test.ts` (17 cases, including the
+  string-entry silent-`true` case and the secret-error-first
+  precedence), and the test count rises by seventeen (1913 to 1930
+  tests).
+
 - `reconcilePayouts` rejects malformed task entries and non-array
   inputs (2026-11-23, backlog #1337): the duplicate-task pre-scan
   used to dereference `task.id` with no guard, while the ledger side

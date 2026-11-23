@@ -4301,8 +4301,21 @@ function findFirstChainBreak(
  * chain compares digests with plain equality (its digests are not
  * keyed secrets, so there is no oracle to protect).
  *
- * Note: this checks integrity only, not structure. A re-sequenced or
- * structurally invalid history still needs parseHistory (via
+ * Shape failures are caller bugs and throw, in the same words as
+ * {@link parseHistory}: a non-array history throws
+ * `invalid history: history must be an array`, and a non-object entry
+ * throws `invalid history: entry[N]: entry must be an object` naming
+ * the first offending index. The checks run in the same order as
+ * `parseHistory` — the `auditSecret` configuration error first, then
+ * the shape guards — so a bad secret is the error the caller sees
+ * even when the history is also malformed. A history that is
+ * well-shaped but whose chain is broken still returns `false`, never
+ * throws: throwing is reserved for input the function cannot even
+ * walk, not for a verdict.
+ *
+ * Note: beyond the array/object shape above, this checks integrity
+ * only, not structure. A re-sequenced or structurally invalid history
+ * still needs parseHistory (via
  * {@link TaskLifecycle.fromJSON} / {@link replay}) for the seq/edge/
  * timestamp rules. It answers only whether the chain holds; when the
  * answer is `false`, {@link parseHistory} names the first entry where
@@ -4314,6 +4327,14 @@ export function verifyHistoryChain(
 ): boolean {
   const secret = opts?.auditSecret;
   if (secret !== undefined) assertAuditSecret(secret, "invalid audit secret");
+  if (!Array.isArray(history)) {
+    throw new Error("invalid history: history must be an array");
+  }
+  for (let i = 0; i < history.length; i++) {
+    if (!isRecord(history[i])) {
+      throw new Error(`invalid history: entry[${i}]: entry must be an object`);
+    }
+  }
   return findFirstChainBreak(history, secret) === null;
 }
 

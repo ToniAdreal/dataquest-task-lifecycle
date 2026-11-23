@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1913 tests, all local
+npm test   # 1930 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1001,6 +1001,14 @@ import { verifyHistoryChain } from "dataquest-task-lifecycle";
 
 verifyHistoryChain(log); // true when intact; false on tampering, deletion, or reordering
 ```
+
+Shape failures are caller bugs, not verdicts: a non-array history
+throws `invalid history: history must be an array`, and a non-object
+entry throws `invalid history: entry[N]: entry must be an object`
+naming the first offending index — the same words `parseHistory`
+uses, checked in the same order (the `auditSecret` configuration
+error first, then the shape guards). A well-shaped history whose
+chain is broken still returns `false`, never throws.
 
 Honest limit: by default this is an *unkeyed* chain. It detects edits
 by anyone who rewrites entries without recomputing the chain (manual
@@ -2810,7 +2818,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1913 tests covering the happy path, reject→resubmit
+`npm test` runs 1930 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
