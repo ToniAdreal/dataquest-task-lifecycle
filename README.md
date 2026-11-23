@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 1966 tests, all local
+npm test   # 1973 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1940,7 +1940,13 @@ network errors (including timeouts) are retried; other 3xx/4xx fail
 immediately (redirects are never followed with the signed payload). A
 429 `Retry-After` hint (delay-seconds or HTTP-date) wins over backoff
 and is clamped to `maxRetryDelayMs: 60000` by default, so a runaway
-hint can never stall delivery. An optional `signal` (`AbortSignal`)
+hint can never stall delivery. Every wait actually armed — the
+exponential backoff, a clamped 429 hint, the per-attempt timeout,
+and the fan-out overall deadline — is further capped at the Node
+`setTimeout` ceiling (`2^31 - 1` ms, about 24.8 days): a schedule
+that grows past it waits the ceiling instead of misfiring after
+1ms, and timeout/deadline error text still reports the configured
+value. An optional `signal` (`AbortSignal`)
 lets the caller cancel a delivery — a process shutting down, a job
 being cancelled: aborting stops an in-flight request or a pending
 backoff sleep, makes no further attempts, and is reported as
@@ -2826,7 +2832,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 1966 tests covering the happy path, reject→resubmit
+`npm test` runs 1973 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

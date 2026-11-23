@@ -124,6 +124,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Delivery timers obey the Node `setTimeout` ceiling (2026-11-23,
+  backlog #1345, mirroring escrow #1326): Node stores timer delays
+  in a 32-bit signed integer, so a wait past `2^31 - 1` ms (~24.8
+  days) warns and fires after 1ms — and an ordinary configuration
+  grows past it (`backoffMs: 60_000` with 18 attempts reaches
+  3,932,160,000ms, turning a ~45-day backoff into an immediate
+  retry). `src/settlementWebhook.ts` now clamps every armed wait
+  to the ceiling with the shared `clampTimerMs` helper: the
+  delivery-loop backoff (clamped in `sleepWithSignal`, the single
+  choke point, so injected recording sleeps observe the capped
+  schedule — including a 429 `Retry-After` hint already capped to
+  `maxRetryDelayMs`), the default sleep's own timer, the
+  per-attempt timeout in `postOnce`, the fan-out
+  `overallDeadlineMs` timer, and the outbox runner's
+  between-rounds sleep (clamped at its call site, because an
+  injected sleep bypasses `sleepWithSignal`). Small waits pass
+  through unchanged, and timeout/deadline error text still reports
+  the configured value — only the armed timer is capped. The
+  `backoffMs` / `timeoutMs` / `maxRetryDelayMs` /
+  `overallDeadlineMs` JSDoc and the README retry-policy section
+  document the ceiling. The test count rises by seven (1966 to
+  1973 tests).
+
 - Batch selectors reject malformed batches instead of dying as a
   bare `TypeError` or silently passing a `null` through (2026-11-23,
   backlog #1342): `unreconciledPayouts()` / `expiredTasks()` /
