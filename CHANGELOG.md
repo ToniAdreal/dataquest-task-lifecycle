@@ -124,6 +124,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `isSettlementComplete` rejects malformed tasks and history entries
+  instead of dying as a bare `TypeError` (2026-11-24, backlog #1362):
+  the settlement-complete predicate read `task.state` and walked
+  `task.history` with no shape check at all, so a `null` task died
+  reading `state` and a PAID hand-built stand-in carrying a `null`
+  history entry died reading `event` — the same bare-`TypeError`
+  hole the batch settlement readers had already closed for their
+  batch entries (#1337/#1341/#1342), while the predicate's own
+  entry scan was left open. The predicate now fails fast through
+  the shared single-task shape guard `assertTask` (string `id`,
+  string `state`, array `history`, the same guard `payoutMismatch`
+  uses), and a non-object history entry throws naming its index
+  (`invalid isSettlementComplete: entry[N]: …`), the `entry[N]`
+  convention `verifyHistoryChain` uses (#1339). The guard is a
+  shape check, not `instanceof TaskLifecycle`, so the #893
+  defensive stand-in — a PAID task with no `PAYOUT_COMPLETE` entry
+  at all — still returns false. `unreconciledPayouts` and
+  `reconcilePayouts` inherit both guards through the shared
+  predicate: their own batch guards check only the task shape, and
+  the entry scan here is the one place the history is walked. The
+  test count rises by fourteen (1988 to 2002 tests).
+
 - Single-axis batch selectors reject malformed batches instead of
   dying as a bare `TypeError` (2026-11-23, backlog #1350): the
   remaining five selectors from backlog #1342 —

@@ -1488,12 +1488,37 @@ export function actOnStaleTasks(
  * predicate aligns with that screen rather than with the state alone.
  *
  * Pure: reads the task, never mutates or dispatches.
+ *
+ * Shape guard (backlog #1362): a task that is not a task-shaped
+ * object — a string `id`, a string `state`, and an array `history` —
+ * throws `invalid isSettlementComplete: task must be a
+ * TaskLifecycle` fail-fast (shared guard {@link assertTask}, the
+ * same one {@link payoutMismatch} uses), instead of dying as a bare
+ * `TypeError` reading `state`. A history entry that is not an object
+ * throws `invalid isSettlementComplete: entry[N]: …` naming the
+ * offending index, the same `entry[N]` convention
+ * {@link verifyHistoryChain} uses. The guard is a shape check, not
+ * `instanceof TaskLifecycle`, so the #893 defensive stand-in — a
+ * PAID task with no `PAYOUT_COMPLETE` entry at all — still passes.
+ * {@link unreconciledPayouts} and {@link reconcilePayouts} inherit
+ * both guards through this shared predicate: their own batch guards
+ * check only the task shape, and the entry scan here is the one
+ * place the history is walked.
  */
 export function isSettlementComplete(task: TaskLifecycle): boolean {
+  assertTask(task, "isSettlementComplete");
   if (task.state !== "PAID") return false;
   let complete: TaskHistoryEntry | undefined;
-  for (const entry of task.history) {
-    if (entry.event === "PAYOUT_COMPLETE") complete = entry;
+  for (let i = 0; i < task.history.length; i++) {
+    const entry = task.history[i];
+    if (!isRecord(entry)) {
+      throw new Error(
+        `invalid isSettlementComplete: entry[${i}]: history entry must be an object, got ${entry === null ? "null" : typeof entry}`,
+      );
+    }
+    if (entry.event === "PAYOUT_COMPLETE") {
+      complete = entry as unknown as TaskHistoryEntry;
+    }
   }
   if (complete === undefined) return false;
   return (
