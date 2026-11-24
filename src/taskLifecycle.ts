@@ -401,11 +401,23 @@ export interface NextSlaDeadline {
  *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
  *
  * An invalid `now` fails fast instead of silently returning undefined.
+ *
+ * Fail-fast, before any deadline is read (backlog #1363, shared guard
+ * {@link assertTaskInstanceBatch}): a non-array batch, or a batch
+ * entry that is not a `TaskLifecycle`, throws `invalid
+ * nextSlaDeadline: …` naming the offending index. The guard runs
+ * before the `now` check, so a malformed batch is never masked by a
+ * bad `now`. The `instanceof` strength is the same as
+ * {@link expiredTasks} and {@link staleTasks}: the scan reads
+ * `isTerminal` and calls `getSlaDeadline()`, which only a real task
+ * guarantees — a shape-only stand-in is rejected here, unlike the
+ * shape-guarded settlement readers.
  */
 export function nextSlaDeadline(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): NextSlaDeadline | undefined {
+  assertTaskInstanceBatch("nextSlaDeadline", tasks);
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {
     throw new Error("invalid now: expected a valid Date");
@@ -480,11 +492,23 @@ export interface NextTaskDeadline {
  *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
  *
  * An invalid `now` fails fast instead of silently returning undefined.
+ *
+ * Fail-fast, before any deadline is read (backlog #1363, shared guard
+ * {@link assertTaskInstanceBatch}): a non-array batch, or a batch
+ * entry that is not a `TaskLifecycle`, throws `invalid
+ * nextTaskDeadline: …` naming the offending index. The guard runs
+ * before the `now` check, so a malformed batch is never masked by a
+ * bad `now`. The `instanceof` strength is the same as
+ * {@link nextSlaDeadline}: the scan reads `isTerminal` and calls
+ * `getSlaDeadline()`, which only a real task guarantees — a
+ * shape-only stand-in is rejected here, unlike the shape-guarded
+ * settlement readers.
  */
 export function nextTaskDeadline(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): NextTaskDeadline | undefined {
+  assertTaskInstanceBatch("nextTaskDeadline", tasks);
   const nowMs = now.getTime();
   if (!Number.isFinite(nowMs)) {
     throw new Error("invalid now: expected a valid Date");
@@ -532,11 +556,23 @@ export function nextTaskDeadline(
  * as "no tasks in this state". Terminal states filter exactly like any
  * other state — unlike the watchdog screens, this helper has no
  * terminal exclusion to apply.
+ *
+ * Fail-fast, before the state is validated (backlog #1363, shared
+ * guard {@link assertTaskInstanceBatch}): a non-array batch, or a
+ * batch entry that is not a `TaskLifecycle`, throws `invalid
+ * tasksByState: …` naming the offending index, so a `null` batch no
+ * longer dies as a bare `filter` TypeError and a malformed batch is
+ * never masked by an unknown state. The `instanceof` strength is
+ * the same as {@link expiredTasks} — the last single-axis selector
+ * from backlog #1350 still unguarded — so a shape-only stand-in is
+ * rejected here, unlike the shape-guarded `tasksByActor` /
+ * `tasksByPayoutRef` / `tasksByEvent` selectors.
  */
 export function tasksByState(
   tasks: readonly TaskLifecycle[],
   state: TaskState,
 ): TaskLifecycle[] {
+  assertTaskInstanceBatch("tasksByState", tasks);
   if (!STATES.has(state)) {
     throw new Error(`invalid tasksByState: unknown state "${String(state)}"`);
   }
@@ -2209,6 +2245,21 @@ export interface TaskSettlementsSummary {
  * snapshots stay readable (their acceptance is unchanged); only
  * summarizing them fails, loudly.
  *
+ * Fail-fast, before any figure is summed (backlog #1363, shape
+ * guard {@link assertTaskBatch}): a non-array batch throws
+ * `invalid summarizeTaskSettlements: tasks must be an array`, and a
+ * batch entry that is not a task-shaped object (a string `id`, a
+ * string `state`, and an array `history`) throws naming its index —
+ * so a `null` batch no longer dies as a bare `tasks is not
+ * iterable` TypeError. The guard is a shape check, not `instanceof
+ * TaskLifecycle`: the summary reads only `id`, `state`, and
+ * `history` (and {@link payoutMismatch} shape-guards each PAID
+ * task the same way), so the #893 defensive stand-in — a PAID task
+ * with no `PAYOUT_COMPLETE` entry at all — keeps passing, the same
+ * choice the other settlement readers made (backlog #1341). The
+ * guard runs before the duplicate-id scan below, so a malformed
+ * entry is never masked by a duplicate id.
+ *
  * Fail-fast, before any figure is summed: a task id appearing twice
  * in the batch throws `invalid summarizeTaskSettlements: duplicate
  * task "<id>"` and returns no summary — the same task counted twice
@@ -2231,6 +2282,11 @@ export function summarizeTaskSettlements(
     new Error(
       "task settlements summary computation overflowed: inputs too large",
     );
+  // Batch-shape first (backlog #1363): without this, a non-array
+  // batch died as a bare `tasks is not iterable` TypeError here
+  // while its entries were already guarded one level down, inside
+  // payoutMismatch.
+  assertTaskBatch(tasks, "summarizeTaskSettlements");
   // A task id may appear only once in the batch: the same object
   // passed twice, or two objects sharing one id, would otherwise be
   // counted twice and double the batch totals. Checked before any

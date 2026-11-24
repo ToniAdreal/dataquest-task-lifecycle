@@ -124,6 +124,29 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Batch settlement and SLA readers reject malformed batches instead
+  of dying as a bare `TypeError` (2026-11-24, backlog #1363): the
+  last four unguarded batch readers — `nextSlaDeadline()` /
+  `nextTaskDeadline()` / `tasksByState()` /
+  `summarizeTaskSettlements()` — iterated their batch with no array
+  check at all, so a `null` batch died as `tasks is not iterable`
+  (the first three) or `reading 'filter'` (`tasksByState`), and a
+  `[null]` batch died reading `isTerminal`, `state`, or `id` one
+  step in. The deadline readers and `tasksByState` now fail fast
+  through the shared `assertTaskInstanceBatch` guard (backlog
+  #1342): they read `isTerminal` and call `getSlaDeadline()`, and
+  `tasksByState` is held to the same strength as `expiredTasks`,
+  so a shape-only stand-in is rejected by all three. The summary
+  now fails fast through the shared shape guard `assertTaskBatch`
+  (backlog #1341): it reads only `id`, `state`, and `history`, and
+  `payoutMismatch` shape-guards each PAID task the same way, so
+  the #893 defensive stand-in — a PAID task with no
+  `PAYOUT_COMPLETE` entry at all — keeps passing. In all four the
+  guard runs before any secondary validation (`now`, the state,
+  the duplicate-id scan), so a malformed batch is never masked by
+  another bad value. The test count rises by twenty-one (2002 to
+  2023 tests).
+
 - `isSettlementComplete` rejects malformed tasks and history entries
   instead of dying as a bare `TypeError` (2026-11-24, backlog #1362):
   the settlement-complete predicate read `task.state` and walked
