@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2057 tests, all local
+npm test   # 2066 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -601,6 +601,10 @@ stateDiagram-v2
   (seq, event, from → to, ISO timestamp), optional (actor, note,
   payoutRef, payoutAmount), and a `prevHash`/`hash` SHA-256 audit chain.
 - `allowedEvents(state)` / `isTerminal(state)` helpers for UI gating.
+  All three state helpers fail fast on an unknown state
+  (`invalid transition:` / `invalid allowedEvents:` /
+  `invalid isTerminal: unknown state …`); a mistyped state never
+  silently reads as "no transition" / "no events" / "not terminal".
 - Terminal states: `PAID`, `ABANDONED`, `EXPIRED`.
 - `transitionTableJson()` exports the whole transition table as canonical
   JSON; `test/__snapshots__/transitionTable.snapshot.json` is the committed
@@ -2832,7 +2836,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2057 tests covering the happy path, reject→resubmit
+`npm test` runs 2066 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

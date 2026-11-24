@@ -124,6 +124,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `isTerminal` rejects null/unknown states with a named error
+  (2026-11-24, backlog #1384): the terminal-state check read
+  `TERMINAL.has(state)` with no state guard, so `null`, a number,
+  or a mistyped state (`"x"`, `"PAIDD"`, `"paid"`) silently returned
+  `false` — "not terminal" — the last fail-open hole in the
+  `transition` (#1365) / `allowedEvents` (#1367) family, where a
+  watchdog or UI gate could treat a task as still actionable. It
+  now throws `invalid isTerminal: unknown state …` before the
+  lookup, with the offending value spelled out (strings quoted);
+  the guard uses `Object.hasOwn`, so prototype-chain names
+  (`"toString"`, `"constructor"`) are rejected as unknown states
+  instead of being read off `Object.prototype`. Legal states are
+  unchanged (PAID / ABANDONED / EXPIRED terminal, the other ten
+  not); the instance getter already delegates to the pure function,
+  so its behaviour is unchanged. Nine new tests in
+  `test/isTerminalShape.test.ts`, including a mutation check (guard
+  disabled → the five illegal-input cases go red, the four legal
+  cases stay green) and a cross-check that the terminal set equals
+  the states with no outgoing edges in `transitionTable()`; the test
+  count rises by nine (2057 to 2066 tests).
+
 - `isOverdue` rejects a non-`TaskLifecycle` task with a named error
   (2026-11-24, backlog #1371): the single-task read path was the
   last hole the batch guard (#1342) did not cover — a direct

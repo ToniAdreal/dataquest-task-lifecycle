@@ -267,7 +267,29 @@ export function allowedEvents(state: TaskState): TaskEvent[] {
   return Object.keys(TRANSITIONS[state]) as TaskEvent[];
 }
 
+/**
+ * Is a state terminal (no outgoing transitions)?
+ *
+ * A state outside the state set fails fast with a named error
+ * (`invalid isTerminal: unknown state …`) instead of silently
+ * returning `false` for a mistyped or uninitialised state. Same
+ * guard shape as {@link transition} (backlog #1365) and
+ * {@link allowedEvents} (backlog #1367): `Object.hasOwn` (not `in`)
+ * so prototype-chain names such as "toString" are rejected as
+ * unknown states rather than read off `Object.prototype`. The
+ * terminal set is `PAID`, `ABANDONED`, `EXPIRED` — exactly the
+ * states with no outgoing edges in {@link transitionTable}.
+ */
 export function isTerminal(state: TaskState): boolean {
+  if (typeof state !== "string" || !Object.hasOwn(TRANSITIONS, state)) {
+    const got =
+      state === null
+        ? "null"
+        : typeof state === "string"
+          ? `"${state}"`
+          : String(state);
+    throw new Error(`invalid isTerminal: unknown state ${got}`);
+  }
   return TERMINAL.has(state);
 }
 
