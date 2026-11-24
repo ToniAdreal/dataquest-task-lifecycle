@@ -288,8 +288,21 @@ export function isTerminal(state: TaskState): boolean {
  * funnel every other `now` entry in this file reads through —
  * {@link expiredTasks}, the `overdue` axis of {@link tasksByFilters},
  * and {@link expireOverdueTasks} all inherit the guard.
+ *
+ * A task that is not a `TaskLifecycle` throws
+ * `invalid isOverdue: task must be a TaskLifecycle, got …`
+ * fail-fast, before the `now` check (backlog #1371, single form of
+ * the shared guard {@link assertTaskInstanceBatch}): the deadline
+ * read calls `task.getSlaDeadline()`, which only a real task
+ * guarantees — a `null` task used to die as a bare `TypeError`
+ * there, and a shape-only stand-in would die the same way at the
+ * method call, so the guard is `instanceof`, not a shape scan (the
+ * same trade-off {@link expiredTasks} documents). The guard runs
+ * before the `now` check, matching the batch selectors' order, so a
+ * malformed task is never masked by a bad clock value.
  */
 export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean {
+  assertTaskInstance("isOverdue", task);
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
@@ -1882,6 +1895,23 @@ export function parseMinorUnits(text: string): number {
   const minorUnits = Number(total);
   if (minorUnits === 0) return 0;
   return match[1] === "-" ? -minorUnits : minorUnits;
+}
+
+/**
+ * Single-task form of {@link assertTaskInstanceBatch} (backlog #1371):
+ * the task must be a `TaskLifecycle`, checked with `instanceof`, not
+ * a shape scan. The single-task readers call `task.getSlaDeadline()`
+ * (and read `state` / `isTerminal`), which only a real task
+ * guarantees — a shape-only stand-in passes a property scan and
+ * still dies at the method call, so the `instanceof` trade-off is
+ * the same as the batch guard's (see {@link expiredTasks}).
+ */
+function assertTaskInstance(fnName: string, task: unknown): void {
+  if (!(task instanceof TaskLifecycle)) {
+    throw new Error(
+      `invalid ${fnName}: task must be a TaskLifecycle, got ${task === null ? "null" : typeof task}`,
+    );
+  }
 }
 
 /**

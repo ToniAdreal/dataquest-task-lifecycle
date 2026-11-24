@@ -124,6 +124,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `isOverdue` rejects a non-`TaskLifecycle` task with a named error
+  (2026-11-24, backlog #1371): the single-task read path was the
+  last hole the batch guard (#1342) did not cover — a direct
+  `isOverdue(null)` died as a bare `TypeError` (`Cannot read
+  properties of null (reading 'getSlaDeadline')`), and a shape-only
+  stand-in would die the same way at the method call. It now throws
+  `invalid isOverdue: task must be a TaskLifecycle, got …` before
+  the `now` check (matching the batch selectors' guard order), via
+  the new single form `assertTaskInstance` of the shared
+  `instanceof` guard; a real task with an invalid `now` still throws
+  `invalid now: expected a valid Date`, and overdue / boundary /
+  terminal / no-deadline answers are unchanged. Eight new tests in
+  `test/isOverdueShape.test.ts`, including a mutation check (guard
+  removed → the four guard cases go red); the test count rises by
+  eight (2049 to 2057 tests).
+
 - `allowedEvents` rejects null/unknown states with a named error
   (2026-11-24, backlog #1367): the UI-gating helper read
   `Object.keys(TRANSITIONS[state])` with no state guard, so `null`
