@@ -124,6 +124,22 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `transition` rejects null/unknown states with a named error
+  (2026-11-24, backlog #1365): the pure transition function read
+  `TRANSITIONS[state][event]` with no state guard, so `null` died as
+  a bare `TypeError` (`Cannot read properties of undefined (reading
+  'PUBLISH')`) and a mistyped state (`"x"`, `42`, `"draft"`) the
+  same. It now throws `invalid transition: unknown state …` before
+  the lookup, with the offending value spelled out (strings quoted);
+  a valid state with an illegal event keeps the existing
+  `invalid transition: <event> from <state>` error, including
+  terminal states, which have no outgoing edges. The guard uses
+  `Object.hasOwn`, so prototype-chain names (`"toString"`,
+  `"constructor"`) are rejected as unknown states instead of being
+  read off `Object.prototype`. Nine new tests in
+  `test/transitionShape.test.ts`; the escrow mirror lands in the
+  same commit series (backlog #1365).
+
 - `truncateOutboxError` rejects non-string input with a named error
   (2026-11-24, backlog #1364): the helper read `.length`/`.slice`
   with no type guard, so `null` died as a bare `TypeError`

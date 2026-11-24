@@ -208,8 +208,27 @@ export function stateDiagram(): string {
   return lines.join("\n");
 }
 
-/** Pure transition function: current state + event -> next state. */
+/**
+ * Pure transition function: current state + event -> next state.
+ *
+ * A state outside the state set fails fast with a named error
+ * (`invalid transition: unknown state …`) instead of dying as a bare
+ * `TypeError` on `TRANSITIONS[state][event]`; a valid state with an
+ * illegal event keeps the existing `invalid transition: <event> from
+ * <state>` error. The guard uses `Object.hasOwn` (not `in`) so
+ * prototype-chain names such as "toString" are rejected as unknown
+ * states rather than read off `Object.prototype`.
+ */
 export function transition(state: TaskState, event: TaskEvent): TaskState {
+  if (typeof state !== "string" || !Object.hasOwn(TRANSITIONS, state)) {
+    const got =
+      state === null
+        ? "null"
+        : typeof state === "string"
+          ? `"${state}"`
+          : String(state);
+    throw new Error(`invalid transition: unknown state ${got}`);
+  }
   const next = TRANSITIONS[state][event];
   if (!next) throw new Error(`invalid transition: ${event} from ${state}`);
   return next;
