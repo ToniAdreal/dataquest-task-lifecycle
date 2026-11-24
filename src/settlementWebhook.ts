@@ -2025,8 +2025,18 @@ const OUTBOX_ERROR_TRUNCATION_MARKER = "…[truncated]";
  * first `MAX_OUTBOX_ERROR_LENGTH - marker.length` characters and end
  * with `…[truncated]`, so a truncated value is always recognizable
  * as truncated and its total length is exactly the cap.
+ *
+ * A non-string input throws a named error instead of a bare
+ * `TypeError` — the outbox records delivery failures reported by
+ * untrusted callers, so a `null` or numeric error must fail loudly
+ * at this boundary rather than crash inside `.length`/`.slice`.
  */
 export function truncateOutboxError(error: string): string {
+  if (typeof error !== "string") {
+    throw new Error(
+      `truncateOutboxError: error must be a string, got ${error === null ? "null" : typeof error}`,
+    );
+  }
   if (error.length <= MAX_OUTBOX_ERROR_LENGTH) return error;
   return (
     error.slice(
