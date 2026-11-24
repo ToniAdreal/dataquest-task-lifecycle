@@ -124,6 +124,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `allowedEvents` rejects null/unknown states with a named error
+  (2026-11-24, backlog #1367): the UI-gating helper read
+  `Object.keys(TRANSITIONS[state])` with no state guard, so `null`
+  died as a bare `TypeError` (`Cannot convert undefined or null to
+  object`) and a mistyped state (`"x"`, `42`, `"draft"`) the same.
+  It now throws `invalid allowedEvents: unknown state …` before the
+  lookup, with the offending value spelled out (strings quoted);
+  legal states return the same event lists as before (13 states,
+  terminal states return an empty array). The guard uses
+  `Object.hasOwn`, so prototype-chain names (`"toString"`,
+  `"constructor"`) are rejected as unknown states instead of being
+  read off `Object.prototype`. Nine new tests in
+  `test/allowedEventsShape.test.ts`; the escrow mirror is backlog
+  #1366.
+
 - `transition` rejects null/unknown states with a named error
   (2026-11-24, backlog #1365): the pure transition function read
   `TRANSITIONS[state][event]` with no state guard, so `null` died as
