@@ -124,6 +124,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `nextSlaDeadline`, `nextTaskDeadline`, `tasksApproachingDeadline`,
+  and `staleTasks` reject a null / non-Date `now` with the named
+  error `invalid now: expected a valid Date` (2026-11-24, backlog
+  #1390): all four read `now.getTime()` directly and only checked
+  the result with `Number.isFinite`, which catches an invalid Date
+  but not `null` or a non-Date — those died as a bare TypeError
+  (`Cannot read properties of null (reading 'getTime')` /
+  `now.getTime is not a function`) from deep inside the scheduler /
+  watchdog path. Each now uses the same front guard as `isOverdue`
+  / `expiredTasks` (`!(now instanceof Date) ||
+  Number.isNaN(now.getTime())`), placed after the existing
+  parameter checks (batch guard, `withinMs`, budget) and before any
+  deadline or dwell time is read, so a broken watchdog clock fails
+  loudly instead of silently reporting "nothing overdue" or
+  returning `undefined`. Four new test files (24 cases) pin the
+  guard, the unchanged valid-`now` selections, the guard-before-read
+  ordering, and the unchanged batch / `withinMs` / budget ordering;
+  the test count rises by twenty-four (2076 to 2100 tests).
+
 - `parsePayoutRetryAfter` rejects a non-string value with a named error
   (2026-11-24, backlog #1387): the parser only handled `null` /
   `undefined` (returning `undefined`) and then called `value.trim()`

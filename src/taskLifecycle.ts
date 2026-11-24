@@ -393,7 +393,9 @@ export function expiredTasks(
  * default is the real clock, so unit tests pin it to a fixed date.
  * `withinMs` must be a non-negative finite number of milliseconds;
  * an invalid value (or an invalid `now`) fails fast instead of
- * silently returning an empty list. A non-array batch, or a batch
+ * silently returning an empty list. The `now` guard matches
+ * {@link isOverdue} — `null`, a non-Date, and an invalid Date all
+ * fail fast with `invalid now: expected a valid Date`. A non-array batch, or a batch
  * entry that is not a `TaskLifecycle`, throws
  * `invalid tasksApproachingDeadline: …` fail-fast, before the
  * `withinMs` check (backlog #1350, shared guard
@@ -419,10 +421,10 @@ export function tasksApproachingDeadline(
       "invalid tasksApproachingDeadline: withinMs must be a non-negative finite number of milliseconds",
     );
   }
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
+  const nowMs = now.getTime();
   return tasks.filter((task) => {
     if (task.isTerminal) return false;
     const deadline = task.getSlaDeadline(task.state);
@@ -474,6 +476,8 @@ export interface NextSlaDeadline {
  *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
  *
  * An invalid `now` fails fast instead of silently returning undefined.
+ * The guard matches {@link isOverdue} — `null`, a non-Date, and an
+ * invalid Date all fail fast with `invalid now: expected a valid Date`.
  *
  * Fail-fast, before any deadline is read (backlog #1363, shared guard
  * {@link assertTaskInstanceBatch}): a non-array batch, or a batch
@@ -491,10 +495,10 @@ export function nextSlaDeadline(
   now: Date = new Date(),
 ): NextSlaDeadline | undefined {
   assertTaskInstanceBatch("nextSlaDeadline", tasks);
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
+  const nowMs = now.getTime();
   let best: NextSlaDeadline | undefined;
   for (const task of tasks) {
     if (task.isTerminal) continue;
@@ -565,6 +569,8 @@ export interface NextTaskDeadline {
  *   // schedule a wake-up at next.deadline, then run expireOverdueTasks()
  *
  * An invalid `now` fails fast instead of silently returning undefined.
+ * The guard matches {@link isOverdue} — `null`, a non-Date, and an
+ * invalid Date all fail fast with `invalid now: expected a valid Date`.
  *
  * Fail-fast, before any deadline is read (backlog #1363, shared guard
  * {@link assertTaskInstanceBatch}): a non-array batch, or a batch
@@ -582,10 +588,10 @@ export function nextTaskDeadline(
   now: Date = new Date(),
 ): NextTaskDeadline | undefined {
   assertTaskInstanceBatch("nextTaskDeadline", tasks);
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
+  const nowMs = now.getTime();
   let best: NextTaskDeadline | undefined;
   for (const task of tasks) {
     if (task.isTerminal) continue;
@@ -1342,7 +1348,9 @@ function assertMaxAgeByState(
  * state too long" (e.g. nobody picked up an OPEN task, a review has been
  * pending for a week). Pure: reads the tasks, never mutates or dispatches.
  * The `now` default is the real clock, so unit tests pin it to a fixed
- * date. A non-array batch, or a batch entry that is not a
+ * date. The `now` guard matches {@link isOverdue} — `null`, a
+ * non-Date, and an invalid Date all fail fast with
+ * `invalid now: expected a valid Date`. A non-array batch, or a batch entry that is not a
  * `TaskLifecycle`, throws `invalid staleTasks: …` fail-fast, before
  * the budget check (backlog #1350, shared guard
  * {@link assertTaskInstanceBatch}): the filter reads `isTerminal`,
@@ -1372,10 +1380,10 @@ export function staleTasks(
 ): TaskLifecycle[] {
   assertTaskInstanceBatch("staleTasks", tasks);
   assertMaxAgeByState(maxAgeByState);
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
+  const nowMs = now.getTime();
   return tasks.filter((task) => {
     if (task.isTerminal) return false;
     const maxAgeMs = maxAgeByState[task.state];
