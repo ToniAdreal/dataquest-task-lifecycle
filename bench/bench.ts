@@ -8358,6 +8358,29 @@ function checkRetryAfterCorpus(where: string): void {
 // One-time exhaustive validation (outside the timed loop): every
 // corpus value returns exactly its hand-written expectation.
 checkRetryAfterCorpus("parsePayoutRetryAfter fixture");
+// Fail-fast pin (outside the timed loop): a non-string value is a
+// caller type error, not an absent hint — it throws the named
+// `parsePayoutRetryAfter: value must be a string, got …` error, never
+// a bare TypeError from `value.trim()`. The timed corpus stays
+// strings/null only, so the timed loop is untouched.
+for (const badValue of [5, true, {}, ["30"], 30n]) {
+  let threwNamedError = false;
+  try {
+    parsePayoutRetryAfter(badValue as unknown as string, RETRY_NOW_MS);
+  } catch (error) {
+    threwNamedError =
+      error instanceof Error &&
+      !(error instanceof TypeError) &&
+      error.message.startsWith(
+        "parsePayoutRetryAfter: value must be a string, got ",
+      );
+  }
+  if (!threwNamedError) {
+    throw new Error(
+      "benchmark self-check failed: parsePayoutRetryAfter non-string value",
+    );
+  }
+}
 
 // Payout-mismatch fixture: a fixed set of 5 tasks covering the five
 // shapes a per-task reconciliation call meets, each built with the

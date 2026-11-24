@@ -124,6 +124,28 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `parsePayoutRetryAfter` rejects a non-string value with a named error
+  (2026-11-24, backlog #1387): the parser only handled `null` /
+  `undefined` (returning `undefined`) and then called `value.trim()`
+  directly, so a number, boolean, object, or bigint died as a bare
+  `TypeError: value.trim is not a function` from deep inside retry
+  scheduling. It now throws
+  `parsePayoutRetryAfter: value must be a string, got …` before any
+  parsing — a non-string can never be a `Retry-After` header value, so
+  it is a caller type error, not an absent hint; silently returning
+  `undefined` would have disguised it as "no hint" and rerouted the
+  retry onto exponential backoff. The `got` value is rendered
+  `JSON.stringify`-style (objects and arrays shown without expanding
+  them), with a `typeof` fallback for bigint and circular structures
+  so the guard itself never throws a `TypeError`. `null` / `undefined`
+  still return `undefined`, and all legal string values (delay-seconds,
+  HTTP-dates, signed and garbage strings) are unchanged; the `nowMs`
+  guard still runs first. Ten new tests in
+  `test/parsePayoutRetryAfterShape.test.ts`, including a mutation check
+  (guard disabled → the six non-string cases go red, the four legal
+  cases stay green) and a bench pin outside the timed loop; the test
+  count rises by ten (2066 to 2076 tests).
+
 - `isTerminal` rejects null/unknown states with a named error
   (2026-11-24, backlog #1384): the terminal-state check read
   `TERMINAL.has(state)` with no state guard, so `null`, a number,

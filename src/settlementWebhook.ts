@@ -3658,6 +3658,13 @@ export interface DeliverWebhookResult {
  * `setTimeout(NaN)` — silently collapsing a server-prescribed 429 backoff
  * into an immediate retry. The check runs before any parsing, so the
  * delay-seconds path and an absent value fail closed on a broken clock too.
+ * A non-string `value` (a number, boolean, object, array, bigint, …) is a
+ * caller type error, not an absent hint, so it throws
+ * `parsePayoutRetryAfter: value must be a string, got …` instead of
+ * returning `undefined`: silently returning would disguise the mistake as
+ * "no hint" and reroute the retry onto exponential backoff, rewriting the
+ * retry schedule. Only `null` / `undefined` mean "absent" — a real
+ * `Retry-After` header value is always a string.
  */
 export function parsePayoutRetryAfter(
   value: string | null | undefined,
@@ -3669,6 +3676,21 @@ export function parsePayoutRetryAfter(
     );
   }
   if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") {
+    // `JSON.stringify` renders objects and arrays without expanding
+    // them; it throws on bigint (and on circular structures), so those
+    // fall back to `typeof` — the guard itself must never throw a
+    // TypeError, which is the failure it exists to prevent.
+    let got: string;
+    try {
+      got = JSON.stringify(value) ?? String(value);
+    } catch {
+      got = typeof value;
+    }
+    throw new Error(
+      `parsePayoutRetryAfter: value must be a string, got ${got}`,
+    );
+  }
   const trimmed = value.trim();
   if (/^\d+(\.\d+)?$/.test(trimmed)) {
     const seconds = Number(trimmed);

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2066 tests, all local
+npm test   # 2076 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -2836,7 +2836,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2066 tests covering the happy path, reject→resubmit
+`npm test` runs 2076 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -3451,7 +3451,11 @@ self-check pins every returned value to the hand-written expectation
 written out in the bench comments (a future date yields its exact
 delta, a past date clamps to 0, and signed / garbage / absent values
 yield `undefined`, so the caller falls back to exponential
-backoff); one timed pass is one full corpus pass of 11 parses. The
+backoff); one timed pass is one full corpus pass of 11 parses. A
+non-string value is not part of the corpus — it throws the named
+`parsePayoutRetryAfter: value must be a string, got …` error instead
+of returning `undefined` (a wrong-typed value is a caller bug, not an
+absent hint), pinned once outside the timed loop. The
 `payoutMismatch` path judges a fixed set of 5 tasks on every
 iteration (fixed dispatch timestamps, no network, no wall clock):
 one settled exactly as quoted, one settled for a different amount,
