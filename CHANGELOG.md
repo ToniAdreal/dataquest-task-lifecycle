@@ -124,6 +124,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `actOnStaleTasks` with an omitted `at` now stamps the screening
+  `now` instead of the wall clock (2026-11-25, backlog #1406): the
+  sibling `expireOverdueTasks` already pins an omitted `at` to the
+  screening `now` (the #552 semantic), but the stale-task executor
+  passed no `at` to its default ABANDON dispatch, so the audit entry
+  carried a fresh wall-clock read — a caller replaying a batch at a
+  fixed `now` (probe: screening 2026-10-06, wall clock 2026-11-25)
+  got audit entries ~50 days after the screening decision. The pin
+  is now resolved after screening (`resolveWatchdogAt(at)` still
+  fails fast on a bad pin first, `staleTasks()` still validates
+  `now`), so an invalid `now` still reports `invalid now: …` rather
+  than a bare RangeError; an explicit `at` pin still wins, and a
+  custom action still manages its own timestamps. New
+  `test/actOnStaleAtDefaultsToNow.test.ts` (8 tests) pins the
+  screening-`now` stamp, both explicit-pin shapes, the identical
+  stamp across a batch, the default-`now` window, replay
+  determinism, the named invalid-`now` error, and the custom-action
+  contract; the README watchdog section now states the #552
+  semantic, and the test count rises by eight (2121 to 2129
+  tests).
+
 - `toMinorUnits` rounds half-cent ties half away from zero instead
   of following `Math.round` toward +Infinity (2026-11-25, backlog
   #1405): the decimal-exact converter #1404 shipped kept

@@ -1037,7 +1037,7 @@ export interface ExpireOverdueResult {
  * bad pin can never half-stamp a batch. `undefined` means "no pin":
  * the executor falls back to the screening `now` (the #552 semantic,
  * mirrored from escrow's `expireOverdueEscrows`), never to the wall
- * clock — see {@link expireOverdueTasks}.
+ * clock — see {@link expireOverdueTasks} and {@link actOnStaleTasks}.
  */
 function resolveWatchdogAt(at: Date | string | undefined): string | undefined {
   if (at === undefined) return undefined;
@@ -1476,14 +1476,19 @@ export interface StaleActionResult {
  * timestamp — a `Date` (normalized with `toISOString()`) or a
  * canonical ISO-8601 string — so deterministic replays get
  * deterministic watchdog entries instead of wall-clock stamps.
- * Omitted, the default dispatch stamps the wall clock, as before.
- * A custom `action` manages its own timestamps: the executor cannot
- * stamp a dispatch it does not make, so `at` is ignored when one is
- * passed (it is still validated fail-fast, so a bad pin is never
- * silently accepted). An `at` earlier than a task's last history
- * entry trips dispatch's non-decreasing-timestamp check and lands
- * as a per-task `{ acted: false, error }` — the batch continues.
- * An invalid `at` throws `invalid at: …` before any action runs.
+ * Omitted, the pin stays the screening `now` (the #552 semantic,
+ * mirrored from {@link expireOverdueTasks}): every entry in the
+ * batch carries the same instant as the screening decision, so a
+ * caller replaying a batch at a fixed `now` needs no `at` pin at
+ * all to stay deterministic — an explicit pin still wins when one
+ * is passed. A custom `action` manages its own timestamps: the
+ * executor cannot stamp a dispatch it does not make, so `at` is
+ * ignored when one is passed (it is still validated fail-fast, so
+ * a bad pin is never silently accepted). An `at` earlier than a
+ * task's last history entry trips dispatch's non-decreasing-timestamp
+ * check and lands as a per-task `{ acted: false, error }` — the
+ * batch continues. An invalid `at` throws `invalid at: …` before
+ * any action runs.
  *
  * Dry run (`opts.dryRun: true`): the safe rehearsal port for an
  * operator about to run a stale-task sweep — the executor screens
@@ -1542,17 +1547,21 @@ export function actOnStaleTasks(
   // ABANDON dispatch below. The pin is validated in a dry run too:
   // the dry run screens the same batch, so a bad pin is rejected
   // before any result is produced.
-  const atIso = resolveWatchdogAt(at);
-  const run: StaleTaskAction =
-    action ??
-    ((task) =>
-      task.dispatch("ABANDON", {
-        actor: "system",
-        ...(atIso !== undefined ? { at: atIso } : {}),
-      }));
+  const atOpt = resolveWatchdogAt(at);
   // staleTasks() validates maxAgeByState and now fail-fast, before any
   // action runs.
   const selected = staleTasks(tasks, maxAgeByState, now);
+  // Omitted, the pin stays the screening `now` (the #552 semantic,
+  // mirrored from `expireOverdueTasks`): the audit entry carries the
+  // same instant as the screening decision, so a caller replaying a
+  // batch at a fixed `now` gets deterministic entries instead of a
+  // wall-clock stamp. Resolved after screening: `now` was validated
+  // fail-fast by `staleTasks()`, so this toISOString() cannot throw a
+  // bare RangeError for an invalid `now`.
+  const atIso = atOpt ?? now.toISOString();
+  const run: StaleTaskAction =
+    action ??
+    ((task) => task.dispatch("ABANDON", { actor: "system", at: atIso }));
   if (opts?.dryRun === true) {
     return selected.map((task) => ({ task, acted: false, wouldAct: true }));
   }

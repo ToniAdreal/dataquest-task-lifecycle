@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2121 tests, all local
+npm test   # 2129 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -810,8 +810,10 @@ const budgets = {
 // action omitted (undefined): the default dispatch("ABANDON", { actor: "system" })
 const outcomes = actOnStaleTasks(tasks, undefined, budgets);
 // pin the default action's audit timestamp as well — a Date or a
-// canonical ISO-8601 string; omitted, the dispatch stamps the wall
-// clock. A custom action manages its own timestamps, so `at` is
+// canonical ISO-8601 string; omitted, the pin stays the screening
+// `now` (the #552 semantic, mirrored from `expireOverdueTasks`),
+// so a replay at a fixed `now` stays deterministic with no pin at
+// all. A custom action manages its own timestamps, so `at` is
 // ignored when one is passed (it is still validated fail-fast).
 // const outcomes = actOnStaleTasks(tasks, undefined, budgets, now, at);
 // or a custom action, e.g. notify-only paging that never transitions:
@@ -2836,7 +2838,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2121 tests covering the happy path, reject→resubmit
+`npm test` runs 2129 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
