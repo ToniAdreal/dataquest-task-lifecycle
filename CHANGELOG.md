@@ -124,6 +124,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `toMinorUnits` rounds half-cent ties half away from zero instead
+  of following `Math.round` toward +Infinity (2026-11-25, backlog
+  #1405): the decimal-exact converter #1404 shipped kept
+  `Math.round`'s tie rule, so a positive tie rounded up in magnitude
+  (`10.005` → `1001`) while the matching negative tie rounded toward
+  zero (`-10.005` → `-1000`) — a payout and its refund differed by a
+  cent, and the negative side disagreed with the round-half-up rule
+  every payments reader expects. The tie test in `decimalMinorUnits`
+  is now sign-independent (`twiceRemainder >= divisor` for both
+  signs), so `-10.005` → `-1001`, `-0.005` → `-1`, `-0.125` → `-13`,
+  and `toMinorUnits(-x) === -toMinorUnits(x)` for every finite `x`.
+  Positive ties, non-tie rounding, overflow rejection, and the
+  always-`0` zero result are unchanged; the JSDoc on
+  `decimalMinorUnits` and `toMinorUnits` now states the half-away-
+  from-zero rule, and the old `Math.round` tie pins are updated to
+  it. New `test/toMinorUnitsHalfCent.test.ts` (6 tests) pins both
+  half-cent boundaries, the just-below/just-above neighbours,
+  sign symmetry, typical-amount regression, and agreement with the
+  `parseMinorUnits` / `formatMinorUnits` paths.
+
 - `toMinorUnits` converts through decimal-exact integer arithmetic
   instead of `Math.round(amount * 100)` (2026-11-25, backlog #1404):
   the old path read the binary double, so `1.005 * 100` came out

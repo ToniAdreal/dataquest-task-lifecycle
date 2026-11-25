@@ -45,15 +45,17 @@ test("toMinorUnits keeps typical and boundary values exact", () => {
   assert.equal(toMinorUnits(0.335), 34);
 });
 
-test("toMinorUnits ties follow Math.round (toward +Infinity)", () => {
-  // Exactly on the half-cent boundary in decimal: positives round
-  // up, negatives round toward +Infinity (so toward zero).
+test("toMinorUnits ties round half away from zero", () => {
+  // Exactly on the half-cent boundary in decimal: both signs round
+  // up in magnitude (backlog #1405) — the old Math.round rule
+  // rounded negative ties toward zero, so -10.005 came out -1000
+  // while +10.005 came out 1001.
   assert.equal(toMinorUnits(10.005), 1001);
-  assert.equal(toMinorUnits(-10.005), -1000);
-  assert.equal(toMinorUnits(-1.005), -100);
-  assert.equal(toMinorUnits(-2.675), -267);
+  assert.equal(toMinorUnits(-10.005), -1001);
+  assert.equal(toMinorUnits(-1.005), -101);
+  assert.equal(toMinorUnits(-2.675), -268);
   assert.equal(toMinorUnits(0.005), 1);
-  assert.equal(toMinorUnits(-0.005), 0);
+  assert.equal(toMinorUnits(-0.005), -1);
 });
 
 test("toMinorUnits handles tiny and exponent-form values", () => {

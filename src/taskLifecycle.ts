@@ -1817,8 +1817,16 @@ export function payoutAging(
  * The conversion is done in integer arithmetic (`BigInt`), never
  * through a float multiply, so no binary-float dust can move a value
  * across a half-cent boundary. Rounding is to the nearest cent with
- * ties following `Math.round` (toward +Infinity): `10.005` → `1001`,
- * `-10.005` → `-1000`. A zero result is always `0n`, never `-0n`.
+ * ties rounding half away from zero (round half up in magnitude):
+ * `10.005` → `1001`, `-10.005` → `-1001`. The old rule followed
+ * `Math.round` (toward +Infinity), which rounded a negative tie
+ * toward zero (`-10.005` → `-1000`): a negative half-cent came out
+ * a cent short of its positive mirror, so `toMinorUnits(-x)` was
+ * not `-toMinorUnits(x)` at exact ties. The new rule is
+ * sign-symmetric by construction — the magnitude is computed on the
+ * unsigned digits and the sign is only applied at the end — so a
+ * payout and its refund mirror each other to the cent. A zero result
+ * is always `0n`, never `-0n`.
  *
  * `String()` of a finite double is always plain or scientific decimal
  * notation, so the regex below cannot fail on a finite input; the
@@ -1847,13 +1855,13 @@ function decimalMinorUnits(amount: number): bigint {
     const divisor = 10n ** BigInt(-shift);
     const quotient = digits / divisor;
     const remainder = digits % divisor;
-    // Round to nearest; on an exact tie follow Math.round (toward
-    // +Infinity): a positive tie rounds up, a negative tie stays
-    // (its magnitude rounds down, so -1000.5 becomes -1000).
+    // Round to nearest; on an exact tie round half away from zero
+    // (round half up in magnitude): a positive tie rounds up and a
+    // negative tie rounds down, so 1000.5 becomes 1001 and -1000.5
+    // becomes -1001. The digits here are unsigned, so the tie test
+    // is the same on both signs; the sign is applied at the end.
     const twiceRemainder = remainder * 2n;
-    const roundUp = negative
-      ? twiceRemainder > divisor
-      : twiceRemainder >= divisor;
+    const roundUp = twiceRemainder >= divisor;
     minor = roundUp ? quotient + 1n : quotient;
   }
   return negative ? -minor : minor;
@@ -1873,9 +1881,10 @@ function decimalMinorUnits(amount: number): bigint {
  * then converted in integer arithmetic, so `1.005` is exactly `101`
  * cents and `37.785` exactly `3779` — the old `Math.round(amount *
  * 100)` read the binary double and lost a cent on both (`100` and
- * `3778`). Ties follow `Math.round` (toward +Infinity): `10.005` →
- * `1001`, `-10.005` → `-1000`; a zero result is always `0`, never
- * `-0`.
+ * `3778`). Ties round half away from zero (round half up in
+ * magnitude): `10.005` → `1001`, `-10.005` → `-1001`; the converter
+ * is sign-symmetric (`toMinorUnits(-x) === -toMinorUnits(x)` for
+ * every finite `x`). A zero result is always `0`, never `-0`.
  *
  * Finite-only: a non-finite input (NaN, ±Infinity) is a caller error,
  * and a finite input whose minor-unit product overflows the double
