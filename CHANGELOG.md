@@ -124,6 +124,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `stateAt` / `stateAtFromHistory` now reject non-canonical date
+  strings (2026-11-25, backlog #1408): a string query time must
+  already be canonical ISO-8601 (the `toISOString()` form,
+  `YYYY-MM-DDTHH:mm:ss.sssZ`) — the same bar `parseHistory`
+  applies to stored entry timestamps and `resolveWatchdogAt`
+  applies to a watchdog pin. `Date.parse` spellings such as a
+  date-only string, a missing-milliseconds or missing-`Z` form, an
+  offset form, or a locale spelling used to be accepted and are now
+  rejected with the named error `invalid stateAt time: expected a
+  canonical ISO-8601 string or a valid Date, got <value>`, before
+  any history is read; the same instant written in a different
+  spelling is rejected, not normalized. `Date` inputs and canonical
+  strings answer unchanged. Seven new tests in
+  `test/stateAtCanonicalIso.test.ts` pin the rejected corpus, the
+  exact error wording, boundary answers, and `Date`/string
+  agreement; a mutation check (reverting the string check to plain
+  `Date.parse`) turns four of the seven red. The test count rises
+  by seven (2134 to 2141 tests).
+
 - `retryPayoutWebhookOutbox` no longer aborts the whole round when
   `deliverOne` resolves to a non-boolean (2026-11-25, backlog
   #1407): a misshapen return used to throw out of the per-pair

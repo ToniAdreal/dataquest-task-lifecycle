@@ -856,7 +856,7 @@ Time travel (stateAt over DEMO-099: PUBLISH -> ACCEPT -> START_CAPTURE at fixed 
   stateAt(<timestamp>): CAPTURING — exactly on the START_CAPTURE timestamp
   stateAt(<timestamp>): CAPTURING — after the last entry, the final state holds
   stateAtFromHistory(history, <timestamp>): CAPTURING — the module-level query over the raw log agrees, no instance needed
-  stateAt("not-a-date"): invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date (an unparseable query time fails closed before any history is read)
+  stateAt("not-a-date"): invalid stateAt time: expected a canonical ISO-8601 string or a valid Date, got not-a-date (an unparseable query time fails closed before any history is read)
 
 Allowed events by state (allowedEvents over all 13 states):
   DRAFT           -> PUBLISH
@@ -4344,7 +4344,7 @@ test("demo shows the time-travel segment in-process: stateAt over DEMO-099 at fi
   assert.equal(stateAtFromHistoryAtCapture, "CAPTURING");
   assert.equal(
     stateAtInvalidError,
-    "invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date",
+    "invalid stateAt time: expected a canonical ISO-8601 string or a valid Date, got not-a-date",
   );
   // The rejected query left the task untouched — still
   // CAPTURING with the same 3-entry history — and an
@@ -4407,7 +4407,7 @@ test("demo shows the time-travel segment in-process: stateAt over DEMO-099 at fi
   );
   assert.ok(
     lines.includes(
-      '  stateAt("not-a-date"): invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date (an unparseable query time fails closed before any history is read)',
+      '  stateAt("not-a-date"): invalid stateAt time: expected a canonical ISO-8601 string or a valid Date, got not-a-date (an unparseable query time fails closed before any history is read)',
     ),
   );
 });

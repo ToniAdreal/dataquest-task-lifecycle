@@ -93,12 +93,12 @@ test("stateAt: invalid times throw before anything is read", () => {
   for (const time of bad) {
     assert.throws(
       () => task.stateAt(time as never),
-      /invalid stateAt time: expected a valid Date or ISO-8601 string/,
+      /invalid stateAt time: expected a canonical ISO-8601 string or a valid Date/,
       `time=${String(time)}`,
     );
     assert.throws(
       () => stateAtFromHistory(task.history, time as never),
-      /invalid stateAt time: expected a valid Date or ISO-8601 string/,
+      /invalid stateAt time: expected a canonical ISO-8601 string or a valid Date/,
       `pure time=${String(time)}`,
     );
   }

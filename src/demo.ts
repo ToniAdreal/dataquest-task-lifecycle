@@ -1135,7 +1135,7 @@ export const DEMO_STATE_AT_BETWEEN = "2026-03-01T11:30:00.000Z";
 export const DEMO_STATE_AT_AFTER = "2026-03-01T13:00:00.000Z";
 export const DEMO_STATE_AT_INVALID = "not-a-date";
 export const DEMO_STATE_AT_INVALID_ERROR =
-  "invalid stateAt time: expected a valid Date or ISO-8601 string, got not-a-date";
+  "invalid stateAt time: expected a canonical ISO-8601 string or a valid Date, got not-a-date";
 
 const steps: Array<{
   event: TaskEvent;
@@ -5367,8 +5367,8 @@ export async function runDemo(): Promise<DemoResult> {
   //     agrees (CAPTURING) — the module-level query needs no
   //     instance;
   //   - an unparseable query time is rejected with exactly
-  //     "invalid stateAt time: expected a valid Date or
-  //     ISO-8601 string, got not-a-date", before any history
+  //     "invalid stateAt time: expected a canonical ISO-8601
+  //     string or a valid Date, got not-a-date", before any history
   //     is read — and the task is untouched afterwards (still
   //     CAPTURING, 3 entries).
   // The segment asserts all of this here, outside the printed

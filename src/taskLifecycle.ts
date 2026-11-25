@@ -5101,23 +5101,28 @@ export function replay(history: unknown, opts?: AuditChainOptions): TaskState {
 
 /**
  * Resolve a `stateAt` query time to epoch milliseconds. Accepts a Date
- * or an ISO-8601 string — any parseable form, not just canonical: the
- * query time is caller input, not audit data, so the canonical-ISO bar
- * that `parseHistory` applies to stored entries does not apply here.
- * Anything else, or an unparseable value, is a caller error, thrown
- * before any history is read (mirroring how `parseHistory` validates
- * its secret before touching the log).
+ * or a canonical ISO-8601 string — the same bar `parseHistory`
+ * applies to stored entry timestamps and `resolveWatchdogAt` applies
+ * to a watchdog pin (`isCanonicalIso`: parses, and round-trips through
+ * `toISOString()` byte-for-byte). A `Date` is already an instant, so
+ * it is accepted as-is; a string in any other spelling — a date-only
+ * string, a missing-milliseconds or missing-`Z` form, an offset form,
+ * a locale spelling — is rejected even though `Date.parse` would
+ * accept it: a query time that does not name exactly one instant in
+ * exactly one spelling is a caller error, not a guess. Anything else,
+ * or an unparseable value, is a caller error, thrown before any
+ * history is read (mirroring how `parseHistory` validates its secret
+ * before touching the log).
  */
 function resolveStateAtTime(time: Date | string): number {
   if (time instanceof Date) {
     const ms = time.getTime();
     if (Number.isFinite(ms)) return ms;
-  } else if (typeof time === "string") {
-    const ms = Date.parse(time);
-    if (Number.isFinite(ms)) return ms;
+  } else if (typeof time === "string" && isCanonicalIso(time)) {
+    return Date.parse(time);
   }
   throw new Error(
-    `invalid stateAt time: expected a valid Date or ISO-8601 string, got ${String(time)}`,
+    `invalid stateAt time: expected a canonical ISO-8601 string or a valid Date, got ${String(time)}`,
   );
 }
 
@@ -5149,7 +5154,9 @@ function stateAtFromEntries(
  * same `parseHistory` checklist `replay`/`fromHistory` apply — a broken
  * chain throws `invalid history: …` instead of returning a guessed
  * state — and a keyed chain needs the same `opts.auditSecret` a
- * rehydration would. Pure: reads the log, never mutates it.
+ * rehydration would. The query time follows the same canonical-ISO
+ * bar as the instance method (see {@link TaskLifecycle.stateAt}).
+ * Pure: reads the log, never mutates it.
  *
  *   stateAtFromHistory(log, "2026-03-01T15:00:00.000Z"); // => "ACCEPTED"
  */
@@ -5646,8 +5653,9 @@ export class TaskLifecycle {
    * `at` is at or before `time` (inclusive: a query exactly on an
    * entry's timestamp sees that entry's effect); a time before the
    * first entry returns the initial state, "DRAFT". Accepts a Date or
-   * an ISO-8601 string; anything else, or an unparseable value, throws
-   * `invalid stateAt time: …`. Pure read: the task's state and history
+   * a canonical ISO-8601 string (the `toISOString()` form); any other
+   * string spelling throws `invalid stateAt time: …` even when
+   * `Date.parse` would accept it. Pure read: the task's state and history
    * are untouched, and dispatching afterwards continues at the next
    * seq. The module-level {@link stateAtFromHistory} is the same query
    * over a raw log, with no instance at all.
