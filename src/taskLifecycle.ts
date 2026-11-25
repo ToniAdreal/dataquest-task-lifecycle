@@ -1805,6 +1805,61 @@ export function payoutAging(
 }
 
 /**
+ * Exact decimal minor-unit count of a finite number, as a `BigInt`
+ * (backlog #1404).
+ *
+ * `String(amount)` is the shortest decimal that round-trips to the
+ * same double, so parsing it recovers the decimal value the caller
+ * meant (`19.99`, not `19.989999999999998`): the `Math.round(amount
+ * * 100)` this replaces read the binary double instead, so `1.005 *
+ * 100` came out `100.49999999999999` and rounded down to `100` cents,
+ * and `37.785` lost a cent the same way (`3778` instead of `3779`).
+ * The conversion is done in integer arithmetic (`BigInt`), never
+ * through a float multiply, so no binary-float dust can move a value
+ * across a half-cent boundary. Rounding is to the nearest cent with
+ * ties following `Math.round` (toward +Infinity): `10.005` → `1001`,
+ * `-10.005` → `-1000`. A zero result is always `0n`, never `-0n`.
+ *
+ * `String()` of a finite double is always plain or scientific decimal
+ * notation, so the regex below cannot fail on a finite input; the
+ * throw is a loud guard, not a reachable branch.
+ */
+function decimalMinorUnits(amount: number): bigint {
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(
+    String(amount),
+  );
+  if (match === null) {
+    throw new Error(
+      `minor units conversion overflowed: cannot represent ${String(amount)} as a decimal amount`,
+    );
+  }
+  const negative = match[1] === "-";
+  const fracPart = match[3] ?? "";
+  const exponent = match[4] === undefined ? 0 : Number(match[4]);
+  // Value = digits * 10^(exponent - fracDigits); minor units
+  // multiply by 100, so the shift gains 2.
+  const digits = BigInt(match[2] + fracPart);
+  const shift = exponent - fracPart.length + 2;
+  let minor: bigint;
+  if (shift >= 0) {
+    minor = digits * 10n ** BigInt(shift);
+  } else {
+    const divisor = 10n ** BigInt(-shift);
+    const quotient = digits / divisor;
+    const remainder = digits % divisor;
+    // Round to nearest; on an exact tie follow Math.round (toward
+    // +Infinity): a positive tie rounds up, a negative tie stays
+    // (its magnitude rounds down, so -1000.5 becomes -1000).
+    const twiceRemainder = remainder * 2n;
+    const roundUp = negative
+      ? twiceRemainder > divisor
+      : twiceRemainder >= divisor;
+    minor = roundUp ? quotient + 1n : quotient;
+  }
+  return negative ? -minor : minor;
+}
+
+/**
  * Convert a major-unit amount to integer minor units (cents), rounding
  * to the nearest cent. This is the single conversion the money helpers
  * use: amounts `dispatch()` writes are guaranteed to be exactly
@@ -1812,6 +1867,15 @@ export function payoutAging(
  * them the conversion is exact; for a legacy amount read from an old
  * snapshot (sub-cent precision, see {@link TaskHistoryEntry.payoutAmount})
  * it rounds to the nearest cent per entry, never at the batch total.
+ *
+ * The rounding is decimal-exact (backlog #1404): the amount is read
+ * as the shortest decimal that round-trips to it (`String(amount)`),
+ * then converted in integer arithmetic, so `1.005` is exactly `101`
+ * cents and `37.785` exactly `3779` — the old `Math.round(amount *
+ * 100)` read the binary double and lost a cent on both (`100` and
+ * `3778`). Ties follow `Math.round` (toward +Infinity): `10.005` →
+ * `1001`, `-10.005` → `-1000`; a zero result is always `0`, never
+ * `-0`.
  *
  * Finite-only: a non-finite input (NaN, ±Infinity) is a caller error,
  * and a finite input whose minor-unit product overflows the double
@@ -1827,7 +1891,7 @@ export function toMinorUnits(amount: number): number {
       `minor units conversion overflowed: amount must be a finite number, got ${String(amount)}`,
     );
   }
-  const minorUnits = Math.round(amount * 100);
+  const minorUnits = Number(decimalMinorUnits(amount));
   if (!Number.isFinite(minorUnits)) {
     throw new Error(
       `minor units conversion overflowed: ${String(amount)} is too large to represent in minor units`,

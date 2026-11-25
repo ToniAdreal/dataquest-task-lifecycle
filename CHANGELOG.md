@@ -124,6 +124,26 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `toMinorUnits` converts through decimal-exact integer arithmetic
+  instead of `Math.round(amount * 100)` (2026-11-25, backlog #1404):
+  the old path read the binary double, so `1.005 * 100` came out
+  `100.49999999999999` and rounded down to `100` cents, `37.785`
+  lost a cent the same way (`3778` instead of `3779`), and large
+  amounts could drift by tens of cents (`90071992547409.9` converted
+  to `9007199254740906`). The converter now parses the shortest
+  decimal that round-trips to the amount (`String(amount)`) and
+  converts with `BigInt`, so `1.005` is exactly `101` cents and
+  `19.99` exactly `1999`; ties follow `Math.round` (toward
+  +Infinity: `10.005` → `1001`, `-10.005` → `-1000`), a zero result
+  is always `0` (never `-0`), and the two overflow errors are
+  unchanged. New `test/toMinorUnitsDecimal.test.ts` (7 tests,
+  including a cross-check that every 2-decimal string converts to
+  the same cents as `parseMinorUnits`); the stale comment in
+  `test/minorUnits.test.ts` about the double sitting above the
+  half-cent boundary is corrected. Mutation check: restoring the
+  float path turns 5 of the 7 new tests red. The test count rises by
+  seven (2108 to 2115 tests).
+
 - `payoutAging` rejects a null / non-Date `now` with the named error
   `invalid now: expected a valid Date` (2026-11-25, backlog #1393):
   it used to read `now.getTime()` before any guard, so `null` or a

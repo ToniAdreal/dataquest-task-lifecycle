@@ -52,9 +52,10 @@ test("toMinorUnits converts major units to integer cents", () => {
   // Legacy sub-cent input rounds to the nearest cent, never throws:
   // the converter is for reading old data, the gate lives in dispatch.
   assert.equal(toMinorUnits(0.333), 33);
-  // The double nearest 10.005 sits just above the half-cent boundary,
-  // so it rounds up to 1001 — the converter follows Math.round, and
-  // dispatch still rejects 10.005 (1001 cents back is 10.01, not 10.005).
+  // 10.005 is exactly on the half-cent boundary in decimal, and
+  // the converter rounds ties the way Math.round does (toward
+  // +Infinity), so it rounds up to 1001 — dispatch still rejects
+  // 10.005 (1001 cents back is 10.01, not 10.005).
   assert.equal(toMinorUnits(10.005), 1001);
 });
 
