@@ -38,8 +38,10 @@ import type { PayoutWebhook } from "../src/index.js";
  *    and returns an all-zero summary
  *  - a `deliverOne` that throws is recorded as a failed attempt
  *    (with its message as `lastError`), never a runner crash; a
- *    `deliverOne` that resolves to a non-boolean is a caller bug
- *    and throws before anything is recorded for that pair
+ *    `deliverOne` that resolves to a non-boolean is recorded the
+ *    same way (with a named `deliverOne must resolve to a boolean`
+ *    error) and the run continues with the remaining pairs
+ *    (backlog #1407)
  *  - `maxConcurrency` bounds the in-flight re-deliveries (default
  *    serial); invalid options throw before any call is made
  *  - the documented usage wraps `deliverPayoutWebhook` and returns
@@ -434,23 +436,194 @@ test("a throwing deliverOne is recorded as a failed attempt, not a crash", async
   assert.equal(pending[0].lastError, "boom: connection reset");
 });
 
-test("a non-boolean deliverOne result throws before anything is recorded", async () => {
+test("a non-boolean deliverOne result is recorded as a failed attempt and the run continues", async () => {
   const outbox = new PayoutWebhookOutbox({ maxAttempts: 3 });
   fail(outbox, A, EVT_1);
   fail(outbox, B, EVT_2);
 
-  await assert.rejects(
-    retryPayoutWebhookOutbox(
-      outbox,
-      async () => undefined as unknown as boolean,
-      {},
-    ),
-    /deliverOne must resolve to a boolean, got undefined/,
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async (_endpoint, eventId) =>
+      (eventId === EVT_1 ? undefined : true) as unknown as boolean,
+    {},
   );
-  // The run aborted on the first pair's caller bug; both pairs are
-  // untouched (the second was never attempted).
-  assert.equal(outbox.pending().length, 2);
-  assert.ok(outbox.pending().every((e) => e.attempts === 1));
+  // The misshapen return cost the first pair one attempt and a
+  // named error; the second pair was still delivered and cleared.
+  assert.deepEqual(summary, {
+    attempted: 2,
+    acknowledged: 1,
+    stillPending: 1,
+    deadLettered: 0,
+    aborted: false,
+  });
+  const pending = outbox.pending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].eventId, EVT_1);
+  assert.equal(pending[0].attempts, 2);
+  assert.equal(
+    pending[0].lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got undefined",
+  );
+});
+
+test("each non-boolean shape records its own typeof in the named error", async () => {
+  const outbox = new PayoutWebhookOutbox({ maxAttempts: 10 });
+  fail(outbox, A, EVT_1);
+  fail(outbox, A, EVT_2);
+  fail(outbox, B, EVT_1);
+  fail(outbox, B, EVT_2);
+  const returns: Record<string, unknown> = {
+    [EVT_1 + A]: null,
+    [EVT_2 + A]: 42,
+    [EVT_1 + B]: "yes",
+    [EVT_2 + B]: {},
+  };
+
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async (endpoint, eventId) =>
+      returns[eventId + endpoint] as unknown as boolean,
+    {},
+  );
+  assert.deepEqual(summary, {
+    attempted: 4,
+    acknowledged: 0,
+    stillPending: 4,
+    deadLettered: 0,
+    aborted: false,
+  });
+  const byPair = new Map(
+    outbox.pending().map((e) => [`${e.eventId}${e.endpoint}`, e]),
+  );
+  assert.equal(
+    byPair.get(EVT_1 + A)?.lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got object",
+  );
+  assert.equal(
+    byPair.get(EVT_2 + A)?.lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got number",
+  );
+  assert.equal(
+    byPair.get(EVT_1 + B)?.lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got string",
+  );
+  assert.equal(
+    byPair.get(EVT_2 + B)?.lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got object",
+  );
+  assert.ok(outbox.pending().every((e) => e.attempts === 2));
+});
+
+test("a non-boolean failure counts toward the dead letter like any other failure", async () => {
+  const outbox = new PayoutWebhookOutbox({ maxAttempts: 2 });
+  fail(outbox, A, EVT_1);
+
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async () => undefined as unknown as boolean,
+    {},
+  );
+  assert.deepEqual(summary, {
+    attempted: 1,
+    acknowledged: 0,
+    stillPending: 0,
+    deadLettered: 1,
+    aborted: false,
+  });
+  assert.equal(outbox.deadLetter().length, 1);
+  assert.equal(outbox.deadLetter()[0].eventId, EVT_1);
+});
+
+test("a pair that failed on a non-boolean return stays pending and can succeed on a later round", async () => {
+  const outbox = new PayoutWebhookOutbox({ maxAttempts: 3 });
+  fail(outbox, A, EVT_1);
+  let calls = 0;
+
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async () => {
+      calls += 1;
+      return (calls === 1 ? undefined : true) as unknown as boolean;
+    },
+    { maxRounds: 2, backoffMs: 0, sleepImpl: async () => {} },
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(summary, {
+    attempted: 2,
+    acknowledged: 1,
+    stillPending: 0,
+    deadLettered: 0,
+    aborted: false,
+  });
+});
+
+test("a non-boolean result under concurrency does not reject the worker pool", async () => {
+  const outbox = new PayoutWebhookOutbox({ maxAttempts: 3 });
+  fail(outbox, A, EVT_1);
+  fail(outbox, B, EVT_2);
+
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async () => undefined as unknown as boolean,
+    { maxConcurrency: 2 },
+  );
+  assert.deepEqual(summary, {
+    attempted: 2,
+    acknowledged: 0,
+    stillPending: 2,
+    deadLettered: 0,
+    aborted: false,
+  });
+  assert.ok(
+    outbox.pending().every(
+      (e) =>
+        e.lastError ===
+        "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got undefined",
+    ),
+  );
+});
+
+test("mixed outcomes in one round: non-boolean, throw, false and true are all recorded and the run completes", async () => {
+  const outbox = new PayoutWebhookOutbox({ maxAttempts: 3 });
+  fail(outbox, A, EVT_1);
+  fail(outbox, A, EVT_2);
+  fail(outbox, B, EVT_1);
+  fail(outbox, B, EVT_2);
+  const behaviours: Record<string, () => unknown> = {
+    [EVT_1 + A]: () => undefined,
+    [EVT_2 + A]: () => {
+      throw new Error("boom: connection reset");
+    },
+    [EVT_1 + B]: () => false,
+    [EVT_2 + B]: () => true,
+  };
+
+  const summary = await retryPayoutWebhookOutbox(
+    outbox,
+    async (endpoint, eventId) =>
+      behaviours[eventId + endpoint]() as unknown as boolean,
+    {},
+  );
+  assert.deepEqual(summary, {
+    attempted: 4,
+    acknowledged: 1,
+    stillPending: 3,
+    deadLettered: 0,
+    aborted: false,
+  });
+  const byPair = new Map(
+    outbox.pending().map((e) => [`${e.eventId}${e.endpoint}`, e]),
+  );
+  assert.equal(
+    byPair.get(EVT_1 + A)?.lastError,
+    "retryPayoutWebhookOutbox: deliverOne must resolve to a boolean, got undefined",
+  );
+  assert.equal(byPair.get(EVT_2 + A)?.lastError, "boom: connection reset");
+  // A plain `false` return records the attempt with no new error
+  // text, so the pair's `lastError` is cleared rather than carried
+  // over from the earlier failure.
+  assert.equal(byPair.get(EVT_1 + B)?.lastError, undefined);
+  assert.ok(outbox.pending().every((e) => e.attempts === 2));
 });
 
 test("maxConcurrency bounds the in-flight re-deliveries", async () => {

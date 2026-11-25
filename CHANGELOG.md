@@ -124,6 +124,27 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `retryPayoutWebhookOutbox` no longer aborts the whole round when
+  `deliverOne` resolves to a non-boolean (2026-11-25, backlog
+  #1407): a misshapen return used to throw out of the per-pair
+  worker, reject the runner's `Promise.all`, and kill the run with
+  no summary — the remaining pairs were never attempted. The
+  return is now recorded as a failed attempt for that pair only,
+  with the named error `retryPayoutWebhookOutbox: deliverOne must
+  resolve to a boolean, got <typeof>`, and the run continues; the
+  failure counts toward the dead letter like any other, and the
+  pair stays pending for a later round. The summary's `attempted`
+  still counts every `deliverOne` call made. Six new tests in
+  `test/payoutWebhookOutboxRetry.test.ts` replace the old
+  throw-locking test: the run continues and the named error is
+  recorded, each non-boolean shape (`undefined`, `null`, `42`,
+  `"yes"`, `{}`) records its own `typeof`, the failure
+  dead-letters at `maxAttempts`, the pair can succeed on a later
+  round, the worker pool does not reject under concurrency, and a
+  mixed round (non-boolean, throw, `false`, `true`) completes with
+  every outcome recorded; the test count rises by five (2129 to
+  2134 tests).
+
 - `actOnStaleTasks` with an omitted `at` now stamps the screening
   `now` instead of the wall clock (2026-11-25, backlog #1406): the
   sibling `expireOverdueTasks` already pins an omitted `at` to the
