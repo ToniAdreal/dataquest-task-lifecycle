@@ -124,6 +124,24 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `payoutAging` rejects a null / non-Date `now` with the named error
+  `invalid now: expected a valid Date` (2026-11-25, backlog #1393):
+  it used to read `now.getTime()` before any guard, so `null` or a
+  non-Date died as a bare TypeError (`Cannot read properties of null
+  (reading 'getTime')` / `now.getTime is not a function`) from deep
+  inside the payout-aging path. It now carries its own front guard,
+  word-for-word the same as `isOverdue` — the batch guard inherited
+  from `unreconciledPayouts` (backlog #1342) never covered this leg,
+  because `payoutAging` reads `now` before it calls
+  `unreconciledPayouts(tasks)`, and #1342's inheritance claim only
+  covered the batch leg. Guard order is `now` first, batch second,
+  so a broken clock is never masked by a malformed batch; the JSDoc
+  now says so explicitly. An invalid Date still throws the same
+  named error, and valid-`now` bucketing is unchanged. A new test
+  file (8 cases) pins the guard, the guard-before-batch ordering,
+  and the unchanged bucketing; the test count rises by eight (2100
+  to 2108 tests).
+
 - `nextSlaDeadline`, `nextTaskDeadline`, `tasksApproachingDeadline`,
   and `staleTasks` reject a null / non-Date `now` with the named
   error `invalid now: expected a valid Date` (2026-11-24, backlog

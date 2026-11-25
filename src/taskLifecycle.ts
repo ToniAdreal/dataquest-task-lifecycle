@@ -1752,7 +1752,13 @@ export interface PayoutAgingResult {
  * The batch guard is inherited from {@link unreconciledPayouts}
  * (backlog #1342): a non-array batch, or a non-task entry, throws
  * the same `invalid unreconciledPayouts: …` error — no duplicate
- * guard here.
+ * guard here. The `now` leg is NOT inherited: this function reads
+ * `now.getTime()` before it calls `unreconciledPayouts(tasks)`, so
+ * it carries its own front guard, word-for-word the same as
+ * {@link isOverdue} (backlog #1393, correcting #1342's blanket
+ * inheritance claim, which only covered the batch leg). Guard order
+ * is `now` first, batch second: a bad clock is never masked by a
+ * bad batch.
  *
  *   const aging = payoutAging(allTasks, now);
  *   // chase over30Days first, then days7To30, then under7Days
@@ -1761,10 +1767,10 @@ export function payoutAging(
   tasks: readonly TaskLifecycle[],
   now: Date = new Date(),
 ): PayoutAgingResult {
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new Error("invalid now: expected a valid Date");
   }
+  const nowMs = now.getTime();
   const DAY_MS = 24 * 60 * 60 * 1000;
   const result: PayoutAgingResult = {
     under7Days: [],
