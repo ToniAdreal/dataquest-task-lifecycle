@@ -1046,7 +1046,7 @@ Actor attribution enforcement (requireActor: true rejects a dispatch that carrie
 
 Dispatch idempotency keys (dispatch with { idempotencyKey } makes a retried dispatch a no-op):
   same key, same event (DEMO-026): PUBLISH with idempotencyKey "demo-idem-publish" at <timestamp> -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)
-  keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
+  keys are bound to their dispatch (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key "demo-idem-publish" (a different, would-be legal event) -> rejected: "dispatch conflict: idempotency key "demo-idem-publish" was already used for PUBLISH, got START_CAPTURE", history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key replaying the same dispatch — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)
   a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey "demo-idem-retry" -> rejected: "invalid transition: ACCEPT from DRAFT"; history entries after the failure: 0; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)
   no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)
 
@@ -8253,14 +8253,14 @@ test("demo shows the actor attribution enforcement segment in-process: actor-les
   );
 });
 
-test("demo shows the dispatch idempotency key segment in-process: same-key duplicate no-ops, old key dedupes across events and past progress, failed dispatch consumes no key", async () => {
+test("demo shows the dispatch idempotency key segment in-process: same-key duplicate no-ops, old key rejects a different event but still dedupes the stale original, failed dispatch consumes no key", async () => {
   const {
     idempotencyTask,
     idempotencyPublishKey,
     idempotencyDuplicateReturn,
     idempotencyHistoryLengthAfterDuplicate,
     idempotencyNotificationEvents,
-    idempotencyCrossEventReturn,
+    idempotencyCrossEventError,
     idempotencyStaleReturn,
     idempotencyHistoryLengthAfterRetries,
     idempotencyRetryTask,
@@ -8281,7 +8281,10 @@ test("demo shows the dispatch idempotency key segment in-process: same-key dupli
   assert.equal(idempotencyDuplicateReturn, "OPEN");
   assert.equal(idempotencyHistoryLengthAfterDuplicate, 1);
   assert.deepEqual(idempotencyNotificationEvents, ["PUBLISH", "ACCEPT"]);
-  assert.equal(idempotencyCrossEventReturn, "ACCEPTED");
+  assert.equal(
+    idempotencyCrossEventError,
+    'dispatch conflict: idempotency key "demo-idem-publish" was already used for PUBLISH, got START_CAPTURE',
+  );
   assert.equal(idempotencyStaleReturn, "ACCEPTED");
   assert.equal(idempotencyHistoryLengthAfterRetries, 2);
   assert.equal(idempotencyTask.history[0].event, "PUBLISH");
@@ -8325,14 +8328,18 @@ test("demo shows the dispatch idempotency key segment in-process: same-key dupli
     at: "2026-04-05T09:05:00.000Z",
     idempotencyKey: "test-key-2",
   });
-  assert.equal(
-    independent.dispatch("START_CAPTURE", {
-      at: "2026-04-05T09:06:00.000Z",
-      idempotencyKey: "test-key-1",
-    }),
-    "ACCEPTED",
-    "a known key dedupes even for a different event",
+  // Backlog #1424: the same key under a different event is a
+  // conflict now, not a no-op — the key is bound to the PUBLISH it
+  // first executed.
+  assert.throws(
+    () =>
+      independent.dispatch("START_CAPTURE", {
+        at: "2026-04-05T09:06:00.000Z",
+        idempotencyKey: "test-key-1",
+      }),
+    /dispatch conflict: idempotency key "test-key-1" was already used for PUBLISH, got START_CAPTURE/,
   );
+  assert.equal(independent.history.length, 2);
   assert.equal(
     independent.dispatch("PUBLISH", {
       at: "2026-04-05T09:07:00.000Z",
@@ -8377,7 +8384,7 @@ test("demo shows the dispatch idempotency key segment in-process: same-key dupli
   );
   for (const line of [
     "  same key, same event (DEMO-026): PUBLISH with idempotencyKey \"demo-idem-publish\" at 2026-04-02T09:00:00.000Z -> OPEN, history entries: 1; the same PUBLISH under the same key again -> returns OPEN, history entries: 1 (nothing was appended and the listener was not notified again — a redelivered request is answered from the consumed-key set, not re-executed)",
-    "  keys are global and survive progress (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key \"demo-idem-publish\" (a different, would-be legal event) -> returns ACCEPTED, history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)",
+    "  keys are bound to their dispatch (DEMO-026): ACCEPT under a second key -> ACCEPTED, history entries: 2; START_CAPTURE under the old key \"demo-idem-publish\" (a different, would-be legal event) -> rejected: \"dispatch conflict: idempotency key \"demo-idem-publish\" was already used for PUBLISH, got START_CAPTURE\", history entries: 2; the stale PUBLISH under that same old key (now an illegal transition) -> returns ACCEPTED without throwing (the transition is not even validated for a known key replaying the same dispatch — a late retry is safe to replay); listener notifications: [PUBLISH, ACCEPT] (only the two real dispatches ever notified)",
     "  a failed dispatch consumes no key (DEMO-027): ACCEPT from DRAFT with idempotencyKey \"demo-idem-retry\" -> rejected: \"invalid transition: ACCEPT from DRAFT\"; history entries after the failure: 0; the corrected PUBLISH under the same key -> OPEN (the key was still free, so the retry executed instead of deduping)",
     "  no key, no change (DEMO-027): ACCEPT with no idempotencyKey -> ACCEPTED; history entries: 2 (omitting the key preserves the exact pre-idempotency behavior — every keyless dispatch still validates and appends normally)",
   ]) {
@@ -8400,7 +8407,7 @@ test("demo dispatch idempotency key segment is deterministic: two runs print byt
   const a = await runDemo();
   const b = await runDemo();
   const segA = segment(a.lines);
-  // Header + same-key / global-keys / failed-dispatch /
+  // Header + same-key / bound-keys / failed-dispatch /
   // no-key lines; every value in the segment is a fixed
   // literal (fixed timestamps, pinned keys, a pinned
   // error), so no normalization is needed.
@@ -8418,7 +8425,7 @@ test("demo dispatch idempotency key segment is deterministic: two runs print byt
     a.idempotencyNotificationEvents,
     b.idempotencyNotificationEvents,
   );
-  assert.equal(a.idempotencyCrossEventReturn, b.idempotencyCrossEventReturn);
+  assert.equal(a.idempotencyCrossEventError, b.idempotencyCrossEventError);
   assert.equal(a.idempotencyStaleReturn, b.idempotencyStaleReturn);
   assert.equal(
     a.idempotencyHistoryLengthAfterRetries,

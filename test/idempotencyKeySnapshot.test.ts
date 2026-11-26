@@ -41,9 +41,20 @@ test("multiple consumed keys all survive, in consumption order", () => {
   t.dispatch("ACCEPT", { idempotencyKey: "k-b" });
   assert.deepEqual(t.toJSON().idempotencyKeys, ["k-a", "k-b"]);
   const restored = TaskLifecycle.fromJSON(t.toJSON());
-  // Both keys dedupe even on different (now legal) events.
-  assert.equal(restored.dispatch("START_CAPTURE", { idempotencyKey: "k-a" }), "ACCEPTED");
-  assert.equal(restored.dispatch("START_CAPTURE", { idempotencyKey: "k-b" }), "ACCEPTED");
+  // Same event, same key: still a no-op after the restore.
+  assert.equal(restored.dispatch("PUBLISH", { idempotencyKey: "k-a" }), "ACCEPTED");
+  assert.equal(restored.dispatch("ACCEPT", { idempotencyKey: "k-b" }), "ACCEPTED");
+  assert.equal(restored.history.length, 2);
+  // Backlog #1424: the binding survives the restore — either key
+  // under a different event is a conflict, not a no-op.
+  assert.throws(
+    () => restored.dispatch("START_CAPTURE", { idempotencyKey: "k-a" }),
+    /dispatch conflict: idempotency key "k-a" was already used for PUBLISH, got START_CAPTURE/,
+  );
+  assert.throws(
+    () => restored.dispatch("START_CAPTURE", { idempotencyKey: "k-b" }),
+    /dispatch conflict: idempotency key "k-b" was already used for ACCEPT, got START_CAPTURE/,
+  );
   assert.equal(restored.history.length, 2);
   // A fresh key still executes.
   restored.dispatch("START_CAPTURE", { idempotencyKey: "k-c" });
@@ -66,8 +77,13 @@ test("JSON.stringify(task) carries the keys through the wire round-trip", () => 
   t.dispatch("PUBLISH", { idempotencyKey: "wire-1" });
   const wire = JSON.parse(JSON.stringify(t)) as unknown;
   const restored = TaskLifecycle.fromJSON(wire);
-  assert.equal(restored.dispatch("ACCEPT", { idempotencyKey: "wire-1" }), "OPEN");
+  assert.equal(restored.dispatch("PUBLISH", { idempotencyKey: "wire-1" }), "OPEN");
   assert.equal(restored.history.length, 1);
+  // The binding crosses the wire too (backlog #1424).
+  assert.throws(
+    () => restored.dispatch("ACCEPT", { idempotencyKey: "wire-1" }),
+    /dispatch conflict: idempotency key "wire-1" was already used for PUBLISH, got ACCEPT/,
+  );
 });
 
 test("snapshot with a non-array idempotencyKeys is rejected", () => {

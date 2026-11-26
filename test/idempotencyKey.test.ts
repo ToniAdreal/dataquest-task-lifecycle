@@ -7,18 +7,26 @@ import { TaskLifecycle } from "../src/index.js";
  * escrow-state-machine-ts's idempotency keys for payment-flavored flows.
  *
  * Rules under test:
- *  - a repeated key is a full no-op: returns the current state, appends
- *    nothing, notifies no listeners, does not validate the transition
- *    (retry-after-progress is safe)
- *  - keys are global to the task, not per-event: reusing the key for a
- *    different event still dedupes
+ *  - a repeated key with the same event and payload is a full no-op:
+ *    returns the current state, appends nothing, notifies no
+ *    listeners, does not validate the transition (retry-after-progress
+ *    is safe)
+ *  - a key is bound to the dispatch it first executed: reusing the key
+ *    for a different event, actor, or payout amount/reference throws
+ *    `dispatch conflict: idempotency key … was already used for …`
+ *    instead of silently reporting success (backlog #1424)
+ *  - a legacy bare key (seeded, or restored from a pre-fingerprint
+ *    snapshot) still dedupes any event — the binding is recorded
+ *    where the dispatch happened, never invented afterwards
  *  - distinct keys (or no key) append normally
  *  - empty / non-string keys throw `invalid dispatch options` up front
  *  - a failed dispatch consumes nothing: fixing the call and retrying
  *    with the same key still executes
  *  - listeners are not notified by duplicate-key no-ops
  *  - snapshot persistence of the key set is covered separately in
- *    test/idempotencyKeySnapshot.test.ts (backlog #130)
+ *    test/idempotencyKeySnapshot.test.ts (backlog #130), and of the
+ *    fingerprint binding in test/idempotencyKeyFingerprint.test.ts
+ *    (backlog #1424)
  */
 
 test("same idempotencyKey dispatched twice leaves a single history entry", () => {
@@ -51,13 +59,19 @@ test("different keys append normally; omitting the key preserves old behavior", 
   assert.equal(t.state, "CAPTURING");
 });
 
-test("key is global to the task, not per-event", () => {
+test("same key on a different event throws a dispatch conflict (backlog #1424)", () => {
   const t = new TaskLifecycle("idem-4");
   t.dispatch("PUBLISH", { idempotencyKey: "shared" });
-  // Same key on a different (now legal) event still dedupes.
-  const returned = t.dispatch("ACCEPT", { idempotencyKey: "shared" });
-  assert.equal(returned, "OPEN");
+  // Same key on a different (now legal) event is a different dispatch:
+  // it must fail loudly, not vanish into a no-op — a redelivered
+  // payout webhook and a fresh payout that reused the key are not the
+  // same call.
+  assert.throws(
+    () => t.dispatch("ACCEPT", { idempotencyKey: "shared" }),
+    /dispatch conflict: idempotency key "shared" was already used for PUBLISH, got ACCEPT/,
+  );
   assert.equal(t.history.length, 1);
+  assert.equal(t.state, "OPEN");
 });
 
 test("empty and non-string idempotencyKey throw up front", () => {
@@ -118,10 +132,17 @@ test("key set survives toJSON()/fromJSON(): a retried key stays a no-op", () => 
   const restored = TaskLifecycle.fromJSON(t.toJSON());
   // Backlog #130: the snapshot now carries consumed keys, so a retry
   // with the same key after a restore dedupes instead of re-executing.
-  const returned = restored.dispatch("ACCEPT", { idempotencyKey: "once" });
+  const returned = restored.dispatch("PUBLISH", { idempotencyKey: "once" });
   assert.equal(returned, "OPEN");
   assert.equal(restored.history.length, 1);
   assert.equal(restored.state, "OPEN");
+  // Backlog #1424: the binding survives the restore too — the same
+  // key under a different event is a conflict, not a no-op.
+  assert.throws(
+    () => restored.dispatch("ACCEPT", { idempotencyKey: "once" }),
+    /dispatch conflict: idempotency key "once" was already used for PUBLISH, got ACCEPT/,
+  );
+  assert.equal(restored.history.length, 1);
 });
 
 test("seq has no gaps after duplicates and failures", () => {

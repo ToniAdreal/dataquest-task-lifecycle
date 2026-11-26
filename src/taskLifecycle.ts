@@ -3278,8 +3278,21 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * string of at most {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters;
  * duplicates are deduped. Keys restored this way (or via
  * `fromJSON()`, which reads them from the snapshot envelope) keep their
- * exactly-once effect: dispatching with one is a no-op. Invalid values
- * throw `invalid option: …` at construction.
+ * exactly-once effect: dispatching with one is a no-op. Seeded keys
+ * carry no fingerprint (see {@link IdempotencyFingerprint}), so a
+ * seeded key keeps the legacy any-event no-op — a legacy key is a
+ * bare key, and the binding is never invented after the fact.
+ * Invalid values throw `invalid option: …` at construction.
+ *
+ * `idempotencyKeyFingerprints` is an optional record that re-attaches
+ * the fingerprint a seeded key was consumed with (see
+ * {@link IdempotencyFingerprint} for the shape): the counterpart to
+ * `idempotencyKeys` for `fromHistory()` restores that need the binding
+ * preserved, not just the bare key. Every record key must already be
+ * present in `idempotencyKeys` — a fingerprint for a key the task
+ * never consumed is rejected at construction, fail-closed. Keys left
+ * out of the record stay legacy bare keys. Invalid values throw
+ * `invalid option: …` at construction.
  *
  * `requirePayoutRef` is an optional boolean (default `false`): when
  * `true`, `dispatch("PAYOUT_COMPLETE")` without a `payoutRef` throws
@@ -3364,6 +3377,7 @@ export interface TaskLifecycleOptions {
   requirePayoutAmount?: boolean;
   requireActor?: boolean;
   idempotencyKeys?: string[];
+  idempotencyKeyFingerprints?: Record<string, IdempotencyFingerprint>;
   auditSecret?: AuditSecret;
   /**
    * Per-state advisory SLA deadlines, attached at construction. Keys
@@ -3404,6 +3418,7 @@ const TASK_OPTION_FIELDS = new Set([
   "requirePayoutAmount",
   "requireActor",
   "idempotencyKeys",
+  "idempotencyKeyFingerprints",
   "auditSecret",
   "slaDeadlines",
 ]);
@@ -3499,6 +3514,205 @@ function assertIdempotencyKeys(
     keys.add(key);
   }
   return keys;
+}
+
+/**
+ * The dispatch a consumed idempotency key is bound to (backlog #1424):
+ * the event it first executed, plus the payload fields that identify
+ * that execution — `actor`, `payoutRef`, `payoutAmount`,
+ * `quotedAmount`, each recorded only when the dispatch carried it.
+ * `at` and `expectedSeq` are deliberately NOT part of the fingerprint:
+ * a legitimate retry may legitimately carry a fresh timestamp or a
+ * fresh seq, and binding those would turn a retry into a conflict.
+ * `note` is excluded for the same reason a fingerprint is about the
+ * payment identity of the dispatch, not its annotation: two retries of
+ * one payout that differ only in their note are the same dispatch.
+ *
+ * A key with no fingerprint is a legacy key: it was seeded through
+ * `TaskLifecycleOptions.idempotencyKeys` (or restored from a snapshot
+ * written before fingerprints existed), and it keeps the pre-#1424
+ * any-event no-op — the binding only exists where the fingerprint
+ * was recorded, never invented after the fact.
+ */
+export interface IdempotencyFingerprint {
+  event: TaskEvent;
+  actor?: string;
+  payoutRef?: string;
+  payoutAmount?: number;
+  quotedAmount?: number;
+}
+
+/** Whitelist of {@link IdempotencyFingerprint} field names. */
+const IDEMPOTENCY_FINGERPRINT_FIELDS = new Set([
+  "event",
+  "actor",
+  "payoutRef",
+  "payoutAmount",
+  "quotedAmount",
+]);
+
+/**
+ * Build the fingerprint a dispatch records when its idempotency key is
+ * consumed: the event plus exactly the payload fields the dispatch
+ * carried (see {@link IdempotencyFingerprint} for what is excluded and
+ * why). Called at the dedupe check and again at the consume point, so
+ * the stored fingerprint is always the one the check compared against.
+ */
+function buildIdempotencyFingerprint(
+  event: TaskEvent,
+  opts?: DispatchOptions,
+): IdempotencyFingerprint {
+  const fingerprint: IdempotencyFingerprint = { event };
+  if (opts?.actor !== undefined) fingerprint.actor = opts.actor;
+  if (opts?.payoutRef !== undefined) fingerprint.payoutRef = opts.payoutRef;
+  if (opts?.payoutAmount !== undefined)
+    fingerprint.payoutAmount = opts.payoutAmount;
+  if (opts?.quotedAmount !== undefined)
+    fingerprint.quotedAmount = opts.quotedAmount;
+  return fingerprint;
+}
+
+/**
+ * Two fingerprints are the same dispatch when every recorded field
+ * matches: `undefined` (field absent) compares equal to `undefined`,
+ * so a retry that omits a field the first call omitted still matches,
+ * while a retry that adds or changes any recorded field does not.
+ * Amounts compare by numeric value — `100` and `100.0` are the same
+ * double, so they are the same fingerprint.
+ */
+function sameIdempotencyFingerprint(
+  a: IdempotencyFingerprint,
+  b: IdempotencyFingerprint,
+): boolean {
+  return (
+    a.event === b.event &&
+    a.actor === b.actor &&
+    a.payoutRef === b.payoutRef &&
+    a.payoutAmount === b.payoutAmount &&
+    a.quotedAmount === b.quotedAmount
+  );
+}
+
+/**
+ * Validate a per-key fingerprint record into a map.
+ *
+ * `undefined` means "no fingerprints" (the default — every key is a
+ * legacy bare key). Otherwise the value must be a plain record mapping
+ * consumed-key strings to {@link IdempotencyFingerprint} objects, and
+ * every record key must already be present in `keys` (the consumed-key
+ * list validated by {@link assertIdempotencyKeys}): a fingerprint for
+ * a key the task never consumed is inconsistent data, rejected
+ * fail-closed rather than silently stored. Each fingerprint's `event`
+ * must be a known {@link TaskEvent} — a fingerprint naming an event
+ * the machine does not know can never match a real dispatch, so it is
+ * rejected here instead of persisting as dead data. The payload fields
+ * take the same bar the history-entry parser applies to the same
+ * fields (non-empty strings within their length caps, finite
+ * non-negative amounts); an unknown fingerprint field is rejected,
+ * never silently dropped. Anything else throws
+ * `<tag>: idempotencyKeyFingerprints …`.
+ */
+function assertIdempotencyKeyFingerprints(
+  value: unknown,
+  tag: string,
+  keys: Set<string>,
+): Map<string, IdempotencyFingerprint> {
+  const fingerprints = new Map<string, IdempotencyFingerprint>();
+  if (value === undefined) return fingerprints;
+  if (!isRecord(value)) {
+    throw new Error(
+      `${tag}: idempotencyKeyFingerprints must be an object mapping idempotency keys to fingerprints, got ${typeof value}`,
+    );
+  }
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error(
+        `${tag}: idempotencyKeyFingerprints keys must be non-empty strings, got ${JSON.stringify(key)}`,
+      );
+    }
+    if (key.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+      throw new Error(
+        `${tag}: idempotencyKeyFingerprints keys must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters, got ${key.length}`,
+      );
+    }
+    if (!keys.has(key)) {
+      throw new Error(
+        `${tag}: idempotencyKeyFingerprints key ${JSON.stringify(key)} has no matching idempotencyKeys entry`,
+      );
+    }
+    if (!isRecord(raw)) {
+      throw new Error(
+        `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] must be an object`,
+      );
+    }
+    for (const field of Object.keys(raw)) {
+      if (!IDEMPOTENCY_FINGERPRINT_FIELDS.has(field)) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] has unknown field "${field}"`,
+        );
+      }
+    }
+    if (!EVENTS.has(raw.event as TaskEvent)) {
+      throw new Error(
+        `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] has unknown event ${String(raw.event)}`,
+      );
+    }
+    const fingerprint: IdempotencyFingerprint = {
+      event: raw.event as TaskEvent,
+    };
+    if (raw.actor !== undefined) {
+      if (typeof raw.actor !== "string" || raw.actor.length === 0) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] actor must be a non-empty string, got ${JSON.stringify(raw.actor)}`,
+        );
+      }
+      if (raw.actor.length > MAX_ACTOR_LENGTH) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] actor must be at most ${MAX_ACTOR_LENGTH} characters, got ${raw.actor.length}`,
+        );
+      }
+      fingerprint.actor = raw.actor;
+    }
+    if (raw.payoutRef !== undefined) {
+      if (typeof raw.payoutRef !== "string" || raw.payoutRef.length === 0) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] payoutRef must be a non-empty string, got ${JSON.stringify(raw.payoutRef)}`,
+        );
+      }
+      if (raw.payoutRef.length > MAX_PAYOUT_REF_LENGTH) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] payoutRef must be at most ${MAX_PAYOUT_REF_LENGTH} characters, got ${raw.payoutRef.length}`,
+        );
+      }
+      fingerprint.payoutRef = raw.payoutRef;
+    }
+    if (raw.payoutAmount !== undefined) {
+      if (
+        typeof raw.payoutAmount !== "number" ||
+        !Number.isFinite(raw.payoutAmount) ||
+        raw.payoutAmount < 0
+      ) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] payoutAmount must be a non-negative finite number, got ${String(raw.payoutAmount)}`,
+        );
+      }
+      fingerprint.payoutAmount = raw.payoutAmount;
+    }
+    if (raw.quotedAmount !== undefined) {
+      if (
+        typeof raw.quotedAmount !== "number" ||
+        !Number.isFinite(raw.quotedAmount) ||
+        raw.quotedAmount < 0
+      ) {
+        throw new Error(
+          `${tag}: idempotencyKeyFingerprints[${JSON.stringify(key)}] quotedAmount must be a non-negative finite number, got ${String(raw.quotedAmount)}`,
+        );
+      }
+      fingerprint.quotedAmount = raw.quotedAmount;
+    }
+    fingerprints.set(key, fingerprint);
+  }
+  return fingerprints;
 }
 
 /**
@@ -3662,12 +3876,30 @@ function assertRolePolicy(
  *
  * `idempotencyKey` is a retry-safety valve for payment-flavored flows:
  * the task remembers every key it has successfully consumed, and a
- * dispatch that repeats a known key returns the current state as a
- * no-op — no audit entry is appended, no listeners are notified, and the
- * transition is not even validated (a retried webhook that arrives after
- * the task already moved on is safe to replay: it will not throw
- * `invalid transition`). Keys are global to the task, not per-event:
- * reusing the same key for a different event still dedupes.
+ * dispatch that repeats a known key with the same dispatch — the same
+ * event and the same payload (`actor`, `payoutRef`, `payoutAmount`,
+ * `quotedAmount`) — returns the current state as a no-op: no audit
+ * entry is appended, no listeners are notified, and the transition is
+ * not even validated (a retried webhook that arrives after the task
+ * already moved on is safe to replay: it will not throw
+ * `invalid transition`). The key is bound to the dispatch it first
+ * executed (see {@link IdempotencyFingerprint}): reusing the same key
+ * for a different event, a different actor, or a different payout
+ * amount or reference throws
+ * `dispatch conflict: idempotency key "<key>" was already used for
+ * <event>, got <event>` instead of silently reporting success — a
+ * redelivered payout webhook and a fresh payout that accidentally
+ * reused the key are different dispatches, and the second one must
+ * fail loudly rather than vanish into a no-op. Only `at` and
+ * `expectedSeq` are excluded from the binding (a legitimate retry may
+ * carry a fresh timestamp or seq), as is `note` (an annotation, not
+ * payment identity).
+ *
+ * Legacy keys — seeded through `TaskLifecycleOptions.idempotencyKeys`
+ * or restored from a snapshot written before fingerprints existed —
+ * carry no fingerprint and keep the pre-#1424 any-event no-op: a
+ * seeded key dedupes whatever event it is replayed under. The binding
+ * is recorded where the dispatch happened, never invented afterwards.
  *
  * Fail-fast ordering: the key's own shape (a non-empty string of at
  * most {@link MAX_IDEMPOTENCY_KEY_LENGTH} characters) is validated up
@@ -3828,6 +4060,18 @@ export interface SubscribeOptions {
  * duplicates deduped, so a consumed key keeps its no-op effect after a
  * snapshot restore.
  *
+ * `idempotencyKeyFingerprints` is present only when at least one
+ * consumed key carries a fingerprint (see
+ * {@link IdempotencyFingerprint}): a record from key to the dispatch
+ * that key first executed. Keys without an entry are legacy bare keys
+ * (seeded, or restored from a pre-fingerprint snapshot) and keep the
+ * any-event no-op. The record rehydrates through strict validation —
+ * every record key must name a consumed key, every fingerprint's
+ * `event` must be a known event, unknown fingerprint fields are
+ * rejected — so a snapshot restore keeps the binding a retry relies
+ * on, and a tampered binding is rejected instead of silently
+ * re-interpreted.
+ *
  * `requirePayoutRef` / `requirePayoutAmount` / `requireActor` are
  * present only when the corresponding gate is enabled. `toJSON()`
  * writes each field ONLY when its gate is on, so a gate-off task's
@@ -3882,6 +4126,20 @@ export interface TaskSnapshot {
   rolePolicy?: RolePolicy;
   idempotencyKeys?: string[];
   /**
+   * Per-key dispatch fingerprint (see {@link IdempotencyFingerprint}),
+   * present only when at least one consumed key carries one. A key
+   * absent from this record is a legacy bare key: it dedupes any event
+   * after restore, exactly as a seeded key does. `toJSON()` writes
+   * this field ONLY when the record is non-empty, so a task whose keys
+   * are all legacy keeps its exact legacy snapshot shape.
+   * `fromJSON()` restores it (strict validation; every record key must
+   * name a consumed key, every fingerprint's `event` must be known).
+   * A legacy snapshot without the field restores all keys as bare.
+   * The schema version stays 1: the field is an optional binding
+   * record, not a format change.
+   */
+  idempotencyKeyFingerprints?: Record<string, IdempotencyFingerprint>;
+  /**
    * Payout-reference gate (see {@link TaskLifecycleOptions.requirePayoutRef}),
    * present only when the gate is enabled. `toJSON()` writes this
    * field ONLY when true, so a gate-off task's snapshot keeps its
@@ -3935,6 +4193,7 @@ const SNAPSHOT_FIELDS = new Set([
   "maxVisitsByState",
   "rolePolicy",
   "idempotencyKeys",
+  "idempotencyKeyFingerprints",
   "requirePayoutRef",
   "requirePayoutAmount",
   "requireActor",
@@ -3986,7 +4245,8 @@ const HISTORY_ENTRY_FIELDS = new Set([
  * Why this exists: the audit hash chain covers the history entries
  * only — the snapshot-level fields (`state`, `slaDeadlines`,
  * `maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`,
- * `idempotencyKeys`, `requirePayoutRef`, `requirePayoutAmount`,
+ * `idempotencyKeys`, `idempotencyKeyFingerprints`,
+ * `requirePayoutRef`, `requirePayoutAmount`,
  * `requireActor`) sit outside the chain, so a rewritten persisted
  * snapshot could push an SLA deadline back, loosen a budget or a
  * policy, drop a payout/actor gate, or clear consumed idempotency
@@ -4344,7 +4604,11 @@ function assertTaskSnapshotShape(snapshot: unknown, tag: string): void {
   assertMaxDisputes(snapshot.maxDisputes, tag);
   assertMaxVisitsByState(snapshot.maxVisitsByState, tag);
   assertRolePolicy(snapshot.rolePolicy, tag);
-  assertIdempotencyKeys(snapshot.idempotencyKeys, tag);
+  assertIdempotencyKeyFingerprints(
+    snapshot.idempotencyKeyFingerprints,
+    tag,
+    assertIdempotencyKeys(snapshot.idempotencyKeys, tag),
+  );
   if (snapshot.requirePayoutRef !== undefined) {
     if (typeof snapshot.requirePayoutRef !== "boolean") {
       throw new Error(
@@ -4409,10 +4673,16 @@ export interface TaskSnapshotDiff {
   };
   /**
    * Consumed idempotency-key set moved (a key consumed, or a key
-   * dropped on restore). Reported as a plain boolean: the set is
-   * compared order-insensitively, and a snapshot without the field
-   * (legacy, or no key consumed yet) compares as the empty set, so
-   * "no field" and an empty array are the same state.
+   * dropped on restore) — or the binding moved: a key that gained,
+   * lost, or changed its fingerprint (see
+   * {@link IdempotencyFingerprint}) is a change worth reporting even
+   * when the key set itself is identical, because it changes which
+   * retries the restored task will accept. Reported as a plain
+   * boolean: the set is compared order-insensitively, the fingerprint
+   * record key-insensitively, and a snapshot without either field
+   * (legacy, or no key consumed yet) compares as the empty set with
+   * no bindings, so "no field" and an empty array / empty record are
+   * the same state.
    */
   idempotencyKeysChanged?: boolean;
   /**
@@ -4456,7 +4726,9 @@ export interface TaskSnapshotDiff {
  * it appends no history entry — `setSlaDeadline` /
  * `clearSlaDeadline` touch no audit log), the consumed
  * idempotency-key set as a whole (compared order-insensitively; a
- * snapshot without the field is the empty set), the three
+ * snapshot without the field is the empty set), the fingerprint
+ * record as a whole (compared key-insensitively; a snapshot without
+ * the field carries no bindings), the three
  * payout/actor gates `requirePayoutRef` / `requirePayoutAmount` /
  * `requireActor` (only an off->on or on->off flip counts — an absent
  * field and an explicit `false` are the same gate-off state), and
@@ -4464,14 +4736,15 @@ export interface TaskSnapshotDiff {
  * `v` and the configuration fields (`maxResubmits`, `maxDisputes`,
  * `maxVisitsByState`, `rolePolicy`) are deliberately not reported:
  * the version is schema metadata, and the rest is task
- * configuration, not task state. The idempotency-key set and the
- * three gates are the exceptions to that exclusion: unlike the
- * budgets and the role policy, the key set grows with every keyed
- * dispatch, so it is task state, and a key consumed (or dropped on
- * restore) between two stored snapshots is a change worth
- * reporting; likewise a gate flipped between two stored snapshots
- * changes which dispatches the restored task will accept, so it is
- * audit-relevant too. This mirrors the sibling
+ * configuration, not task state. The idempotency-key set and its
+ * fingerprint record, and the three gates, are the exceptions to that
+ * exclusion: unlike the budgets and the role policy, the key set grows
+ * with every keyed dispatch, so it is task state, and a key consumed
+ * (or dropped on restore) between two stored snapshots is a change worth
+ * reporting — as is a binding gained, lost, or changed between two
+ * snapshots of the same key set; likewise a gate flipped between two
+ * stored snapshots changes which dispatches the restored task will accept,
+ * so it is audit-relevant too. This mirrors the sibling
  * `escrow-state-machine-ts` repo's `diffEscrowSnapshots`, which
  * reports the same dimensions for the same reasons.
  *
@@ -4579,7 +4852,11 @@ export function diffTaskSnapshots(
   if (canonicalDiffJson(slaFrom) !== canonicalDiffJson(slaTo)) {
     diff.slaChanged = { from: slaFrom, to: slaTo };
   }
-  if (idempotencyKeysKey(a.idempotencyKeys) !== idempotencyKeysKey(b.idempotencyKeys)) {
+  if (
+    idempotencyKeysKey(a.idempotencyKeys) !== idempotencyKeysKey(b.idempotencyKeys) ||
+    canonicalDiffJson(a.idempotencyKeyFingerprints ?? {}) !==
+      canonicalDiffJson(b.idempotencyKeyFingerprints ?? {})
+  ) {
     diff.idempotencyKeysChanged = true;
   }
   if ((a.requirePayoutRef === true) !== (b.requirePayoutRef === true)) {
@@ -5371,7 +5648,8 @@ function computeSignedSnapshotMac(
  *  - unknown top-level fields are rejected (fail-closed), never silently
  *    dropped: only `v`/`id`/`state`/`history`/`slaDeadlines`/
  *    `maxResubmits`/`maxDisputes`/`maxVisitsByState`/`rolePolicy`/
- *    `idempotencyKeys`/`requirePayoutRef`/`requirePayoutAmount`/
+ *    `idempotencyKeys`/`idempotencyKeyFingerprints`/
+ *    `requirePayoutRef`/`requirePayoutAmount`/
  *    `requireActor` are allowed (`unknown field "<name>"`), checked
  *    right after the version gate and before any field is consumed, so a
  *    typo like `deadlline` fails loudly instead of quietly losing the
@@ -5392,6 +5670,12 @@ function computeSignedSnapshotMac(
  *    the budget only governs future dispatches into that state)
  *  - idempotencyKeys, when present, must be an array of non-empty
  *    strings (duplicates are deduped on rehydration)
+ *  - idempotencyKeyFingerprints, when present, must be a record from
+ *    consumed keys to fingerprints (see {@link IdempotencyFingerprint}):
+ *    every record key must name a key in `idempotencyKeys`, every
+ *    fingerprint's `event` must be a known event, and unknown
+ *    fingerprint fields are rejected. Keys without an entry restore
+ *    as legacy bare keys.
  *  - requirePayoutRef / requirePayoutAmount / requireActor, when
  *    present, must each be a boolean (absent means that gate is off,
  *    the legacy shape; a history that already lacks the gated evidence
@@ -5409,7 +5693,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   maxDisputes: number;
   maxVisitsByState: Map<TaskState, number>;
   rolePolicy: Map<TaskEvent, string[]>;
-  idempotencyKeys: Set<string>;
+  idempotencyKeys: Map<string, IdempotencyFingerprint | undefined>;
   requirePayoutRef: boolean | undefined;
   requirePayoutAmount: boolean | undefined;
   requireActor: boolean | undefined;
@@ -5518,11 +5802,24 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   // Same for the consumed idempotency keys: dispatch configuration for
   // future dispatches, validated strictly (a tampered key list is
   // rejected, not silently trusted) but never consulted against the
-  // stored history.
-  const idempotencyKeys = assertIdempotencyKeys(
+  // stored history. The fingerprint record rides alongside: every
+  // record key must name a consumed key, every fingerprint's event
+  // must be known — a snapshot whose binding names an event the
+  // machine does not know is rejected, not restored as dead data.
+  // Keys without a fingerprint restore as legacy bare keys.
+  const idempotencyKeySet = assertIdempotencyKeys(
     snapshot.idempotencyKeys,
     "invalid snapshot",
   );
+  const idempotencyKeyFingerprints = assertIdempotencyKeyFingerprints(
+    snapshot.idempotencyKeyFingerprints,
+    "invalid snapshot",
+    idempotencyKeySet,
+  );
+  const idempotencyKeys = new Map<string, IdempotencyFingerprint | undefined>();
+  for (const key of idempotencyKeySet) {
+    idempotencyKeys.set(key, idempotencyKeyFingerprints.get(key));
+  }
 
   // Same for the three payout/actor gates: configuration for future
   // dispatches, validated strictly but never consulted against the
@@ -5593,12 +5890,16 @@ export class TaskLifecycle {
    */
   private _requireActor: boolean;
   /**
-   * Idempotency keys consumed by successful dispatches. Persisted in
-   * the JSON snapshot when non-empty (see DispatchOptions for the
-   * documented semantics), and re-attachable on fromHistory() via
-   * `TaskLifecycleOptions.idempotencyKeys`.
+   * Idempotency keys consumed by successful dispatches, each bound to
+   * the dispatch it first executed — or `undefined` for a legacy bare
+   * key (seeded, or restored from a pre-fingerprint snapshot), which
+   * keeps the any-event no-op. Persisted in the JSON snapshot when
+   * non-empty (see DispatchOptions for the documented semantics), and
+   * re-attachable on fromHistory() via
+   * `TaskLifecycleOptions.idempotencyKeys` (bare keys) plus
+   * `TaskLifecycleOptions.idempotencyKeyFingerprints` (their bindings).
    */
-  private _idempotencyKeys: Set<string>;
+  private _idempotencyKeys: Map<string, IdempotencyFingerprint | undefined>;
   /**
    * Secret for the keyed (HMAC) audit hash chain, or undefined for the
    * default unkeyed chain. Task configuration: never written into the
@@ -5647,10 +5948,26 @@ export class TaskLifecycle {
       opts?.requireActor,
       "invalid option",
     );
-    this._idempotencyKeys = assertIdempotencyKeys(
+    // Seeded keys are legacy bare keys (no fingerprint recorded — the
+    // binding is never invented after the fact); a fingerprint record
+    // re-attaches the binding for the seeded keys it names, and a
+    // record key without a matching seeded key is rejected above.
+    const seededKeys = assertIdempotencyKeys(
       opts?.idempotencyKeys,
       "invalid option",
     );
+    const seededFingerprints = assertIdempotencyKeyFingerprints(
+      opts?.idempotencyKeyFingerprints,
+      "invalid option",
+      seededKeys,
+    );
+    this._idempotencyKeys = new Map<
+      string,
+      IdempotencyFingerprint | undefined
+    >();
+    for (const key of seededKeys) {
+      this._idempotencyKeys.set(key, seededFingerprints.get(key));
+    }
     if (opts?.auditSecret !== undefined) {
       assertAuditSecret(opts.auditSecret, "invalid option");
     }
@@ -6004,11 +6321,19 @@ export class TaskLifecycle {
    *
    * Idempotency: when `opts.idempotencyKey` carries a key the task has
    * already consumed, dispatch returns the current state immediately as a
-   * no-op — no history entry, no listener notification, no transition
-   * validation. Failed dispatches never consume a key (the key is recorded
+   * no-op — but only when the replay matches the dispatch the key was
+   * consumed by (same event, same actor, same payout reference and
+   * amounts; see {@link IdempotencyFingerprint}). A known key replayed
+   * under a different event or payload throws
+   * `dispatch conflict: idempotency key "<key>" was already used for
+   * <event>, got <event>` instead — no history entry, no listener
+   * notification, no key re-consumed. A legacy bare key (seeded, or
+   * restored from a pre-fingerprint snapshot) still dedupes any event.
+   * Failed dispatches never consume a key (the key is recorded
    * only alongside a successful append), so a corrected retry with the same
    * key still executes. The key set survives `toJSON()`/`fromJSON()`
-   * round-trips and is re-attached on `fromHistory()` via options — see
+   * round-trips — fingerprints included — and is re-attached on
+   * `fromHistory()` via options — see
    * {@link DispatchOptions}.
    *
    * Retry budget: when this task was constructed with a finite
@@ -6224,12 +6549,28 @@ export class TaskLifecycle {
           `invalid dispatch options: idempotencyKey must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters, got ${opts.idempotencyKey.length}`,
         );
       }
-      // Retry: a known key is a complete no-op — no transition validation
-      // (the task may already have moved on), no history append, no
-      // listener notification. Failed dispatches consume nothing, so this
+      // Retry: a known key is a complete no-op — but only for the same
+      // dispatch it was consumed by (backlog #1424). The key is bound
+      // to the event and payload it first executed; a different event,
+      // actor, payout reference, or payout/quoted amount under the
+      // same key is a different dispatch that must fail loudly with a
+      // `dispatch conflict` instead of silently reporting success —
+      // a redelivered payout webhook and a fresh payout that
+      // accidentally reused the key are not the same call. A legacy
+      // bare key (seeded, or restored without a fingerprint) keeps the
+      // old any-event no-op. Failed dispatches consume nothing, so this
       // point is only reached when the key was fully consumed by an
       // earlier successful dispatch.
       if (this._idempotencyKeys.has(opts.idempotencyKey)) {
+        const stored = this._idempotencyKeys.get(opts.idempotencyKey);
+        if (stored !== undefined) {
+          const fingerprint = buildIdempotencyFingerprint(event, opts);
+          if (!sameIdempotencyFingerprint(stored, fingerprint)) {
+            throw new Error(
+              `dispatch conflict: idempotency key ${JSON.stringify(opts.idempotencyKey)} was already used for ${stored.event}, got ${event}`,
+            );
+          }
+        }
         return this._state;
       }
     }
@@ -6326,10 +6667,14 @@ export class TaskLifecycle {
       );
     }
     // All checks passed: consume the idempotency key exactly once, with the
-    // successful append. Keys are never recorded for failed dispatches,
+    // successful append, bound to this dispatch (see the dedupe check
+    // above). Keys are never recorded for failed dispatches,
     // so retrying a bad call with the same key stays possible.
     if (opts?.idempotencyKey !== undefined) {
-      this._idempotencyKeys.add(opts.idempotencyKey);
+      this._idempotencyKeys.set(
+        opts.idempotencyKey,
+        buildIdempotencyFingerprint(event, opts),
+      );
     }
     this._state = to;
     // Hash-chain the audit trail: the new entry commits to the previous
@@ -6553,7 +6898,20 @@ export class TaskLifecycle {
       snapshot.rolePolicy = Object.fromEntries(this._rolePolicy);
     }
     if (this._idempotencyKeys.size > 0) {
-      snapshot.idempotencyKeys = [...this._idempotencyKeys];
+      snapshot.idempotencyKeys = [...this._idempotencyKeys.keys()];
+      // The binding record rides alongside the key list, only for the
+      // keys that carry one: legacy bare keys stay bare, and a task
+      // whose keys are all legacy keeps the exact legacy snapshot
+      // shape (no empty record written).
+      const fingerprints: Record<string, IdempotencyFingerprint> = {};
+      for (const [key, fingerprint] of this._idempotencyKeys) {
+        if (fingerprint !== undefined) {
+          fingerprints[key] = { ...fingerprint };
+        }
+      }
+      if (Object.keys(fingerprints).length > 0) {
+        snapshot.idempotencyKeyFingerprints = fingerprints;
+      }
     }
     if (this._requirePayoutRef) {
       snapshot.requirePayoutRef = true;
@@ -6717,6 +7075,7 @@ export class TaskLifecycle {
    * `Error` and no task is produced — a tampered `state`,
    * `slaDeadlines`, `maxResubmits`, `maxDisputes`,
    * `maxVisitsByState`, `rolePolicy`, `idempotencyKeys`,
+   * `idempotencyKeyFingerprints`,
    * `requirePayoutRef`, `requirePayoutAmount`, or `requireActor`, a
    * tampered history entry, or a wrong secret all fail here, before
    * any snapshot parsing, so a tampered envelope can never partially
@@ -6885,7 +7244,14 @@ export class TaskLifecycle {
    * throws `invalid option: …` at construction. Omit it and the
    * rehydrated task starts with an empty key set, so a retried key would
    * re-execute (the keys are not part of the audit log, so they cannot
-   * be restored on their own).
+   * be restored on their own). Re-attached keys are legacy bare keys:
+   * they dedupe any event, exactly as before fingerprints existed —
+   * the binding is only recorded where a dispatch consumed the key.
+   * `opts.idempotencyKeyFingerprints` re-attaches the binding alongside
+   * the bare keys (see {@link IdempotencyFingerprint}): every record
+   * key must name a key in `idempotencyKeys`, and a fingerprint for a
+   * key the task never consumed throws `invalid option: …` at
+   * construction; keys left out of the record stay bare.
    * `opts.auditSecret` re-attaches the keyed hash-chain secret the same
    * way; a keyed log restored without it (or with the wrong secret) is
    * rejected as a broken hash chain, and a legacy hashless log restored

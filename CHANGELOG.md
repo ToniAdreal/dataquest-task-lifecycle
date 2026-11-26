@@ -124,6 +124,48 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- Dispatch idempotency keys are now bound to the dispatch they first executed
+  (2026-11-26, backlog #1424): `_idempotencyKeys` was a bare `Set<string>`,
+  so a key consumed by `PUBLISH` would silently no-op a later
+  `PAYOUT_COMPLETE` replayed under the same key — the caller would believe
+  the payout dispatch had happened. Each consumed key now carries a
+  fingerprint (`IdempotencyFingerprint`: event + actor + payoutRef +
+  payoutAmount + quotedAmount; `at`, `expectedSeq`, and `note` are
+  deliberately excluded — a legitimate retry may carry a fresh timestamp
+  or seq, and a note is annotation, not payment identity). A repeat with
+  the same event and payload is still a full no-op; the same key under a
+  different event, actor, or payout amount/reference throws
+  `dispatch conflict: idempotency key "<key>" was already used for
+  <event>, got <event>` before any transition/RBAC/budget check, with no
+  mutation and no key re-consumed. The fingerprint rides in the snapshot
+  as `idempotencyKeyFingerprints` (the bare `idempotencyKeys` list stays
+  for backward compatibility), restored through strict validation — a
+  fingerprint naming an unknown event, or a key the snapshot never
+  consumed, is rejected — and `fromHistory()` can re-attach it via the
+  new `TaskLifecycleOptions.idempotencyKeyFingerprints` (every record key
+  must name a seeded key). Legacy bare keys (seeded, or restored from a
+  pre-fingerprint snapshot) keep the old any-event no-op; the binding is
+  recorded where the dispatch happened, never invented afterwards.
+  `diffTaskSnapshots` reports a fingerprint change through
+  `idempotencyKeysChanged` even when the key set is identical, and the
+  demo's DEMO-026 segment and the bench's cross-event probe now show the
+  conflict instead of the old cross-event dedupe. Fourteen new tests in
+  `test/idempotencyKeyFingerprint.test.ts` pin the binding (same-dispatch
+  no-op, cross-event/actor/amount/ref/quote conflicts, `at`/`note`
+  exclusion, conflict-before-RBAC ordering, failed-dispatch reuse,
+  snapshot round-trip and legacy restore, snapshot validation,
+  `fromHistory` bare and fingerprinted forms, seeded legacy keys, diff
+  reporting, stale-`expectedSeq`-first). Eight older files are re-pinned
+  to the new contract: the cross-event expectations in
+  `idempotencyKey`, `idempotencyKeySnapshot`, `demo`,
+  `taskLifecycleSignedSnapshot` and `payoutWebhookExpectedSeq`, the
+  hand-edited snapshots in `diffTaskSnapshotsIdempotencyKeys` and
+  `snapshotUnknownFields`, and the bench cross-event probe. A mutation
+  check (forcing the fingerprint comparison to always match) turns the
+  conflict tests red, and storing no fingerprint at dispatch turns the
+  binding tests red. The test count rises by fourteen (2152 to 2166
+  tests).
+
 - `toMinorUnits` now rejects amounts past the safe-integer ceiling
   (2026-11-26, backlog #1423): the converter only checked
   finiteness, so `toMinorUnits(90071992547409.93)` silently returned

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2152 tests, all local
+npm test   # 2166 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -529,16 +529,19 @@ task under fixed timestamps with pinned
 `idempotencyKey`s: the same key sent twice for the
 same event appends a single history entry and
 notifies its listener once, after the task moves on
-retries under the old key still dedupe — both for a
-different (would-be legal) event and for the stale
+a retry under the old key still dedupes for the stale
 original event, returning the current state without
-throwing `invalid transition` — a second dedicated
-task first fails a dispatch under a pinned key (an
-illegal transition), which consumes nothing, so the
-corrected dispatch under the same key then succeeds,
-and a final dispatch with no key at all appends
-normally — the retry-safety valve, shown instead of
-only asserted by the idempotency key tests.
+throwing `invalid transition`, while the same key
+under a different event is rejected with the pinned
+`dispatch conflict: idempotency key … was already used
+for …` error — the key is bound to the dispatch it
+first executed — a second dedicated task first fails
+a dispatch under a pinned key (an illegal transition),
+which consumes nothing, so the corrected dispatch under
+the same key then succeeds, and a final dispatch with
+no key at all appends normally — the retry-safety valve,
+shown instead of only asserted by the idempotency key
+tests.
 
 The package entry point is declared in `package.json` via an `exports` map
 (`.` → `dist/src/index.js`, types `dist/src/index.d.ts`); `main`/`types` are
@@ -2286,8 +2289,21 @@ task.dispatch("PUBLISH", { idempotencyKey: "webhook-dlv-9f3a" }); // no-op
 task.history.length; // => 1
 ```
 
-Keys are global to the task, not per-event: reusing the same key for a
-different event still dedupes. The key itself must be a non-empty string
+Keys are bound to the dispatch they first executed, not just to the
+key string: a consumed key records a fingerprint — the event plus
+the payload fields that identify that execution (`actor`,
+`payoutRef`, `payoutAmount`, `quotedAmount`, each recorded only when
+the dispatch carried it). A repeat with the same event and the same
+payload is the no-op above; reusing the same key for a different
+event, a different actor, or a different payout amount or reference
+throws `dispatch conflict: idempotency key "<key>" was already used
+for <event>, got <event>` instead of silently reporting success — a
+redelivered payout webhook and a fresh payout that accidentally
+reused the key are different dispatches, and the second one must
+fail loudly rather than vanish into a no-op. Only `at` and
+`expectedSeq` are excluded from the binding (a legitimate retry may
+carry a fresh timestamp or seq), as is `note` (an annotation, not
+payment identity). The key itself must be a non-empty string
 of at most 256 characters (`MAX_IDEMPOTENCY_KEY_LENGTH`, exported from
 the index — the same ceiling the sibling escrow repo uses): an overlong
 key is rejected up front (`invalid dispatch options: …`), never
@@ -2298,14 +2314,25 @@ Omitting the key preserves the exact pre-idempotency behavior.
 
 Snapshot persistence: the consumed-key set is written into the
 `toJSON()` snapshot whenever it is non-empty (an empty set is omitted,
-so keyless tasks keep the legacy snapshot shape), and `fromJSON()`
-restores it through strict validation — a snapshot whose key list is
-not an array of non-empty strings, or carries an entry longer than 256
-characters, is rejected, and duplicates are
-deduped. A retry with a consumed key after a snapshot restore is
-therefore still a no-op. `fromHistory()` cannot recover keys from the
-audit log (they are not audit data), so re-attach them explicitly:
-`TaskLifecycle.fromHistory(id, history, { idempotencyKeys: [...] })`.
+so keyless tasks keep the legacy snapshot shape), alongside an
+`idempotencyKeyFingerprints` record — key to the dispatch that key
+first executed — written only when at least one key carries a
+fingerprint. `fromJSON()` restores both through strict validation:
+a snapshot whose key list is not an array of non-empty strings, or
+carries an entry longer than 256 characters, is rejected, and
+duplicates are deduped; a fingerprint naming an unknown event, or a
+key the snapshot never consumed, is rejected the same way. Keys
+without a fingerprint entry are legacy bare keys (seeded, or restored
+from a snapshot written before fingerprints existed) and keep the old
+any-event no-op — the binding is recorded where the dispatch
+happened, never invented afterwards. A retry with a consumed key
+after a snapshot restore is therefore still a no-op for the same
+dispatch, and still a conflict for a different one.
+`fromHistory()` cannot recover keys from the audit log (they are not
+audit data), so re-attach them explicitly:
+`TaskLifecycle.fromHistory(id, history, { idempotencyKeys: [...] })`
+(bare keys, legacy behavior) or with their bindings:
+`{ idempotencyKeys: [...], idempotencyKeyFingerprints: { "<key>": { event, ... } } }`.
 
 Honest limit: this preserves exactly-once across restarts that go
 through the snapshot, within one process/store. It is not a
@@ -2838,7 +2865,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2152 tests covering the happy path, reject→resubmit
+`npm test` runs 2166 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

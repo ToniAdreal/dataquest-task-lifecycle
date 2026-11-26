@@ -42,7 +42,7 @@ import {
  *    body and a wrong secret both fail (so the pass is not vacuous)
  *  - a conflict consumes no idempotency key: the same key retries
  *    successfully with the fresh seq, and only then is it consumed
- *    (a bare retry afterwards is a no-op, with no history gap)
+ *    (an identical replay afterwards is a no-op, with no history gap)
  */
 
 const SECRET = "whsec_test_payout_expected_seq_20261102";
@@ -197,9 +197,15 @@ describe("payout webhook x expectedSeq", () => {
     );
     assert.equal(task.history.length, 8);
     assert.deepEqual(task.toJSON().idempotencyKeys, ["payout-1"]);
-    // Only now is the key consumed: a bare retry is a no-op.
+    // Only now is the key consumed: an identical replay is a no-op
+    // (backlog #1424 — the replay must carry the same dispatch: a
+    // bare retry without the payout payload would be a different
+    // dispatch and is now a conflict, not a no-op).
     assert.equal(
-      task.dispatch("PAYOUT_COMPLETE", { idempotencyKey: "payout-1" }),
+      task.dispatch("PAYOUT_COMPLETE", {
+        ...payoutCompleteOptions(),
+        idempotencyKey: "payout-1",
+      }),
       "PAID",
     );
     assert.equal(task.history.length, 8);

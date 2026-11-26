@@ -151,14 +151,26 @@ test("signed snapshot round-trip restores config and continues dispatch", () => 
   assert.equal(restored.history[3].prevHash, restored.history[2].hash);
   assert.equal(verifyHistoryChain(restored.history), true);
   // A replayed consumed key stays a no-op after the restore (the
-  // dedupe returns the current state and appends nothing).
+  // dedupe returns the current state and appends nothing) — replayed
+  // as the same dispatch it was consumed by (backlog #1424: the same
+  // key under a different event is now a conflict, not a no-op).
   assert.equal(
-    restored.dispatch("SUBMIT", {
+    restored.dispatch("ACCEPT", {
       actor: "contributor-7",
       at: "2026-11-09T00:04:00.000Z",
       idempotencyKey: "acc-1",
     }),
     "SUBMITTED",
+  );
+  assert.equal(restored.history.length, 4);
+  assert.throws(
+    () =>
+      restored.dispatch("SUBMIT", {
+        actor: "contributor-7",
+        at: "2026-11-09T00:05:00.000Z",
+        idempotencyKey: "acc-1",
+      }),
+    /dispatch conflict: idempotency key "acc-1" was already used for ACCEPT, got SUBMIT/,
   );
   assert.equal(restored.history.length, 4);
 });

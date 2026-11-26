@@ -9937,9 +9937,13 @@ checkVerifyHistoryChainAuditSecret(
 //     holds exactly the pinned key, and the collecting listener
 //     is notified exactly once (for the first dispatch only).
 // Outside the timed loop, three probes pin the wider semantics:
-//   - cross-event dedupe: the same key under `ACCEPT` (a legal
-//     next event) still dedupes — it returns OPEN and appends
-//     nothing, because the key, not the event, is the identity;
+//   - cross-event conflict: the same key under `ACCEPT` (a legal
+//     next event) is rejected with the pinned `dispatch conflict:
+//     idempotency key … was already used for PUBLISH, got ACCEPT`
+//     error — the key is bound to the dispatch it first executed
+//     (backlog #1424), so a different event under a consumed key
+//     fails loudly instead of silently reporting success; the
+//     state and history are unchanged by the rejection;
 //   - stale retry: after the task moves on to ACCEPTED under a
 //     keyless dispatch, the original key under `PUBLISH` returns
 //     the current state (ACCEPTED) and appends nothing;
@@ -9991,24 +9995,32 @@ function runIdempotencyPass(where: string): TaskLifecycle {
 // itself, run once end to end.
 runIdempotencyPass("dispatch idempotency dedupe fixture");
 // Cross-event + stale-retry probes (outside the timed loop):
-// the pinned key dedupes under a different event, and still
-// dedupes — answering with the then-current state — after the
-// task has moved on under a keyless dispatch.
+// the pinned key under a different event is a conflict (the key
+// is bound to the PUBLISH it first executed), and the stale
+// PUBLISH under that key still dedupes — answering with the
+// then-current state — after the task has moved on under a
+// keyless dispatch.
 {
   const probe = runIdempotencyPass("dispatch idempotency cross-event probe");
-  const crossEvent = probe.dispatch("ACCEPT", {
-    actor: "contributor",
-    at: new Date(BASE_MS + 2000).toISOString(),
-    quotedAmount: 125,
-    idempotencyKey: IDEMPOTENCY_KEY,
-  });
+  let crossEventMessage = "";
+  try {
+    probe.dispatch("ACCEPT", {
+      actor: "contributor",
+      at: new Date(BASE_MS + 2000).toISOString(),
+      quotedAmount: 125,
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
+  } catch (err) {
+    crossEventMessage = err instanceof Error ? err.message : String(err);
+  }
   if (
-    crossEvent !== "OPEN" ||
+    crossEventMessage !==
+      'dispatch conflict: idempotency key "bench-idem-publish" was already used for PUBLISH, got ACCEPT' ||
     probe.state !== "OPEN" ||
     probe.history.length !== 1
   ) {
     throw new Error(
-      "benchmark fixture failed: dispatch idempotency cross-event dedupe",
+      "benchmark fixture failed: dispatch idempotency cross-event conflict",
     );
   }
   const advanced = probe.dispatch("ACCEPT", {

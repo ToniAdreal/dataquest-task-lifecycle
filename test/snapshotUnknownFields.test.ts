@@ -65,6 +65,7 @@ test("unknown fields: toJSON self-produced snapshot round-trips with every optio
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "history",
     "id",
+    "idempotencyKeyFingerprints",
     "idempotencyKeys",
     "maxDisputes",
     "maxResubmits",

@@ -39,7 +39,11 @@ test("diffTaskSnapshots: reports true when a key is dropped between snapshots", 
   const task = taskWithKeys("t-diff-key-02");
   const before = task.toJSON();
   const dropped: TaskSnapshot = { ...before };
+  // Dropping a key drops its binding too: the two fields are a pair,
+  // and a fingerprint naming a key the snapshot no longer carries is
+  // malformed (backlog #1424), not a "dropped key".
   delete dropped.idempotencyKeys;
+  delete dropped.idempotencyKeyFingerprints;
   const diff = diffTaskSnapshots(before, dropped);
   assert.equal(diff.idempotencyKeysChanged, true);
   // Nothing else moved: same state, same history.
@@ -67,7 +71,10 @@ test("diffTaskSnapshots: reports true for a legacy snapshot without keys vs one 
   const task = taskWithKeys("t-diff-key-05");
   const withKeys = task.toJSON();
   const legacy: TaskSnapshot = { ...withKeys };
+  // A legacy snapshot carries neither the key list nor the binding
+  // record (backlog #1424).
   delete legacy.idempotencyKeys;
+  delete legacy.idempotencyKeyFingerprints;
   assert.equal(
     diffTaskSnapshots(legacy, withKeys).idempotencyKeysChanged,
     true,
@@ -85,9 +92,12 @@ test("diffTaskSnapshots: does not report when neither snapshot carries keys", ()
 test("diffTaskSnapshots: is orthogonal to the other five dimensions", () => {
   const task = taskWithKeys("t-diff-key-07");
   const before = task.toJSON();
+  // One key less means its binding goes too: the fingerprint record
+  // must name only keys the snapshot carries (backlog #1424).
   const oneKeyLess: TaskSnapshot = {
     ...before,
     idempotencyKeys: ["pay-1"],
+    idempotencyKeyFingerprints: { "pay-1": { event: "PUBLISH" } },
   };
   assert.deepEqual(diffTaskSnapshots(before, oneKeyLess), {
     idempotencyKeysChanged: true,
