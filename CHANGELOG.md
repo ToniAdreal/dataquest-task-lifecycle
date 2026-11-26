@@ -124,6 +124,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `buildPayoutWebhook` now derives its default `eventId` deterministically
+  from the settlement evidence (2026-11-26, backlog #1426): the default was
+  `crypto.randomUUID()`, so two independent builds of the same PAID task
+  produced two legitimately signed webhooks with different `eventId`s for
+  one payout, and a receiver deduplicating on `eventId` (via the included
+  `PayoutEventDedupe`) accepted both. The default is now
+  `payout-<taskId>-<completionSeq>-<hash-prefix>` from the `PAYOUT_COMPLETE`
+  entry's `seq` and audit-chain `hash` — rebuilding the same settlement
+  reuses its `eventId` (and, with a fixed `now`, its signature), while a
+  different task or a different completion entry gets a different id; `at`
+  stays the build time. A task with no `PAYOUT_COMPLETE` entry keeps the
+  random fallback (defensive: unreachable through dispatch/fromJSON/
+  fromHistory), an explicit `eventId` still overrides, and a 256-character
+  task id falls back to a fixed-length `payout-<sha256-digest>` form instead
+  of truncating past the 256-character cap. `buildPayoutWebhooks` without a
+  factory now reissues the same ids across rebuilds (the duplicate-taskId
+  guard and the factory-conflict guard are unchanged). The test count
+  rises by ten (2181 to 2191 tests).
+
 - Dispatch idempotency keys are now bound to the dispatch they first executed
   (2026-11-26, backlog #1424): `_idempotencyKeys` was a bare `Set<string>`,
   so a key consumed by `PUBLISH` would silently no-op a later

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2181 tests, all local
+npm test   # 2191 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1700,7 +1700,7 @@ canonical key order are pinned by snapshot tests
 | `payoutAmount` | `PAYOUT_COMPLETE` entry | — (escrow splits amounts across the `parties` ledger) | the entry carries no amount |
 | `quotedAmount` | last `ACCEPT` entry | `deposit` is the closest owed-side field | the last `ACCEPT` entry carries no quote |
 | `at` | payload build time | `at` | never |
-| `eventId` | build (UUID / injected) | `eventId` | never |
+| `eventId` | build (deterministic derivation / injected) | `eventId` | never |
 
 The remaining history fields are deliberately not carried: `actor`
 is a caller-asserted role label (`contributor` / `reviewer` /
@@ -1725,10 +1725,12 @@ Each task is attempted independently: a non-`PAID` task records its
 single-build error as `{ taskId, error }` and never blocks later
 tasks. One exception: a repeated `taskId` in the batch throws for
 the whole batch before anything is built — two entries for one task
-would sign two webhooks with different `eventId`s for the same
-payout, which a receiver deduplicating on `eventId` could not
-recognize as one payout. The single build is unaffected: calling it
-twice for the same task is legitimate. A second exception, per entry
+would sign two webhooks for the same payout (the same derived
+`eventId` twice, or two different ids under a factory that a receiver
+deduplicating on `eventId` could not tell apart). The single build is
+unaffected: calling it twice for the same task is legitimate — and
+now reissues the same `eventId`, so the receiver drops the rebuild
+as a duplicate. A second exception, per entry
 rather than per batch: when the `eventIdFactory` returns an `eventId`
 already issued in this batch (a counter reset or fixed value), that
 entry records `duplicate eventId "…" in batch: eventIds must be
@@ -1739,8 +1741,9 @@ value. This mirrors escrow's `buildSettlementWebhooks`
 issued-`eventId` guard. Call-level configuration errors throw for the whole batch
 instead — an empty secret, an invalid shared `now`, or a non-array
 `tasks`. The batch shares the `now` timestamp and the `eventId`
-generation strategy (`opts.eventIdFactory`, called once per task;
-default `crypto.randomUUID()`), never the `eventId` value itself:
+generation strategy (`opts.eventIdFactory`, called once per task when
+supplied; otherwise each task's `eventId` is derived from its own
+settlement evidence, backlog #1426), never the `eventId` value itself:
 each task is a distinct payout, so each built webhook carries its
 own `eventId` and verifies under the batch secret exactly as a
 single build does. Honest limit: building is a signing primitive,
@@ -1748,15 +1751,19 @@ not delivery — nothing is POSTed, queued, or retried here; deliver
 each built webhook with `deliverPayoutWebhook` (or fan one task out
 with `deliverPayoutWebhookToMany`).
 
-`eventId` defaults to `crypto.randomUUID()` — receivers MUST deduplicate
-on it, because a retried delivery would otherwise look like a second
-payout. An injected `eventId` longer than `MAX_EVENT_ID_LENGTH` (256
-characters) is rejected at build, never truncated — truncation would
-change the deduplication key, so a retry and its original could no
-longer be recognised as the same event; the default UUID is 36
-characters, so the cap leaves orders of magnitude of headroom. A
-caller that needs a longer reference should store it out-of-band and
-deduplicate on a short id. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
+`eventId` defaults to a deterministic derivation from the settlement
+evidence (`payout-<taskId>-<completionSeq>-<hash-prefix>` from the
+`PAYOUT_COMPLETE` entry; a 256-character task id falls back to a
+`payout-<sha256-digest>` form) — receivers MUST deduplicate on it,
+because a retried delivery would otherwise look like a second payout,
+and a rebuild of the same settlement now reuses the same id, so the
+receiver drops it as a duplicate. An injected `eventId` longer than
+`MAX_EVENT_ID_LENGTH` (256 characters) is rejected at build, never
+truncated — truncation would change the deduplication key, so a retry
+and its original could no longer be recognised as the same event; the
+derived default stays within the cap by construction. A caller that
+needs a longer reference should store it out-of-band and deduplicate
+on a short id. `verifyPayoutWebhook(rawBody, signature, secret)` checks the
 HMAC-SHA256 in constant time and returns a boolean; malformed signatures
 return `false` instead of throwing. Verify over the raw request body
 bytes — the object overload re-stringifies for in-process convenience,
@@ -2896,7 +2903,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2181 tests covering the happy path, reject→resubmit
+`npm test` runs 2191 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

@@ -13,7 +13,8 @@ import {
 /**
  * Payout webhook `eventId` length cap (backlog #1060, mirrors escrow
  * #1059): an `eventId` is a short deduplication key — the default is
- * a UUID (36 characters) — but the build, the receiver-side dedupe,
+ * the deterministic settlement-evidence derivation (backlog #1426) —
+ * but the build, the receiver-side dedupe,
  * and the outbox used to accept any length and write it verbatim into
  * the signed payload, the dedupe memory keys, and the persisted
  * snapshots.

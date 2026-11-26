@@ -57,15 +57,17 @@
  *   batch path, never blocking the rest of the batch).
  */
 
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { TaskHistoryEntry, TaskLifecycle } from "./taskLifecycle.js";
 
 /**
  * Maximum length of a payout webhook `eventId`, in characters
  * (backlog #1060, mirrors escrow #1059 `MAX_EVENT_ID_LENGTH`).
  *
- * An `eventId` is a short deduplication key: the default is a UUID
- * (36 characters), and the demo's fixed ids are shorter still, so
+ * An `eventId` is a short deduplication key: the default is a
+ * deterministic derivation from the settlement evidence
+ * (`payout-<taskId>-<completionSeq>-<hash-prefix>`, backlog #1426),
+ * and the demo's fixed ids are shorter still, so
  * 256 leaves orders of magnitude of headroom. An id longer than the
  * cap is rejected wherever it can enter the system — the build, the
  * receiver-side dedupe, and the outbox (record + snapshot restore) —
@@ -125,6 +127,18 @@ export interface PayoutWebhookPayload {
    * without it being a second payout. Two independent payouts always get
    * different `eventId`s. {@link PayoutEventDedupe} is the included
    * receiver-side store for this deduplication step.
+   *
+   * The default is deterministic (backlog #1426): it is derived from the
+   * settlement evidence — `payout-<taskId>-<completionSeq>-<hash-prefix>`
+   * from the `PAYOUT_COMPLETE` entry's `seq` and audit-chain `hash` — so
+   * rebuilding the same settlement produces the same `eventId` and a
+   * receiver deduplicating on it correctly drops the rebuild, while a
+   * different task, or the same task settled by a different completion
+   * entry, gets a different one. `at` stays the build time: two rebuilds
+   * share the `eventId` but carry different `at` values (and therefore
+   * different signatures). Only a task with no `PAYOUT_COMPLETE` entry
+   * at all falls back to `crypto.randomUUID()` (defensive: unreachable
+   * through dispatch/fromJSON/fromHistory, which always carry one).
    */
   eventId: string;
 }
@@ -149,10 +163,13 @@ export interface BuildPayoutWebhookOptions {
    */
   now?: Date | string;
   /**
-   * Payload `eventId`. Defaults to `crypto.randomUUID()`; inject a fixed
-   * value in tests to make signatures deterministic. Must be a non-empty
-   * string when provided, and at most {@link MAX_EVENT_ID_LENGTH}
-   * characters — a longer value throws instead of being truncated.
+   * Payload `eventId`. Defaults to the deterministic settlement-evidence
+   * derivation (backlog #1426 — `payout-<taskId>-<completionSeq>-<hash-prefix>`,
+   * falling back to `crypto.randomUUID()` only for a task with no
+   * `PAYOUT_COMPLETE` entry); inject a fixed value in tests to make
+   * signatures deterministic. Must be a non-empty string when provided,
+   * and at most {@link MAX_EVENT_ID_LENGTH} characters — a longer value
+   * throws instead of being truncated.
    */
   eventId?: string;
   /**
@@ -301,6 +318,45 @@ function completionEntry(task: TaskLifecycle): TaskHistoryEntry | undefined {
 }
 
 /**
+ * Default `eventId` for a build (backlog #1426): a deterministic
+ * derivation from the settlement evidence, so rebuilding the same
+ * settlement produces the same deduplication key instead of a second
+ * "different" payout. The readable form is
+ * `payout-<taskId>-<completionSeq>-<hash-prefix>` — the `PAYOUT_COMPLETE`
+ * entry's `seq` plus the first 12 hex characters of its audit-chain
+ * `hash`, both already in the history and stable across rebuilds.
+ * An entry without a hash (a restored history that never carried one)
+ * still derives deterministically from `taskId` + `seq` alone.
+ *
+ * Returns `undefined` when the task has no `PAYOUT_COMPLETE` entry at
+ * all: the caller falls back to `crypto.randomUUID()` for that
+ * advisory, defensive-only case. A task id long enough to push the
+ * readable form past {@link MAX_EVENT_ID_LENGTH} is never truncated
+ * (truncation could collide two tasks that differ only past the cut):
+ * the whole triple is hashed down to a fixed-length digest form
+ * instead, which is still deterministic per settlement.
+ */
+function deterministicEventId(
+  task: TaskLifecycle,
+  complete: TaskHistoryEntry | undefined,
+): string | undefined {
+  if (complete === undefined) return undefined;
+  const hashPart =
+    typeof complete.hash === "string" && complete.hash.length > 0
+      ? complete.hash.slice(0, 12)
+      : undefined;
+  const readable =
+    hashPart !== undefined
+      ? `payout-${task.id}-${complete.seq}-${hashPart}`
+      : `payout-${task.id}-${complete.seq}`;
+  if (readable.length <= MAX_EVENT_ID_LENGTH) return readable;
+  const digest = createHash("sha256")
+    .update(`${task.id}|${complete.seq}|${complete.hash ?? ""}`, "utf8")
+    .digest("hex");
+  return `payout-${digest.slice(0, 32)}`;
+}
+
+/**
  * Quoted (owed) amount for the payload: the `quotedAmount` on the LAST
  * `ACCEPT` entry — the exact derivation `payoutMismatch` uses, so the
  * webhook and the in-repo screening can never disagree about which
@@ -386,9 +442,14 @@ export function buildPayoutWebhook(
       `cannot build payout webhook: 'eventId' must be at most ${MAX_EVENT_ID_LENGTH} characters, got ${options.eventId.length} for task ${task.id}`,
     );
   }
-  const eventId = options.eventId ?? randomUUID();
-
   const complete = completionEntry(task);
+  // Default eventId is deterministic per settlement (backlog #1426):
+  // rebuilding the same payout reuses its deduplication key, so a
+  // receiver drops the rebuild instead of processing the payout twice.
+  // An explicit eventId still overrides; a task with no
+  // PAYOUT_COMPLETE entry at all keeps the old random fallback.
+  const eventId =
+    options.eventId ?? deterministicEventId(task, complete) ?? randomUUID();
   if (options.requirePayoutRef === true && complete?.payoutRef === undefined) {
     throw new Error(
       `cannot build payout webhook: task ${task.id} has no payoutRef on its PAYOUT_COMPLETE entry, and requirePayoutRef is set`,
@@ -425,7 +486,10 @@ export interface BuildPayoutWebhooksOptions {
   /**
    * Generation strategy for per-task `eventId`s: called once per task,
    * in input order, and its return value becomes that task's
-   * `eventId`. Defaults to `crypto.randomUUID()` per task. This is
+   * `eventId`. Defaults to the single build's deterministic derivation
+   * (backlog #1426): each task's own settlement evidence mints its id,
+   * so rebuilding the same batch reissues the same `eventId`s and a
+   * receiver deduplicating on them drops the rebuilds. This is
    * deliberately a factory, not a fixed string: every task in the
    * batch is a DISTINCT payout event, so — unlike the fan-out in
    * {@link deliverPayoutWebhookToMany}, which shares one `eventId`
@@ -511,8 +575,11 @@ export type BuildPayoutWebhooksResult =
  * `eventId` semantics: one DISTINCT `eventId` per task (see
  * {@link BuildPayoutWebhooksOptions.eventIdFactory}); the shared
  * element is the generation strategy and the `now` timestamp, never
- * the value. Each built webhook verifies under the batch secret
- * exactly as a single build does.
+ * the value. Rebuilding the same batch reissues the same `eventId`s
+ * (the single build's deterministic default, backlog #1426), so a
+ * receiver deduplicating on them drops the rebuilds. Each built
+ * webhook verifies under the batch secret exactly as a single build
+ * does.
  *
  * Pure: building never mutates any task, and this wrapper adds no
  * mutation of its own — the input list and its tasks are only read.
@@ -562,8 +629,10 @@ export function buildPayoutWebhooks(
   }
   // Duplicate taskIds fail the whole batch before anything is built
   // (the escrow buildSettlementReports guard, backlog #993): two
-  // entries for one task would sign two webhooks with different
-  // eventIds for the same payout. Only string ids are scanned — a
+  // entries for one task would sign two webhooks for the same payout —
+  // the same derived eventId twice, or two different ids under a
+  // factory that a receiver deduplicating on eventId could not tell
+  // apart. Only string ids are scanned — a
   // malformed entry with no string id keeps its per-task failure
   // below, exactly as before.
   const seenIds = new Set<string>();
@@ -587,10 +656,14 @@ export function buildPayoutWebhooks(
   if (duplicateIds.length > 0) {
     const quoted = duplicateIds.map((id) => `"${id}"`).join(", ");
     throw new Error(
-      `buildPayoutWebhooks: duplicate taskId ${quoted} in batch: taskIds must be unique within a batch (a repeated task would produce two signed payout webhooks with different eventIds, and a receiver deduplicating on eventId could not tell they are the same payout)`,
+      `buildPayoutWebhooks: duplicate taskId ${quoted} in batch: taskIds must be unique within a batch (a repeated task would produce two signed payout webhooks for the same payout — the same derived eventId twice, or two different ids under a factory that a receiver deduplicating on eventId could not tell apart)`,
     );
   }
-  const eventIdFactory = options.eventIdFactory ?? randomUUID;
+  // Without a factory the single build derives each task's eventId
+  // from its own settlement evidence (backlog #1426), so a batch
+  // rebuild reissues the same ids; with a factory the factory value
+  // is used exactly as before.
+  const eventIdFactory = options.eventIdFactory;
   // eventIds already issued (successfully signed) in this batch only:
   // a failed build never claims its id, so a later task may reuse it.
   const issuedEventIds = new Set<string>();
@@ -602,13 +675,19 @@ export function buildPayoutWebhooks(
         ? (task as TaskLifecycle).id
         : "unknown";
     try {
-      const eventId = eventIdFactory();
       // A factory bug (counter reset, fixed value) must not ship two
       // signed webhooks under one eventId: the receiver's dedupe would
       // drop the second payout as an apparent duplicate while the
       // sender believes it delivered. The duplicate is never signed,
-      // and later entries are still attempted.
-      if (issuedEventIds.has(eventId)) {
+      // and later entries are still attempted. Without a factory the
+      // duplicate check runs on the derived id after the build
+      // instead — it cannot fire (duplicate taskIds are rejected up
+      // front and the derivation is per-task), so the check is a
+      // defensive guard and a colliding webhook is discarded, never
+      // returned.
+      const eventId =
+        eventIdFactory !== undefined ? eventIdFactory() : undefined;
+      if (eventId !== undefined && issuedEventIds.has(eventId)) {
         return {
           taskId,
           error: `duplicate eventId "${eventId}" in batch: eventIds must be unique within a batch`,
@@ -616,12 +695,19 @@ export function buildPayoutWebhooks(
       }
       const webhook = buildPayoutWebhook(task, secret, {
         ...(options.now !== undefined ? { now: options.now } : {}),
-        eventId,
+        ...(eventId !== undefined ? { eventId } : {}),
         ...(options.requirePayoutRef !== undefined
           ? { requirePayoutRef: options.requirePayoutRef }
           : {}),
       });
-      issuedEventIds.add(eventId);
+      const issuedId = webhook.payload.eventId;
+      if (issuedEventIds.has(issuedId)) {
+        return {
+          taskId,
+          error: `duplicate eventId "${issuedId}" in batch: eventIds must be unique within a batch`,
+        };
+      }
+      issuedEventIds.add(issuedId);
       return { taskId, webhook };
     } catch (err) {
       return {
@@ -1511,7 +1597,8 @@ export class PayoutEventDedupe {
    * {@link MAX_EVENT_ID_LENGTH} characters throws the same way: a
    * caller-injected id that long would be written verbatim into the
    * dedupe's memory keys and any persisted snapshot, and this
-   * library never mints one (the default is a 36-character UUID).
+   * library never mints one (the default derivation is bounded by
+   * the same cap, backlog #1426).
    */
   checkAndRecord(eventId: string): boolean {
     if (typeof eventId !== "string" || eventId.length === 0) {

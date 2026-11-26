@@ -14,7 +14,8 @@ import {
  *  - buildPayoutWebhook only accepts PAID tasks; the payload derives
  *    everything from the task's audit history (the PAYOUT_COMPLETE entry
  *    that moved it to PAID) — nothing is invented
- *  - payload has a fixed literal key order, eventId defaults to a UUID v4,
+ *  - payload has a fixed literal key order, eventId defaults to the
+ *    deterministic settlement-evidence derivation (backlog #1426),
  *    and injected eventId/now values make signatures byte-deterministic
  *  - verifyPayoutWebhook returns true only for an exact HMAC-SHA256 match
  *    (`sha256=<hex>`, constant-time compare); tampering with any field or
@@ -42,9 +43,6 @@ function toPaid(id: string, opts: { payoutRef?: string; payoutAmount?: number } 
   return t;
 }
 
-const UUID_V4 =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
 test("payload derives everything from the audit history, in fixed key order", () => {
   const task = toPaid("task-042", { payoutRef: "xfer-88f2", payoutAmount: 10098.5 });
   const { payload, signature } = buildPayoutWebhook(task, "s3cr3t");
@@ -61,17 +59,18 @@ test("payload derives everything from the audit history, in fixed key order", ()
   assert.equal(payload.payoutRef, "xfer-88f2");
   assert.equal(payload.payoutAmount, 10098.5);
   assert.ok(!Number.isNaN(Date.parse(payload.at)), "at is parseable ISO-8601");
-  assert.match(payload.eventId, UUID_V4);
+  // Default eventId is the deterministic settlement-evidence
+  // derivation (backlog #1426): payout-<taskId>-<completionSeq>-<hash-prefix>.
+  assert.match(payload.eventId, /^payout-task-042-8-[0-9a-f]{12}$/);
   assert.match(signature, /^sha256=[0-9a-f]{64}$/);
 });
 
-test("default eventId is a unique UUID v4 per build", () => {
+test("default eventId is deterministic per settlement, not a fresh UUID per build", () => {
   const task = toPaid("task-uuid");
   const a = buildPayoutWebhook(task, "s3cr3t").payload.eventId;
   const b = buildPayoutWebhook(task, "s3cr3t").payload.eventId;
-  assert.match(a, UUID_V4);
-  assert.match(b, UUID_V4);
-  assert.notEqual(a, b, "two independent builds get different eventIds");
+  assert.match(a, /^payout-task-uuid-8-[0-9a-f]{12}$/);
+  assert.equal(a, b, "rebuilding the same settlement reuses its eventId");
 });
 
 test("injected eventId + now make the signature byte-deterministic", () => {
