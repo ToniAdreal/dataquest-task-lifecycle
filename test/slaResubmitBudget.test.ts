@@ -19,7 +19,8 @@ import {
  *   spent its RESUBMITs still gets the budget error, not a free retry.
  *
  * One wrinkle the backlog text glosses over: REJECTED has no EXPIRE
- * edge (EXPIRE exists only on OPEN/ACCEPTED/CAPTURING/SUBMITTED), so
+ * edge (EXPIRE exists on every non-terminal state except REJECTED
+ * and DISPUTED, since backlog #1428), so
  * the "EXPIRE succeeds despite an exhausted budget" leg must run on a
  * task that burned its budget and then sits in CAPTURING — the state a
  * RESUBMIT itself lands in — while the REJECTED leg covers the

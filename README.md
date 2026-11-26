@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2207 tests, all local
+npm test   # 2215 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -252,8 +252,8 @@ is rewritten is rejected with the chain-break error on one
 closing line (asserted outside the printed parse) — and a
 closing transition-table JSON export segment that runs
 `transitionTableJson()` and prints an export summary for
-front-end / docs tooling: the 19-edge total plus the first
-edge (DRAFT --PUBLISH--> OPEN), the payout edge at index 14
+front-end / docs tooling: the 22-edge total plus the first
+edge (DRAFT --PUBLISH--> OPEN), the payout edge at index 16
 (PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID), and the last edge
 (DISPUTED --ARBITRATE_REJECT--> REJECTED) parsed back from
 the canonical JSON, with the per-edge `from, event, to` key
@@ -261,7 +261,7 @@ order confirmed on every edge (the demo tests cross-check the
 full parsed edge list against the committed transition-table
 snapshot) — and a closing state diagram generation segment
 that runs `stateDiagram()` and prints a generation summary:
-the 24-line total and 19-edge count plus the first, second,
+the 27-line total and 22-edge count plus the first, second,
 initial, first-edge, last-edge, and last lines (the demo tests
 cross-check the full generated block line by line against
 hand-written expectations and the copy embedded above) — and
@@ -591,8 +591,11 @@ stateDiagram-v2
     SUBMITTED --> EXPIRED : EXPIRE
     IN_REVIEW --> APPROVED : APPROVE
     IN_REVIEW --> REJECTED : REJECT
+    IN_REVIEW --> EXPIRED : EXPIRE
     APPROVED --> PAYOUT_PENDING : REQUEST_PAYOUT
+    APPROVED --> EXPIRED : EXPIRE
     PAYOUT_PENDING --> PAID : PAYOUT_COMPLETE
+    PAYOUT_PENDING --> EXPIRED : EXPIRE
     REJECTED --> DISPUTED : DISPUTE
     REJECTED --> CAPTURING : RESUBMIT
     DISPUTED --> APPROVED : ARBITRATE_APPROVE
@@ -758,11 +761,13 @@ human one in the append-only history.
 
 Why the executor exists instead of a hand-written loop: `expiredTasks()`
 only checks the deadline and the terminal flag, but `EXPIRE` is **not** a
-legal event from every non-terminal state — the transition table only has
-`EXPIRE` edges on OPEN, ACCEPTED, CAPTURING and SUBMITTED. An overdue
-IN_REVIEW task (or a deadline set on any other state without the edge)
-makes `task.dispatch("EXPIRE")` throw
-`invalid transition: EXPIRE from IN_REVIEW`, aborting a naive
+legal event from every non-terminal state — the transition table has
+`EXPIRE` edges on every non-terminal state except REJECTED and DISPUTED
+(backlog #1428 added them on IN_REVIEW, APPROVED and PAYOUT_PENDING,
+which used to be unexpirable). An overdue REJECTED task (or a deadline
+set on DISPUTED, the other state without the edge) makes
+`task.dispatch("EXPIRE")` throw
+`invalid transition: EXPIRE from REJECTED`, aborting a naive
 `for (const task of expiredTasks(tasks)) task.dispatch("EXPIRE")` loop on
 the first such task. `expireOverdueTasks` catches that error per task —
 `{ task, expired: false, error: <message> }` — and keeps going, so one
@@ -2930,7 +2935,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2207 tests covering the happy path, reject→resubmit
+`npm test` runs 2215 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
@@ -3593,7 +3598,7 @@ declaration order and serialized as canonical JSON (2-space indent,
 trailing newline) — the export a frontend or documentation tool
 consumes. Its per-iteration self-check parses the output back and
 pins it to the hand-written expectations in the bench comments
-(exactly 19 edges — the count pinned by the committed snapshot —
+(exactly 22 edges — the count pinned by the committed snapshot —
 with the first edge DRAFT / PUBLISH / OPEN, the payout edge
 PAYOUT_PENDING / PAYOUT_COMPLETE / PAID present, and the last edge
 DISPUTED / ARBITRATE_REJECT / REJECTED in place); one timed pass is
@@ -3604,12 +3609,12 @@ declaration order as plain objects, without any serialization —
 the form a state-machine consumer uses directly, and the
 construction the JSON export and the diagram both build on. Its
 per-iteration self-check pins the output to the hand-written
-expectations in the bench comments (exactly 19 edges written out
+expectations in the bench comments (exactly 22 edges written out
 in full in declaration order — the list pinned by the committed
 snapshot — with every edge's keys in from / event / to order,
 spot-checked against the `transitionTableJson` edge set through
 the shared pinned first edge DRAFT / PUBLISH / OPEN, payout edge
-(index 14) PAYOUT_PENDING / PAYOUT_COMPLETE / PAID, and last edge
+(index 16) PAYOUT_PENDING / PAYOUT_COMPLETE / PAID, and last edge
 DISPUTED / ARBITRATE_REJECT / REJECTED); outside the timed loop,
 the full edge set is compared to the parsed JSON edge set edge
 for edge and a hand-pinned non-existent edge
@@ -3620,8 +3625,8 @@ iteration (no network, no wall clock): all edges enumerated in
 declaration order and assembled as a Mermaid stateDiagram-v2 block
 — the block this README embeds verbatim above. Its per-iteration
 self-check pins the output to the hand-written expectations in
-the bench comments (exactly 24 lines — the opening fence, the
-`stateDiagram-v2` / direction / initial lines, the 19 edges, and
+the bench comments (exactly 27 lines — the opening fence, the
+`stateDiagram-v2` / direction / initial lines, the 22 edges, and
 the closing fence — with all 13 states present, the first edge
 DRAFT / PUBLISH / OPEN, the payout edge PAYOUT_PENDING /
 PAYOUT_COMPLETE / PAID present, and the last edge DISPUTED /
@@ -4406,9 +4411,9 @@ See the throughput row below. One real run on 2026-11-16:
 | allowedEvents (13 states) | ~468,932 ops/sec (2.13 µs/op) |
 | parseHistory (8-entry history) | ~26,877 ops/sec (37.21 µs/op) |
 | isTerminal (13 states) | ~1,599,527 ops/sec (0.63 µs/op) |
-| transitionTableJson (19 edges) | ~57,975 ops/sec (17.25 µs/op) |
-| transitionTable (19 edges) | ~106,082 ops/sec (9.43 µs/op) |
-| stateDiagram (19 edges) | ~89,082 ops/sec (11.23 µs/op) |
+| transitionTableJson (22 edges) | ~57,975 ops/sec (17.25 µs/op) |
+| transitionTable (22 edges) | ~106,082 ops/sec (9.43 µs/op) |
+| stateDiagram (22 edges) | ~89,082 ops/sec (11.23 µs/op) |
 | readmeDiagramInSync (README file read) | ~1,334 ops/sec (749.73 µs/op) |
 | isOverdue (4-task corpus) | ~851,579 ops/sec (1.17 µs/op) |
 | subscribe (full lifecycle, 1 collecting listener) | ~15,155 ops/sec (65.99 µs/op) |

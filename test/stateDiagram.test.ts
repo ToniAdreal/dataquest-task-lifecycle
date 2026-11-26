@@ -18,9 +18,9 @@ test("transition table agrees with transition() edge by edge", () => {
 
 test("transition table covers every allowed event of every state", () => {
   const edges = transitionTable();
-  // 19 edges, counted by hand from the TRANSITIONS literal. If the machine
+  // 22 edges, counted by hand from the TRANSITIONS literal. If the machine
   // gains/loses an edge, this number must change too — that is the point.
-  assert.equal(edges.length, 19);
+  assert.equal(edges.length, 22);
   for (const state of [
     "DRAFT",
     "OPEN",

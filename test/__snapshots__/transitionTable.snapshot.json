@@ -65,14 +65,29 @@
     "to": "REJECTED"
   },
   {
+    "from": "IN_REVIEW",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
     "from": "APPROVED",
     "event": "REQUEST_PAYOUT",
     "to": "PAYOUT_PENDING"
   },
   {
+    "from": "APPROVED",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
+  },
+  {
     "from": "PAYOUT_PENDING",
     "event": "PAYOUT_COMPLETE",
     "to": "PAID"
+  },
+  {
+    "from": "PAYOUT_PENDING",
+    "event": "EXPIRE",
+    "to": "EXPIRED"
   },
   {
     "from": "REJECTED",

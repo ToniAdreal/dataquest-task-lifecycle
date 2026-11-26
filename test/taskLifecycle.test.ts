@@ -125,7 +125,7 @@ test("terminal states accept no further events", () => {
 
 test("pure helpers", () => {
   assert.equal(transition("OPEN", "ACCEPT"), "ACCEPTED");
-  assert.deepEqual(allowedEvents("IN_REVIEW"), ["APPROVE", "REJECT"]);
+  assert.deepEqual(allowedEvents("IN_REVIEW"), ["APPROVE", "REJECT", "EXPIRE"]);
   assert.deepEqual(allowedEvents("PAID"), []);
   assert.equal(isTerminal("PAID"), true);
   assert.equal(isTerminal("ABANDONED"), true);

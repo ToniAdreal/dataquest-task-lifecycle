@@ -149,9 +149,9 @@ const TRANSITIONS: Record<TaskState, Partial<Record<TaskEvent, TaskState>>> = {
     EXPIRE: "EXPIRED",
   },
   SUBMITTED: { BEGIN_REVIEW: "IN_REVIEW", EXPIRE: "EXPIRED" },
-  IN_REVIEW: { APPROVE: "APPROVED", REJECT: "REJECTED" },
-  APPROVED: { REQUEST_PAYOUT: "PAYOUT_PENDING" },
-  PAYOUT_PENDING: { PAYOUT_COMPLETE: "PAID" },
+  IN_REVIEW: { APPROVE: "APPROVED", REJECT: "REJECTED", EXPIRE: "EXPIRED" },
+  APPROVED: { REQUEST_PAYOUT: "PAYOUT_PENDING", EXPIRE: "EXPIRED" },
+  PAYOUT_PENDING: { PAYOUT_COMPLETE: "PAID", EXPIRE: "EXPIRED" },
   PAID: {},
   REJECTED: { DISPUTE: "DISPUTED", RESUBMIT: "CAPTURING" },
   DISPUTED: { ARBITRATE_APPROVE: "APPROVED", ARBITRATE_REJECT: "REJECTED" },
@@ -356,8 +356,12 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
  * here, before the filter, because an empty batch would otherwise
  * never reach {@link isOverdue}).
  *
- * NOTE: this returns every overdue task, including ones `EXPIRE` cannot
- * legally fire on (see {@link expireOverdueTasks}).
+ * NOTE: this returns every overdue task. Since backlog #1428 every
+ * non-terminal state except REJECTED and DISPUTED carries an `EXPIRE`
+ * edge, so every task this returns is one {@link expireOverdueTasks}
+ * can actually expire — the only overdue tasks the executor still
+ * reports as failures are overdue REJECTED / DISPUTED ones (see
+ * {@link expireOverdueTasks}).
  */
 export function expiredTasks(
   tasks: readonly TaskLifecycle[],
@@ -1158,13 +1162,14 @@ function predictExpireOverdueTask(
  * This exists because a hand-written loop over `expiredTasks()` has a
  * real trap: `expiredTasks()` only checks the deadline and the terminal
  * flag, but `EXPIRE` is not a legal event from every non-terminal state.
- * `EXPIRE` edges exist only on OPEN, ACCEPTED, CAPTURING and SUBMITTED —
- * an overdue IN_REVIEW task (or any other state without the edge, when a
- * deadline was set for it) throws `invalid transition: EXPIRE from
- * IN_REVIEW`, aborting a naive loop on the first such task. This
- * executor catches the error per task (`expired: false, error:
- * <message>`) and keeps going, so one unexpirable task never blocks the
- * rest of the batch.
+ * `EXPIRE` edges exist on every non-terminal state except REJECTED and
+ * DISPUTED (backlog #1428 added the edges on IN_REVIEW, APPROVED and
+ * PAYOUT_PENDING, which used to be unexpirable) — an overdue REJECTED
+ * task (or a DISPUTED one, when a deadline was set for it) throws
+ * `invalid transition: EXPIRE from REJECTED`, aborting a naive loop on
+ * the first such task. This executor catches the error per task
+ * (`expired: false, error: <message>`) and keeps going, so one
+ * unexpirable task never blocks the rest of the batch.
  *
  * Successful outcomes also carry `entry` — a frozen, detached copy of
  * the EXPIRE audit entry just appended — so a caller can write an SLA

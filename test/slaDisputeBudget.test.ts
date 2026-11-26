@@ -21,7 +21,8 @@ import {
  * One wrinkle the backlog text glosses over: a task that just spent
  * its DISPUTE sits in DISPUTED or, after arbitration rejects the
  * appeal, back in REJECTED — and neither state has an EXPIRE edge
- * (EXPIRE exists only on OPEN/ACCEPTED/CAPTURING/SUBMITTED). So the
+ * (EXPIRE exists on every non-terminal state except REJECTED and
+ * DISPUTED, since backlog #1428). So the
  * "EXPIRE succeeds despite an exhausted budget" leg must run on a
  * task that burned its DISPUTE budget and then RESUBMITs into
  * CAPTURING — the state a RESUBMIT lands in — while the REJECTED leg

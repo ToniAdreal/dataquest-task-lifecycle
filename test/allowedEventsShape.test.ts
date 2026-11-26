@@ -91,9 +91,9 @@ test("all thirteen states return their pre-guard event lists", () => {
     "EXPIRE",
   ]);
   assert.deepEqual(allowedEvents("SUBMITTED"), ["BEGIN_REVIEW", "EXPIRE"]);
-  assert.deepEqual(allowedEvents("IN_REVIEW"), ["APPROVE", "REJECT"]);
-  assert.deepEqual(allowedEvents("APPROVED"), ["REQUEST_PAYOUT"]);
-  assert.deepEqual(allowedEvents("PAYOUT_PENDING"), ["PAYOUT_COMPLETE"]);
+  assert.deepEqual(allowedEvents("IN_REVIEW"), ["APPROVE", "REJECT", "EXPIRE"]);
+  assert.deepEqual(allowedEvents("APPROVED"), ["REQUEST_PAYOUT", "EXPIRE"]);
+  assert.deepEqual(allowedEvents("PAYOUT_PENDING"), ["PAYOUT_COMPLETE", "EXPIRE"]);
   assert.deepEqual(allowedEvents("REJECTED"), ["DISPUTE", "RESUBMIT"]);
   assert.deepEqual(allowedEvents("DISPUTED"), [
     "ARBITRATE_APPROVE",

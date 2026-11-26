@@ -92,7 +92,9 @@ function staleAcceptedTask(
   );
 }
 
-/** IN_REVIEW for 12 days: overdue by SLA but with no EXPIRE edge. */
+/** REJECTED for 12 days: overdue by SLA but with no EXPIRE edge
+ * (backlog #1428 gave IN_REVIEW one, so the unexpirable fixture
+ * moved to REJECTED). */
 function unexpirableTask(id: string): TaskLifecycle {
   const t = taskFromSteps(id, [
     ["PUBLISH", "DRAFT", "OPEN", daysAgo(30)],
@@ -100,6 +102,7 @@ function unexpirableTask(id: string): TaskLifecycle {
     ["START_CAPTURE", "ACCEPTED", "CAPTURING", daysAgo(20)],
     ["SUBMIT", "CAPTURING", "SUBMITTED", daysAgo(15)],
     ["BEGIN_REVIEW", "SUBMITTED", "IN_REVIEW", daysAgo(12)],
+    ["REJECT", "IN_REVIEW", "REJECTED", daysAgo(12)],
   ]);
   t.setSlaDeadline(PAST);
   return t;
@@ -215,8 +218,8 @@ test("mixed batch: an unexpirable task does not block a requireActor sibling", (
 
   // the stuck task fails on the missing EXPIRE edge, not on the actor gate
   assert.equal(results[0].expired, false);
-  assert.match(results[0].error ?? "", /invalid transition: EXPIRE from IN_REVIEW/);
-  assert.equal(stuck.state, "IN_REVIEW");
+  assert.match(results[0].error ?? "", /invalid transition: EXPIRE from REJECTED/);
+  assert.equal(stuck.state, "REJECTED");
 
   // the requireActor sibling still expires in the same batch
   assert.equal(results[1].expired, true);

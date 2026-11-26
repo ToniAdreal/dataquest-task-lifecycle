@@ -108,7 +108,7 @@
  * transition-table JSON export segment: `transitionTableJson()`
  * exports the whole transition table as canonical JSON for
  * front-end / docs tooling, and the demo prints an export summary
- * (the 19-edge total plus the first, payout, and last edges,
+ * (the 22-edge total plus the first, payout, and last edges,
  * hand-pinned in the segment comment and cross-checked against
  * the committed transition-table snapshot by the demo tests) —
  * the machine-readable counterpart of the state diagram a reader
@@ -116,7 +116,7 @@
  * diagram generation segment: `stateDiagram()` renders that same
  * table as the Mermaid stateDiagram-v2 block the README embeds
  * verbatim, and the demo prints a generation summary (the
- * 24-line total and 19-edge count plus the first, second,
+ * 27-line total and 22-edge count plus the first, second,
  * initial, first-edge, last-edge, and last lines, hand-pinned in
  * the segment comment and cross-checked against the full
  * generated block by the demo tests) — the docs-drift guard's
@@ -1880,7 +1880,7 @@ export interface DemoResult {
   transitionTableEdges: TransitionEdge[];
   /** Full `stateDiagram()` Mermaid block text (no trailing newline). */
   stateDiagramText: string;
-  /** Edge lines inside `stateDiagramText` (the 19 transition edges). */
+  /** Edge lines inside `stateDiagramText` (the 22 transition edges). */
   stateDiagramEdgeCount: number;
   /** `readmeDiagramInSync()` verdict on this repo's README. */
   readmeDiagramInSync: boolean;
@@ -5599,10 +5599,10 @@ export async function runDemo(): Promise<DemoResult> {
   // derived by calling transitionTableJson itself (the demo
   // tests cross-check the full parsed edge list against the
   // committed snapshot as well):
-  //   19 edges in total
+  //   22 edges in total
   //   index 0  (first):  DRAFT --PUBLISH--> OPEN
-  //   index 14 (payout): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
-  //   index 18 (last):   DISPUTED --ARBITRATE_REJECT--> REJECTED
+  //   index 16 (payout): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
+  //   index 21 (last):   DISPUTED --ARBITRATE_REJECT--> REJECTED
   //   every edge carries its keys in from, event, to order
   // The segment is pure: no task instance, no dispatch, no
   // network, no randomness, no wall clock.
@@ -5611,7 +5611,7 @@ export async function runDemo(): Promise<DemoResult> {
     transitionTableJsonText,
   ) as TransitionEdge[];
   const transitionTableFirst = transitionTableEdges[0]!;
-  const transitionTablePayout = transitionTableEdges[14]!;
+  const transitionTablePayout = transitionTableEdges[16]!;
   const transitionTableLast = transitionTableEdges.at(-1)!;
   const transitionTableKeyOrder = transitionTableEdges.every(
     (edge) => Object.keys(edge).join(",") === "from,event,to",
@@ -5621,7 +5621,7 @@ export async function runDemo(): Promise<DemoResult> {
     "Transition table JSON export (transitionTableJson for front-end / docs tooling):",
     `  transitionTableJson(): ${transitionTableEdges.length} edges as canonical JSON (2-space indent, trailing newline; parsed back: ${transitionTableEdges.length} edges)`,
     `  first edge (index 0): ${transitionTableFirst.from} --${transitionTableFirst.event}--> ${transitionTableFirst.to}`,
-    `  payout edge (index 14): ${transitionTablePayout.from} --${transitionTablePayout.event}--> ${transitionTablePayout.to}`,
+    `  payout edge (index 16): ${transitionTablePayout.from} --${transitionTablePayout.event}--> ${transitionTablePayout.to}`,
     `  last edge (index ${transitionTableEdges.length - 1}): ${transitionTableLast.from} --${transitionTableLast.event}--> ${transitionTableLast.to}`,
     `  key order per edge: from, event, to on every edge: ${transitionTableKeyOrder} (the canonical field order a consumer can rely on)`,
   );
@@ -5638,15 +5638,15 @@ export async function runDemo(): Promise<DemoResult> {
   // expectations — written out here from src/taskLifecycle.ts,
   // never derived by calling stateDiagram itself (the demo tests
   // cross-check the full generated block line by line as well):
-  //   24 lines in total, 19 of them edge lines
+  //   27 lines in total, 22 of them edge lines
   //   line 1:  ```mermaid (the opening fence)
   //   line 2:  stateDiagram-v2
   //   line 4:      [*] --> DRAFT (the initial transition)
   //   line 5:      DRAFT --> OPEN : PUBLISH (the first edge)
-  //   line 23:     DISPUTED --> REJECTED : ARBITRATE_REJECT (last edge)
-  //   line 24: ``` (the closing fence)
+  //   line 26:     DISPUTED --> REJECTED : ARBITRATE_REJECT (last edge)
+  //   line 27: ``` (the closing fence)
   // The edge-line count must equal the transition table's edge
-  // count — the same 19 the committed snapshot pins — and the
+  // count — the same 22 the committed snapshot pins — and the
   // segment asserts that here, outside the printed summary: a
   // diagram whose shape broke would fail the demo itself, not
   // just a test. The segment is pure: no task instance, no
@@ -6111,16 +6111,16 @@ export async function runDemo(): Promise<DemoResult> {
   //   ACCEPTED       -> false (3 outgoing edges)
   //   CAPTURING      -> false (3 outgoing edges)
   //   SUBMITTED      -> false (2 outgoing edges)
-  //   IN_REVIEW      -> false (2 outgoing edges)
-  //   APPROVED       -> false (1 outgoing edge)
-  //   PAYOUT_PENDING -> false (1 outgoing edge)
+  //   IN_REVIEW      -> false (3 outgoing edges)
+  //   APPROVED       -> false (2 outgoing edges)
+  //   PAYOUT_PENDING -> false (2 outgoing edges)
   //   PAID           -> true  (terminal, 0 outgoing edges)
   //   REJECTED       -> false (2 outgoing edges)
   //   DISPUTED       -> false (2 outgoing edges)
   //   ABANDONED      -> true  (terminal, 0 outgoing edges)
   //   EXPIRED        -> true  (terminal, 0 outgoing edges)
   // The outgoing counts are the transition table's own shape
-  // (19 edges in total), and the segment cross-checks the two
+  // (22 edges in total), and the segment cross-checks the two
   // views against each other outside the printed lines: the
   // isTerminal set must equal, state for state, the set of
   // states with no outgoing edge in `transitionTable()`, and
@@ -6149,9 +6149,9 @@ export async function runDemo(): Promise<DemoResult> {
     ACCEPTED: 3,
     CAPTURING: 3,
     SUBMITTED: 2,
-    IN_REVIEW: 2,
-    APPROVED: 1,
-    PAYOUT_PENDING: 1,
+    IN_REVIEW: 3,
+    APPROVED: 2,
+    PAYOUT_PENDING: 2,
     PAID: 0,
     REJECTED: 2,
     DISPUTED: 2,
@@ -6187,7 +6187,7 @@ export async function runDemo(): Promise<DemoResult> {
     ALL_STATES.length !== 13 ||
     enumeratedStates.size !== 13 ||
     !ALL_STATES.every((state) => enumeratedStates.has(state)) ||
-    terminalEdges.length !== 19 ||
+    terminalEdges.length !== 22 ||
     terminalByState.length !== 13 ||
     !terminalByState.every(
       ({ state, terminal }) => terminal === terminalExpected[state],

@@ -2,11 +2,12 @@
  * expireOverdueTasks watchdog executor (#108).
  *
  * `expiredTasks()` is a pure filter, but it has a trap: EXPIRE edges exist
- * only on OPEN/ACCEPTED/CAPTURING/SUBMITTED, so a hand-written `for` loop
- * dispatching EXPIRE aborts the whole batch on the first overdue task that
- * has no EXPIRE edge (e.g. IN_REVIEW). expireOverdueTasks() reports
- * per-task outcomes instead and never lets one unexpirable task block the
- * rest.
+ * on every non-terminal state except REJECTED and DISPUTED (backlog
+ * #1428 added them on IN_REVIEW / APPROVED / PAYOUT_PENDING), so a
+ * hand-written `for` loop dispatching EXPIRE aborts the whole batch on
+ * the first overdue task that has no EXPIRE edge (e.g. REJECTED).
+ * expireOverdueTasks() reports per-task outcomes instead and never lets
+ * one unexpirable task block the rest.
  */
 
 import { describe, it } from "node:test";
@@ -34,13 +35,14 @@ function openTask(id: string): TaskLifecycle {
   return t; // OPEN — has an EXPIRE edge
 }
 
-function inReviewTask(id: string): TaskLifecycle {
+function rejectedTask(id: string): TaskLifecycle {
   const t = openTask(id);
   t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
   t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
   t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
   t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
-  return t; // IN_REVIEW — no EXPIRE edge
+  t.dispatch("REJECT", { actor: "reviewer", at: REVIEW_AT });
+  return t; // REJECTED — no EXPIRE edge (backlog #1428: IN_REVIEW gained one)
 }
 
 function abandonedTask(id: string): TaskLifecycle {
@@ -61,7 +63,7 @@ describe("expireOverdueTasks", () => {
     const expirable = openTask("expirable");
     expirable.setSlaDeadline(PAST);
 
-    const stuck = inReviewTask("stuck");
+    const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
 
     const notOverdue = openTask("not-overdue");
@@ -87,13 +89,13 @@ describe("expireOverdueTasks", () => {
 
     const blocked = byId(results, "stuck");
     assert.equal(blocked.expired, false);
-    assert.match(blocked.error ?? "", /invalid transition: EXPIRE from IN_REVIEW/);
-    // the failed task is untouched: still IN_REVIEW, no new history
-    assert.equal(blocked.task.state, "IN_REVIEW");
+    assert.match(blocked.error ?? "", /invalid transition: EXPIRE from REJECTED/);
+    // the failed task is untouched: still REJECTED, no new history
+    assert.equal(blocked.task.state, "REJECTED");
   });
 
   it("does not block the rest of the batch on the first unexpirable task", () => {
-    const stuck = inReviewTask("first");
+    const stuck = rejectedTask("first");
     stuck.setSlaDeadline(PAST);
     const expirable = openTask("second");
     expirable.setSlaDeadline(PAST);
@@ -123,14 +125,14 @@ describe("expireOverdueTasks", () => {
   });
 
   it("leaves failed tasks untouched: state and history unchanged", () => {
-    const stuck = inReviewTask("stuck");
+    const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
     const before = JSON.stringify(stuck.history);
 
     const results = expireOverdueTasks([stuck], NOW);
     assert.equal(results.length, 1);
     assert.equal(results[0].expired, false);
-    assert.equal(stuck.state, "IN_REVIEW");
+    assert.equal(stuck.state, "REJECTED");
     assert.equal(JSON.stringify(stuck.history), before);
   });
 
@@ -169,10 +171,10 @@ describe("expireOverdueTasks", () => {
   it("pure filter expiredTasks is unchanged: it still selects the unexpirable overdue task", () => {
     const expirable = openTask("expirable");
     expirable.setSlaDeadline(PAST);
-    const stuck = inReviewTask("stuck");
+    const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
 
-    // the pure filter answers "who is overdue" — IN_REVIEW included…
+    // the pure filter answers "who is overdue" — REJECTED included…
     assert.deepEqual(
       expiredTasks([expirable, stuck], NOW).map((t) => t.id),
       ["expirable", "stuck"],

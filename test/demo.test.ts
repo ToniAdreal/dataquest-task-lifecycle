@@ -864,9 +864,9 @@ Allowed events by state (allowedEvents over all 13 states):
   ACCEPTED        -> START_CAPTURE, ABANDON, EXPIRE
   CAPTURING       -> SUBMIT, ABANDON, EXPIRE
   SUBMITTED       -> BEGIN_REVIEW, EXPIRE
-  IN_REVIEW       -> APPROVE, REJECT
-  APPROVED        -> REQUEST_PAYOUT
-  PAYOUT_PENDING  -> PAYOUT_COMPLETE
+  IN_REVIEW       -> APPROVE, REJECT, EXPIRE
+  APPROVED        -> REQUEST_PAYOUT, EXPIRE
+  PAYOUT_PENDING  -> PAYOUT_COMPLETE, EXPIRE
   PAID            -> (none — terminal)
   REJECTED        -> DISPUTE, RESUBMIT
   DISPUTED        -> ARBITRATE_APPROVE, ARBITRATE_REJECT
@@ -886,19 +886,19 @@ Standalone history parsing (parseHistory on a fixed external history):
   invalid copy: parseHistory FAILED — invalid history: entry[2]: from OPEN does not continue previous to ACCEPTED (a broken chain is rejected and the original parse is untouched)
 
 Transition table JSON export (transitionTableJson for front-end / docs tooling):
-  transitionTableJson(): 19 edges as canonical JSON (2-space indent, trailing newline; parsed back: 19 edges)
+  transitionTableJson(): 22 edges as canonical JSON (2-space indent, trailing newline; parsed back: 22 edges)
   first edge (index 0): DRAFT --PUBLISH--> OPEN
-  payout edge (index 14): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
-  last edge (index 18): DISPUTED --ARBITRATE_REJECT--> REJECTED
+  payout edge (index 16): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID
+  last edge (index 21): DISPUTED --ARBITRATE_REJECT--> REJECTED
   key order per edge: from, event, to on every edge: true (the canonical field order a consumer can rely on)
 
 State diagram generation (stateDiagram from the transition table):
-  stateDiagram(): 24 lines, 19 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)
+  stateDiagram(): 27 lines, 22 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)
   first line: \`\`\`mermaid
   second line: stateDiagram-v2
   initial transition (line 4): [*] --> DRAFT
   first edge (line 5): DRAFT --> OPEN : PUBLISH
-  last edge (line 23): DISPUTED --> REJECTED : ARBITRATE_REJECT
+  last edge (line 26): DISPUTED --> REJECTED : ARBITRATE_REJECT
   last line: \`\`\`
 
 README diagram sync check (readmeDiagramInSync on this repo's README):
@@ -942,9 +942,9 @@ Terminal-state judgement (isTerminal over all 13 states):
   ACCEPTED        -> isTerminal: false (3 outgoing edges in transitionTable())
   CAPTURING       -> isTerminal: false (3 outgoing edges in transitionTable())
   SUBMITTED       -> isTerminal: false (2 outgoing edges in transitionTable())
-  IN_REVIEW       -> isTerminal: false (2 outgoing edges in transitionTable())
-  APPROVED        -> isTerminal: false (1 outgoing edge in transitionTable())
-  PAYOUT_PENDING  -> isTerminal: false (1 outgoing edge in transitionTable())
+  IN_REVIEW       -> isTerminal: false (3 outgoing edges in transitionTable())
+  APPROVED        -> isTerminal: false (2 outgoing edges in transitionTable())
+  PAYOUT_PENDING  -> isTerminal: false (2 outgoing edges in transitionTable())
   PAID            -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())
   REJECTED        -> isTerminal: false (2 outgoing edges in transitionTable())
   DISPUTED        -> isTerminal: false (2 outgoing edges in transitionTable())
@@ -4687,9 +4687,9 @@ test("demo shows the allowed-events listing segment in-process: every state's ev
     { state: "ACCEPTED", events: ["START_CAPTURE", "ABANDON", "EXPIRE"] },
     { state: "CAPTURING", events: ["SUBMIT", "ABANDON", "EXPIRE"] },
     { state: "SUBMITTED", events: ["BEGIN_REVIEW", "EXPIRE"] },
-    { state: "IN_REVIEW", events: ["APPROVE", "REJECT"] },
-    { state: "APPROVED", events: ["REQUEST_PAYOUT"] },
-    { state: "PAYOUT_PENDING", events: ["PAYOUT_COMPLETE"] },
+    { state: "IN_REVIEW", events: ["APPROVE", "REJECT", "EXPIRE"] },
+    { state: "APPROVED", events: ["REQUEST_PAYOUT", "EXPIRE"] },
+    { state: "PAYOUT_PENDING", events: ["PAYOUT_COMPLETE", "EXPIRE"] },
     { state: "PAID", events: [] },
     { state: "REJECTED", events: ["DISPUTE", "RESUBMIT"] },
     { state: "DISPUTED", events: ["ARBITRATE_APPROVE", "ARBITRATE_REJECT"] },
@@ -4899,8 +4899,11 @@ test("demo shows the transition-table JSON export segment in-process: the parsed
     { from: "SUBMITTED", event: "EXPIRE", to: "EXPIRED" },
     { from: "IN_REVIEW", event: "APPROVE", to: "APPROVED" },
     { from: "IN_REVIEW", event: "REJECT", to: "REJECTED" },
+    { from: "IN_REVIEW", event: "EXPIRE", to: "EXPIRED" },
     { from: "APPROVED", event: "REQUEST_PAYOUT", to: "PAYOUT_PENDING" },
+    { from: "APPROVED", event: "EXPIRE", to: "EXPIRED" },
     { from: "PAYOUT_PENDING", event: "PAYOUT_COMPLETE", to: "PAID" },
+    { from: "PAYOUT_PENDING", event: "EXPIRE", to: "EXPIRED" },
     { from: "REJECTED", event: "DISPUTE", to: "DISPUTED" },
     { from: "REJECTED", event: "RESUBMIT", to: "CAPTURING" },
     { from: "DISPUTED", event: "ARBITRATE_APPROVE", to: "APPROVED" },
@@ -4939,10 +4942,10 @@ test("demo shows the transition-table JSON export segment in-process: the parsed
     "transition-table JSON export segment must follow the standalone history parsing segment",
   );
   for (const line of [
-    "  transitionTableJson(): 19 edges as canonical JSON (2-space indent, trailing newline; parsed back: 19 edges)",
+    "  transitionTableJson(): 22 edges as canonical JSON (2-space indent, trailing newline; parsed back: 22 edges)",
     "  first edge (index 0): DRAFT --PUBLISH--> OPEN",
-    "  payout edge (index 14): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID",
-    "  last edge (index 18): DISPUTED --ARBITRATE_REJECT--> REJECTED",
+    "  payout edge (index 16): PAYOUT_PENDING --PAYOUT_COMPLETE--> PAID",
+    "  last edge (index 21): DISPUTED --ARBITRATE_REJECT--> REJECTED",
   ]) {
     assert.ok(text.includes(line), `missing export line: ${line}`);
   }
@@ -5003,8 +5006,11 @@ test("demo shows the state diagram generation segment in-process: the generated 
     "    SUBMITTED --> EXPIRED : EXPIRE",
     "    IN_REVIEW --> APPROVED : APPROVE",
     "    IN_REVIEW --> REJECTED : REJECT",
+    "    IN_REVIEW --> EXPIRED : EXPIRE",
     "    APPROVED --> PAYOUT_PENDING : REQUEST_PAYOUT",
+    "    APPROVED --> EXPIRED : EXPIRE",
     "    PAYOUT_PENDING --> PAID : PAYOUT_COMPLETE",
+    "    PAYOUT_PENDING --> EXPIRED : EXPIRE",
     "    REJECTED --> DISPUTED : DISPUTE",
     "    REJECTED --> CAPTURING : RESUBMIT",
     "    DISPUTED --> APPROVED : ARBITRATE_APPROVE",
@@ -5014,10 +5020,10 @@ test("demo shows the state diagram generation segment in-process: the generated 
   assert.deepEqual(stateDiagramText.split("\n"), EXPECTED_LINES);
   // The shape the backlog pins: first line is the mermaid fence,
   // the block carries the stateDiagram-v2 header, and the edge
-  // count equals the transition-table snapshot's pinned 19.
+  // count equals the transition-table snapshot's pinned 22.
   assert.equal(stateDiagramText.split("\n")[0], "```mermaid");
   assert.ok(stateDiagramText.includes("stateDiagram-v2"));
-  assert.equal(stateDiagramEdgeCount, 19);
+  assert.equal(stateDiagramEdgeCount, 22);
   assert.equal(stateDiagramEdgeCount, transitionTable().length);
   // Cross-check against the library generator itself and the
   // README-embedded copy — the demo segment is not
@@ -5040,12 +5046,12 @@ test("demo shows the state diagram generation segment in-process: the generated 
     "state diagram generation segment must follow the transition-table JSON export segment",
   );
   for (const line of [
-    "  stateDiagram(): 24 lines, 19 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)",
+    "  stateDiagram(): 27 lines, 22 edges (generated from transitionTable() — the Mermaid block the README embeds verbatim)",
     "  first line: ```mermaid",
     "  second line: stateDiagram-v2",
     "  initial transition (line 4): [*] --> DRAFT",
     "  first edge (line 5): DRAFT --> OPEN : PUBLISH",
-    "  last edge (line 23): DISPUTED --> REJECTED : ARBITRATE_REJECT",
+    "  last edge (line 26): DISPUTED --> REJECTED : ARBITRATE_REJECT",
   ]) {
     assert.ok(text.includes(line), `missing diagram line: ${line}`);
   }
@@ -5513,23 +5519,30 @@ test("demo SLA watchdog execution entry citations: result.entry lines match the 
   }
   // Failed results carry no entry — vacuous for this batch (both
   // expired), so the invariant is also pinned on an independent
-  // stuck batch the demo batch cannot show: an overdue IN_REVIEW
-  // task has no EXPIRE edge, so its outcome must omit `entry`.
+  // stuck batch the demo batch cannot show: an overdue REJECTED
+  // task has no EXPIRE edge (backlog #1428 gave IN_REVIEW one),
+  // so its outcome must omit `entry`. Every dispatch carries a
+  // fixed `at` before the 2026-03-06 screening now: a bare
+  // dispatch would stamp the wall clock, and the EXPIRE audit
+  // timestamp (the screening now) would trip the backward-clock
+  // check before ever reaching the transition check.
   assert.ok(
     expireExecutionResults.every((r) => r.expired || !("entry" in r)),
   );
   const stuck = new TaskLifecycle("STUCK-ENTRY");
-  stuck.dispatch("PUBLISH", { actor: "poster" });
-  stuck.dispatch("ACCEPT", { actor: "contributor" });
-  stuck.dispatch("START_CAPTURE", { actor: "contributor" });
-  stuck.dispatch("SUBMIT", { actor: "contributor" });
-  stuck.dispatch("BEGIN_REVIEW", { actor: "reviewer" });
+  stuck.dispatch("PUBLISH", { actor: "poster", at: "2026-03-01T09:00:00.000Z" });
+  stuck.dispatch("ACCEPT", { actor: "contributor", at: "2026-03-02T09:00:00.000Z" });
+  stuck.dispatch("START_CAPTURE", { actor: "contributor", at: "2026-03-03T09:00:00.000Z" });
+  stuck.dispatch("SUBMIT", { actor: "contributor", at: "2026-03-04T09:00:00.000Z" });
+  stuck.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: "2026-03-05T09:00:00.000Z" });
+  stuck.dispatch("REJECT", { actor: "reviewer", at: "2026-03-05T10:00:00.000Z" });
   stuck.setSlaDeadline("2026-01-01T00:00:00.000Z");
   const [stuckResult] = expireOverdueTasks(
     [stuck],
     new Date("2026-03-06T09:00:00.000Z"),
   );
   assert.equal(stuckResult.expired, false);
+  assert.match(stuckResult.error ?? "", /invalid transition: EXPIRE from REJECTED/);
   assert.ok(
     !("entry" in stuckResult),
     "failed outcome must not carry an entry field",
@@ -6099,13 +6112,13 @@ test("demo shows the terminal-state judgement segment in-process: all 13 states 
   // Independent checks built in the test — the demo segment
   // is not self-certifying: the standalone function reproduces
   // the same verdicts, and the transition table's own shape
-  // (states with no outgoing edge, 19 edges in total)
+  // (states with no outgoing edge, 22 edges in total)
   // reproduces the same terminal set.
   for (const { state, terminal } of EXPECTED) {
     assert.equal(isTerminal(state), terminal, `state ${state}`);
   }
   const edges = transitionTable();
-  assert.equal(edges.length, 19);
+  assert.equal(edges.length, 22);
   const withOutgoing = new Set(edges.map((e) => e.from));
   assert.deepEqual(
     EXPECTED.map(({ state }) => state).filter((s) => !withOutgoing.has(s)),
@@ -6131,9 +6144,9 @@ test("demo shows the terminal-state judgement segment in-process: all 13 states 
     "  ACCEPTED        -> isTerminal: false (3 outgoing edges in transitionTable())",
     "  CAPTURING       -> isTerminal: false (3 outgoing edges in transitionTable())",
     "  SUBMITTED       -> isTerminal: false (2 outgoing edges in transitionTable())",
-    "  IN_REVIEW       -> isTerminal: false (2 outgoing edges in transitionTable())",
-    "  APPROVED        -> isTerminal: false (1 outgoing edge in transitionTable())",
-    "  PAYOUT_PENDING  -> isTerminal: false (1 outgoing edge in transitionTable())",
+    "  IN_REVIEW       -> isTerminal: false (3 outgoing edges in transitionTable())",
+    "  APPROVED        -> isTerminal: false (2 outgoing edges in transitionTable())",
+    "  PAYOUT_PENDING  -> isTerminal: false (2 outgoing edges in transitionTable())",
     "  PAID            -> isTerminal: true (terminal — 0 outgoing edges in transitionTable())",
     "  REJECTED        -> isTerminal: false (2 outgoing edges in transitionTable())",
     "  DISPUTED        -> isTerminal: false (2 outgoing edges in transitionTable())",

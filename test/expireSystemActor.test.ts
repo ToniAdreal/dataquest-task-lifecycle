@@ -34,13 +34,14 @@ function openTask(id: string): TaskLifecycle {
   return t; // OPEN — has an EXPIRE edge
 }
 
-function inReviewTask(id: string): TaskLifecycle {
+function rejectedTask(id: string): TaskLifecycle {
   const t = openTask(id);
   t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
   t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
   t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
   t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
-  return t; // IN_REVIEW — no EXPIRE edge
+  t.dispatch("REJECT", { actor: "reviewer", at: REVIEW_AT });
+  return t; // REJECTED — no EXPIRE edge (backlog #1428: IN_REVIEW gained one)
 }
 
 function lastEntry(task: TaskLifecycle) {
@@ -66,7 +67,7 @@ describe("expireOverdueTasks system-actor attribution (#550)", () => {
   });
 
   it("a failed dispatch leaves the task untouched: no system signature anywhere", () => {
-    const stuck = inReviewTask("stuck");
+    const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
     const before = JSON.stringify(stuck.history);
 
@@ -75,7 +76,7 @@ describe("expireOverdueTasks system-actor attribution (#550)", () => {
     assert.ok(result.error, "expected an error message");
 
     // failed tasks are untouched: no new entry, no residue
-    assert.equal(stuck.state, "IN_REVIEW");
+    assert.equal(stuck.state, "REJECTED");
     assert.equal(JSON.stringify(stuck.history), before);
     assert.ok(!("entry" in result), "failure must not carry an entry field");
     assert.ok(

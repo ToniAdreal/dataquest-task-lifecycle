@@ -42,7 +42,7 @@ test("transition table matches the committed JSON snapshot (no accidental edits)
   // Belt and suspenders: structured comparison, not just string equality.
   assert.deepEqual(JSON.parse(snapshot), transitionTable());
   // The snapshot is machine-generated; guard its shape by hand-count too.
-  assert.equal(transitionTable().length, 19);
+  assert.equal(transitionTable().length, 22);
 });
 
 test("allowedEvents(state) covers every event of every state, with no extras", () => {

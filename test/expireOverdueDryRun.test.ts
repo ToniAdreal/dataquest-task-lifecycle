@@ -81,15 +81,16 @@ function openOverdueTaskAt(
   return task; // OPEN, deterministic audit timestamps
 }
 
-function inReviewOverdueTask(id: string): TaskLifecycle {
+function rejectedOverdueTask(id: string): TaskLifecycle {
   const task = new TaskLifecycle(id);
   task.dispatch("PUBLISH", { actor: "poster", at: PUBLISH_AT });
   task.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
   task.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
   task.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
   task.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
+  task.dispatch("REJECT", { actor: "reviewer", at: REVIEW_AT });
   task.setSlaDeadline(PAST);
-  return task; // IN_REVIEW — no EXPIRE edge
+  return task; // REJECTED — no EXPIRE edge (backlog #1428: IN_REVIEW gained one)
 }
 
 /** Overdue at BACKDATED_NOW, but its last history entry is after the `at` pin. */
@@ -128,7 +129,7 @@ function liveError(
 describe("expireOverdueTasks dryRun", () => {
   it("dry run changes nothing: state and history frozen for the whole batch", () => {
     const expirable = openOverdueTask("expirable");
-    const stuck = inReviewOverdueTask("stuck");
+    const stuck = rejectedOverdueTask("stuck");
     const notOverdue = openOverdueTask("not-overdue");
     notOverdue.setSlaDeadline(FUTURE);
     const noDeadline = new TaskLifecycle("no-deadline");
@@ -159,7 +160,7 @@ describe("expireOverdueTasks dryRun", () => {
     const buildBatch = () => [
       openOverdueTask("a"),
       openOverdueTask("b"),
-      inReviewOverdueTask("c"),
+      rejectedOverdueTask("c"),
       new TaskLifecycle("d"),
       openOverdueTask("e"),
     ];
@@ -191,8 +192,8 @@ describe("expireOverdueTasks dryRun", () => {
     assert.equal(task.state, "OPEN");
   });
 
-  it("IN_REVIEW overdue: wouldExpire false with the live run's exact error wording", () => {
-    const build = () => inReviewOverdueTask("stuck");
+  it("REJECTED overdue: wouldExpire false with the live run's exact error wording", () => {
+    const build = () => rejectedOverdueTask("stuck");
     const [dry] = expireOverdueTasks([build()], NOW, undefined, {
       dryRun: true,
     });
@@ -200,7 +201,7 @@ describe("expireOverdueTasks dryRun", () => {
     assert.equal(dry.expired, false);
     assert.equal("entry" in dry, false);
     assert.equal(dry.error, liveError(build, NOW));
-    assert.match(dry.error ?? "", /invalid transition: EXPIRE from IN_REVIEW/);
+    assert.match(dry.error ?? "", /invalid transition: EXPIRE from REJECTED/);
   });
 
   it("backdated at pin: wouldExpire false with the live run's exact error wording", () => {
@@ -256,7 +257,7 @@ describe("expireOverdueTasks dryRun", () => {
   it("dry run notifies no subscriber; the live run right after notifies once per expiry", () => {
     const a = openOverdueTask("a");
     const b = openOverdueTask("b");
-    const stuck = inReviewOverdueTask("stuck");
+    const stuck = rejectedOverdueTask("stuck");
     let notifications = 0;
     for (const task of [a, b, stuck]) {
       task.subscribe(() => {
@@ -284,7 +285,7 @@ describe("expireOverdueTasks dryRun", () => {
   it("a dry run leaves no residue: the same batch then expires in full live", () => {
     const a = openOverdueTask("a");
     const b = openOverdueTask("b");
-    const stuck = inReviewOverdueTask("stuck");
+    const stuck = rejectedOverdueTask("stuck");
     const beforeLen = new Map([
       ["a", a.history.length],
       ["b", b.history.length],
@@ -359,7 +360,7 @@ describe("expireOverdueTasks dryRun", () => {
 
   it("live-run results carry no wouldExpire key", () => {
     const ok = openOverdueTask("ok");
-    const stuck = inReviewOverdueTask("stuck2");
+    const stuck = rejectedOverdueTask("stuck2");
     const results = expireOverdueTasks([ok, stuck], NOW);
     for (const result of results) {
       assert.equal("wouldExpire" in result, false);

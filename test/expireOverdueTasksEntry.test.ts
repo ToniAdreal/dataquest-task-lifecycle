@@ -36,8 +36,9 @@ function stuckTask(id: string): TaskLifecycle {
   t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
   t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
   t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
+  t.dispatch("REJECT", { actor: "reviewer", at: REVIEW_AT });
   t.setSlaDeadline(PAST);
-  return t; // IN_REVIEW, overdue — no EXPIRE edge
+  return t; // REJECTED, overdue — no EXPIRE edge (backlog #1428: IN_REVIEW gained one)
 }
 
 function lastEntry(task: TaskLifecycle) {

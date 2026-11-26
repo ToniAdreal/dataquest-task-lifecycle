@@ -19,8 +19,16 @@ import {
 
 /** Fixed seed — change this and every expectation below is reproducible. */
 const SEED = 20261005;
-/** Number of random walks per run. */
-const WALKS = 200;
+/**
+ * Number of random walks per run. Raised from 200 by backlog #1428:
+ * the new EXPIRE edges on IN_REVIEW / APPROVED / PAYOUT_PENDING
+ * make the PAID path rarer (a walk must dodge EXPIRE at seven
+ * states in a row), and with seed 20261005 the first PAID walk
+ * lands at walk 512 — 200 walks never see it. At 2000 walks the
+ * seed yields 12 PAID, 451 ABANDONED and 1537 EXPIRED, so the
+ * "every terminal state" assertion below keeps a real margin.
+ */
+const WALKS = 2000;
 /** Hard step cap per walk — a walk must terminate well before this. */
 const MAX_STEPS = 100;
 
@@ -132,7 +140,8 @@ test("deterministic walks: no walk ever deadlocks, history stays intact", () => 
     assertHistoryIntegrity(task);
   }
   // Seed 20261005 covers all three terminal states: the walks are not
-  // collapsing onto a single path.
+  // collapsing onto a single path. (Backlog #1428: this needs WALKS =
+  // 2000 — the first PAID walk with this seed lands at walk 512.)
   assert.deepEqual(
     [...terminalStates].sort(),
     ["ABANDONED", "EXPIRED", "PAID"],

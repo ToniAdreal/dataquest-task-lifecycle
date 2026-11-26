@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Late-state expiry edges (2026-11-26, backlog #1428): the
+  transition table gains `EXPIRE: "EXPIRED"` edges on IN_REVIEW,
+  APPROVED and PAYOUT_PENDING, so an overdue task in any of those
+  states is now expired by `expireOverdueTasks` instead of being
+  screened as overdue and then failing every batch with
+  `invalid transition: EXPIRE from IN_REVIEW` (the watchdog used to
+  report the same per-task error forever, with no executor able to
+  move the task). REJECTED and DISPUTED keep no EXPIRE edge and
+  stay the unexpirable cases. The transition-table snapshot,
+  Mermaid diagram, README and demo expectations move from 19 to 22
+  edges, and the deterministic-walk count rises from 200 to 2000
+  walks (the first PAID walk with seed 20261005 lands at walk 512
+  now that EXPIRE is an exit from the late states). The test count
+  rises by eight (2207 to 2215 tests).
+
 - Strict payout webhook verification entry point (2026-11-26,
   backlog #1427): `verifyPayoutWebhookStrict(body, signature,
   secret, opts)` is the recommended receiver path — the legacy

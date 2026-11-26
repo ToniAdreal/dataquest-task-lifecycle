@@ -47,13 +47,14 @@ function openTask(id: string): TaskLifecycle {
   return t; // OPEN — has an EXPIRE edge
 }
 
-function inReviewTask(id: string): TaskLifecycle {
+function rejectedTask(id: string): TaskLifecycle {
   const t = openTask(id);
   t.dispatch("ACCEPT", { actor: "contributor", at: ACCEPT_AT });
   t.dispatch("START_CAPTURE", { actor: "contributor", at: CAPTURE_AT });
   t.dispatch("SUBMIT", { actor: "contributor", at: SUBMIT_AT });
   t.dispatch("BEGIN_REVIEW", { actor: "reviewer", at: REVIEW_AT });
-  return t; // IN_REVIEW — no EXPIRE edge
+  t.dispatch("REJECT", { actor: "reviewer", at: REVIEW_AT });
+  return t; // REJECTED — no EXPIRE edge (backlog #1428: IN_REVIEW gained one)
 }
 
 function abandonedTask(id: string): TaskLifecycle {
@@ -146,7 +147,7 @@ test("expireOverdueSubscribe: batch notifies only the attempted tasks, each once
 });
 
 test("expireOverdueSubscribe: failure-isolated task notifies nobody and the batch continues", () => {
-  const stuck = inReviewTask("t-stuck");
+  const stuck = rejectedTask("t-stuck");
   stuck.setSlaDeadline(PAST);
   const expirable = openTask("t-after-stuck");
   expirable.setSlaDeadline(PAST);
@@ -160,10 +161,10 @@ test("expireOverdueSubscribe: failure-isolated task notifies nobody and the batc
 
   const blocked = byId(results, "t-stuck");
   assert.equal(blocked.expired, false);
-  assert.match(blocked.error ?? "", /invalid transition: EXPIRE from IN_REVIEW/);
+  assert.match(blocked.error ?? "", /invalid transition: EXPIRE from REJECTED/);
   assert.equal(blocked.entry, undefined);
   assert.equal(s.calls.length, 0);
-  assert.equal(stuck.state, "IN_REVIEW");
+  assert.equal(stuck.state, "REJECTED");
   assert.equal(JSON.stringify(stuck.history), before);
 
   assert.equal(byId(results, "t-after-stuck").expired, true);
