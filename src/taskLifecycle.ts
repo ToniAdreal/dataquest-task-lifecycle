@@ -1902,6 +1902,22 @@ function decimalMinorUnits(amount: number): bigint {
  * handing a silent `Infinity` downstream. `parseHistory`'s legacy
  * acceptance is deliberately untouched: an old log carrying `1e308`
  * still parses; only converting or summing it fails, loudly.
+ *
+ * Safe-integer-only (backlog #1423): a finite input whose minor-unit
+ * count is not a safe integer (`90071992547409.93` → `9007199254740994`
+ * cents, past `Number.MAX_SAFE_INTEGER`) is rejected the same way.
+ * The `Number(...)` cast of the exact `BigInt` count silently rounds
+ * past the safe range, so without this check a live task could hold
+ * an amount no integer-cent sum can represent exactly — and two such
+ * entries could add up to a wrong-but-finite batch total. The check
+ * itself is inclusive (`Number.isSafeInteger`, so an exact
+ * `MAX_SAFE_INTEGER` count would pass); in practice no double input
+ * reaches exactly that count — the nearest reachable values are
+ * `90071992547409.91` → `9007199254740990` cents (passes) and
+ * `90071992547409.92` → `9007199254740992` cents (throws) — because
+ * the shortest decimal of the doubles in between collapses to one
+ * decimal place. The converter's boundary is therefore the safe
+ * range itself, not a particular amount.
  */
 export function toMinorUnits(amount: number): number {
   if (!Number.isFinite(amount)) {
@@ -1913,6 +1929,11 @@ export function toMinorUnits(amount: number): number {
   if (!Number.isFinite(minorUnits)) {
     throw new Error(
       `minor units conversion overflowed: ${String(amount)} is too large to represent in minor units`,
+    );
+  }
+  if (!Number.isSafeInteger(minorUnits)) {
+    throw new Error(
+      `minor units conversion overflowed: ${String(amount)} exceeds Number.MAX_SAFE_INTEGER in minor units`,
     );
   }
   return minorUnits;
@@ -2175,7 +2196,12 @@ function assertTask(task: unknown, fnName: string): asserts task is TaskLifecycl
  * `toMinorUnits` itself fails fast on the conversion overflow, so the
  * single-entry case is translated back into this same message here —
  * the read-side error contract is unchanged; only the accumulation
- * case still relies on the per-addition check. This changes only the
+ * case still relies on the per-addition check. Since backlog #1423
+ * the per-addition check is `Number.isSafeInteger`, not just finite:
+ * two individually safe entries can sum past `MAX_SAFE_INTEGER`
+ * minor units into a wrong-but-finite total (`90071992547409.91`
+ * twice), and that accumulation-only overflow throws here too
+ * instead of returning a rounded total. This changes only the
  * read side: legacy snapshots stay readable (their acceptance is
  * unchanged); only summing them fails, loudly.
  *
@@ -2208,12 +2234,12 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
         throw new Error("total paid out computation overflowed: inputs too large");
       }
       totalMinorUnits += entryMinorUnits;
-      if (!Number.isFinite(totalMinorUnits)) {
+      if (!Number.isSafeInteger(totalMinorUnits)) {
         throw new Error("total paid out computation overflowed: inputs too large");
       }
     }
   }
-  if (!Number.isFinite(totalMinorUnits)) {
+  if (!Number.isSafeInteger(totalMinorUnits)) {
     throw new Error("total paid out computation overflowed: inputs too large");
   }
   return totalMinorUnits / 100;
@@ -2271,7 +2297,11 @@ export function totalPaidOut(tasks: readonly TaskLifecycle[]): number {
  * `toMinorUnits` itself fails fast on the conversion overflow, so the
  * single-entry case is translated back into this same message here —
  * the read-side error contract mirrors `totalPaidOut`; only the
- * accumulation case still relies on the per-addition check. This
+ * accumulation case still relies on the per-addition check. Since
+ * backlog #1423 the per-addition check is `Number.isSafeInteger`,
+ * not just finite: two individually safe quotes can sum past
+ * `MAX_SAFE_INTEGER` minor units into a wrong-but-finite total, and
+ * that accumulation-only overflow throws here too. This
  * changes only the read side: legacy snapshots stay readable (their
  * acceptance is unchanged); only summing them fails, loudly.
  *
@@ -2320,12 +2350,12 @@ export function totalQuoted(tasks: readonly TaskLifecycle[]): number {
         throw new Error("total quoted computation overflowed: inputs too large");
       }
       totalMinorUnits += entryMinorUnits;
-      if (!Number.isFinite(totalMinorUnits)) {
+      if (!Number.isSafeInteger(totalMinorUnits)) {
         throw new Error("total quoted computation overflowed: inputs too large");
       }
     }
   }
-  if (!Number.isFinite(totalMinorUnits)) {
+  if (!Number.isSafeInteger(totalMinorUnits)) {
     throw new Error("total quoted computation overflowed: inputs too large");
   }
   return totalMinorUnits / 100;
@@ -2427,9 +2457,16 @@ export interface TaskSettlementsSummary {
  * too large` instead of returning a poisoned summary. The check runs
  * after every addition, so a single overflowing entry is caught at
  * its own addition rather than only at the return, and no partial
- * summary is ever returned. This changes only the read side: legacy
- * snapshots stay readable (their acceptance is unchanged); only
- * summarizing them fails, loudly.
+ * summary is ever returned. Since backlog #1423 the per-addition
+ * checks are `Number.isSafeInteger`, not just finite: two
+ * individually safe entries can sum past `MAX_SAFE_INTEGER` minor
+ * units into a wrong-but-finite total, and that accumulation-only
+ * overflow throws here too — the same guard covers `gap` and
+ * `unquotedPaidTotal`, so a summary this function returns always
+ * passes its own renderers' shape check (their `assertSummaryShape`
+ * requires every figure to be a safe integer). This changes only the
+ * read side: legacy snapshots stay readable (their acceptance is
+ * unchanged); only summarizing them fails, loudly.
  *
  * Fail-fast, before any figure is summed (backlog #1363, shape
  * guard {@link assertTaskBatch}): a non-array batch throws
@@ -2529,16 +2566,16 @@ export function summarizeTaskSettlements(
     }
     if (accept?.quotedAmount === undefined) {
       unquotedPaidTotal += paidMinorUnits;
-      if (!Number.isFinite(unquotedPaidTotal)) throw overflow();
+      if (!Number.isSafeInteger(unquotedPaidTotal)) throw overflow();
     }
     quotedTotal += quotedMinorUnits;
-    if (!Number.isFinite(quotedTotal)) throw overflow();
+    if (!Number.isSafeInteger(quotedTotal)) throw overflow();
     paidTotal += paidMinorUnits;
-    if (!Number.isFinite(paidTotal)) throw overflow();
+    if (!Number.isSafeInteger(paidTotal)) throw overflow();
     if (payoutMismatch(task) !== undefined) mismatched += 1;
   }
   const gap = quotedTotal - paidTotal;
-  if (!Number.isFinite(gap)) throw overflow();
+  if (!Number.isSafeInteger(gap)) throw overflow();
   return {
     tasks: tasks.length,
     paid,
@@ -2997,14 +3034,18 @@ export function reconcilePayouts(
   // totalPaidOut cents convention), so the batch total is exact to
   // the cent and a legacy giant overflows fail-fast instead of
   // wrapping. Single-task groups are never summed — they keep the
-  // exact per-task comparison below.
+  // exact per-task comparison below. Since backlog #1423 the
+  // per-addition check is `Number.isSafeInteger`, not just finite:
+  // two individually safe amounts can sum past `MAX_SAFE_INTEGER`
+  // minor units into a wrong-but-finite group total, and that
+  // accumulation-only overflow throws here too.
   const groupMinorUnitsByRef = new Map<string, number>();
   for (const [ref, group] of groupsByRef) {
     if (group.length < 2) continue;
     let sumMinorUnits = 0;
     for (const candidate of group) {
       sumMinorUnits += toMinorUnits(candidate.amount);
-      if (!Number.isFinite(sumMinorUnits)) {
+      if (!Number.isSafeInteger(sumMinorUnits)) {
         throw new Error(
           `invalid reconcilePayouts: shared payoutRef ${JSON.stringify(ref)} amounts overflow minor-unit representation`,
         );

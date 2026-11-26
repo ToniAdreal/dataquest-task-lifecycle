@@ -62,13 +62,24 @@ test("toMinorUnits rejects non-finite input", () => {
   );
 });
 
-test("large-but-finite amounts still convert exactly", () => {
-  // 1e15 majors = 1e17 cents, still exactly representable; the
-  // #838 accumulation case (1.7e306 -> finite 1.7e308 cents) also
-  // still converts, so the per-addition check keeps its job.
-  assert.equal(toMinorUnits(1e15), 1e17);
-  assert.equal(toMinorUnits(-1e15), -1e17);
-  assert.equal(Number.isFinite(toMinorUnits(1.7e306)), true);
+test("large-but-safe amounts still convert exactly; past the safe ceiling the conversion throws", () => {
+  // 1e13 majors = 1e15 cents, inside the safe range. Since backlog
+  // #1423 the ceiling is `Number.MAX_SAFE_INTEGER`, not just finite:
+  // 1e15 majors would be 1e17 cents — exactly representable as a
+  // double, but not a safe integer (adding a cent to it silently
+  // does nothing) — so it now throws, and the #838 accumulation
+  // case (1.7e306 -> 1.7e308 cents) throws at the conversion itself
+  // instead of surviving to the per-addition check. The old pinning
+  // of 1e15 -> 1e17 belonged to the finite-only contract #844 set,
+  // which #1423 supersedes.
+  assert.equal(toMinorUnits(1e13), 1e15);
+  assert.equal(toMinorUnits(-1e13), -1e15);
+  assert.throws(
+    () => toMinorUnits(1e15),
+    /minor units conversion overflowed: 1000000000000000 exceeds Number\.MAX_SAFE_INTEGER in minor units/,
+  );
+  assert.throws(() => toMinorUnits(-1e15), CONVERSION_OVERFLOW);
+  assert.throws(() => toMinorUnits(1.7e306), CONVERSION_OVERFLOW);
 });
 
 test("normal and negative amounts round-trip unchanged", () => {

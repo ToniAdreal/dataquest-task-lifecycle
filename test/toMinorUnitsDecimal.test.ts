@@ -62,15 +62,38 @@ test("toMinorUnits handles tiny and exponent-form values", () => {
   assert.equal(toMinorUnits(1e-7), 0);
   assert.equal(toMinorUnits(0.004), 0);
   assert.equal(toMinorUnits(0.006), 1);
-  assert.equal(toMinorUnits(1e21), 1e23);
+  // 1e21 majors is 1e23 cents, past MAX_SAFE_INTEGER: since backlog
+  // #1423 the converter rejects it instead of returning a rounded
+  // integer no cent-sum can represent exactly.
+  assert.throws(
+    () => toMinorUnits(1e21),
+    /minor units conversion overflowed: 1e\+21 exceeds Number\.MAX_SAFE_INTEGER in minor units/,
+  );
   assert.equal(toMinorUnits(1.5e-3), 0);
   assert.equal(toMinorUnits(2.5e-3), 0);
 });
 
-test("toMinorUnits keeps large amounts exact", () => {
-  assert.equal(toMinorUnits(1e15), 1e17);
-  assert.equal(toMinorUnits(-1e15), -1e17);
-  assert.ok(Number.isFinite(toMinorUnits(1.7e306)));
+test("toMinorUnits keeps large-but-safe amounts exact", () => {
+  // 1e13 majors is 1e15 cents, inside the safe range; 1e15 majors
+  // would be 1e17 cents, past it — since backlog #1423 that throws
+  // instead of converting (the old pinning of 1e15 -> 1e17 belonged
+  // to the finite-only contract #844 set, which #1423 supersedes:
+  // 1e17 is exactly representable as a double but not a safe
+  // integer, so adding a cent to it silently does nothing).
+  assert.equal(toMinorUnits(1e13), 1e15);
+  assert.equal(toMinorUnits(-1e13), -1e15);
+  assert.throws(
+    () => toMinorUnits(1e15),
+    /minor units conversion overflowed: 1000000000000000 exceeds Number\.MAX_SAFE_INTEGER in minor units/,
+  );
+  assert.throws(
+    () => toMinorUnits(-1e15),
+    /minor units conversion overflowed: -1000000000000000 exceeds Number\.MAX_SAFE_INTEGER in minor units/,
+  );
+  assert.throws(
+    () => toMinorUnits(1.7e306),
+    /minor units conversion overflowed: .* exceeds Number\.MAX_SAFE_INTEGER in minor units/,
+  );
   // The double nearest 90071992547409.91 prints as 90071992547409.9,
   // which is exactly 9007199254740990 cents, one below
   // MAX_SAFE_INTEGER, so the conversion is exact, not rounded off.

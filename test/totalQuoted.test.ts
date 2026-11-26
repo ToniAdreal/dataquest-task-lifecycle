@@ -4,7 +4,6 @@ import {
   TaskLifecycle,
   mismatchedPayouts,
   payoutMismatch,
-  toMinorUnits,
   totalPaidOut,
   totalQuoted,
   type TaskHistoryEntry,
@@ -203,13 +202,16 @@ test("overflow throws regardless of batch position, never a partial total", () =
   );
 });
 
-test("accumulation-only overflow throws: individually finite quotes whose sum overflows", () => {
-  // Each 1.7e306 converts to a finite 1.7e308 minor units; only their
-  // sum (3.4e308) overflows. This pins the per-addition check, not
-  // just the single-entry conversion.
-  assert.equal(Number.isFinite(toMinorUnits(1.7e306)), true);
-  const a = legacyQuotedViaSnapshot("accum-a", 1.7e306);
-  const b = legacyQuotedViaSnapshot("accum-b", 1.7e306);
+test("accumulation-only overflow throws: individually safe quotes whose sum overflows", () => {
+  // Each 90071992547409.91 converts to a safe 9007199254740990 minor
+  // units; only their sum (18014398509481980) passes
+  // MAX_SAFE_INTEGER. This pins the per-addition safe-integer check,
+  // not just the single-entry conversion. Since backlog #1423 the
+  // accumulation boundary is the safe range, not the finite range —
+  // the old 1.7e306 pinning belonged to the finite-only contract and
+  // now throws at the conversion itself instead.
+  const a = legacyQuotedViaSnapshot("accum-a", 90071992547409.91);
+  const b = legacyQuotedViaSnapshot("accum-b", 90071992547409.91);
   assert.throws(() => totalQuoted([a, b]), OVERFLOW);
 });
 
@@ -277,15 +279,19 @@ test("totalQuoted is pure and works on rehydrated tasks", () => {
   assert.equal(JSON.stringify(t.toJSON()), before);
 });
 
-test("large-but-finite quotes still sum legally", () => {
-  const legacy = legacyQuotedViaSnapshot("large-finite", 1e15);
-  assert.equal(totalQuoted([legacy]), 1e15);
+test("large-but-safe quotes still sum legally", () => {
+  // 1e13 majors is 1e15 cents, inside the safe range; the old 1e15
+  // pinning belonged to the finite-only contract, which backlog
+  // #1423 supersedes (1e15 majors would be 1e17 cents, past
+  // MAX_SAFE_INTEGER, so it now throws at the conversion).
+  const legacy = legacyQuotedViaSnapshot("large-finite", 1e13);
+  assert.equal(totalQuoted([legacy]), 1e13);
   assert.equal(
     totalQuoted([
-      toPaid("big-a", { quoted: 1e15, paid: 1e15 }),
-      toPaid("big-b", { quoted: 2e15, paid: 2e15 }),
+      toPaid("big-a", { quoted: 1e13, paid: 1e13 }),
+      toPaid("big-b", { quoted: 2e13, paid: 2e13 }),
     ]),
-    3e15,
+    3e13,
   );
 });
 

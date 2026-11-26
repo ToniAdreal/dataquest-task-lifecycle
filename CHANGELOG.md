@@ -124,6 +124,49 @@ change type; no entry describes a feature that is not in the history.
 
 ### Fixed
 
+- `toMinorUnits` now rejects amounts past the safe-integer ceiling
+  (2026-11-26, backlog #1423): the converter only checked
+  finiteness, so `toMinorUnits(90071992547409.93)` silently returned
+  `9007199254740994` cents — past `Number.MAX_SAFE_INTEGER`, a value
+  no integer-cent sum can represent exactly. The live `dispatch()`
+  round-trip gate could not catch it either
+  (`9007199254740994 / 100 === 90071992547409.93` in double
+  arithmetic), so a live task could hold it; and two individually
+  safe entries could add up to a wrong-but-finite batch total, which
+  `summarizeTaskSettlements` then handed to renderers whose own
+  shape check rejects non-safe integers — while the sibling
+  converter `parseMinorUnits` already threw past the same ceiling.
+  The converter now throws `minor units conversion overflowed: …
+  exceeds Number.MAX_SAFE_INTEGER in minor units` for a non-safe
+  result, and `totalPaidOut`, `totalQuoted`,
+  `summarizeTaskSettlements` (including `gap` and
+  `unquotedPaidTotal`) and the `reconcilePayouts` shared-ref sum
+  check `Number.isSafeInteger` after every addition, so an
+  accumulation-only overflow throws their own overflow error
+  instead of returning a rounded total. Legacy acceptance is
+  deliberately unchanged: an old snapshot carrying the amount still
+  restores; only converting or summing it fails, loudly. Eleven new
+  tests in `test/toMinorUnitsSafeInteger.test.ts` pin the rejection
+  (including the adjacent `90071992547409.92` boundary and the
+  negative mirror), the safe side (`90071992547409.91` →
+  `9007199254740990` cents, one below the ceiling — the backlog's
+  "exactly MAX_SAFE_INTEGER" parenthetical was off by a cent, the
+  boundary is the safe range itself), the dispatch rejections with
+  no history residue and an unconsumed idempotency key, the legacy
+  restore-then-fail-loudly split, the accumulation-only overflow
+  across all four readers, the `unquotedPaidTotal` path, a summary
+  landing exactly on `MAX_SAFE_INTEGER` still rendering as CSV and
+  JSON, and the shared-ref sum overflow. Four older files are
+  re-pinned to the new contract: the finite-only `1e15` → `1e17`
+  and `1.7e306` assertions in `toMinorUnitsDecimal`,
+  `toMinorUnitsFinite`, `totalPaidOutOverflow` and `totalQuoted`
+  now throw (or, for the sums, use `1e13` majors), since #1423
+  supersedes the #844 finite-only contract. A mutation check
+  (disabling the converter guard) turns eight of the new and
+  re-pinned tests red; disabling the `totalPaidOut` guards turns
+  both accumulation tests red. The test count rises by eleven
+  (2141 to 2152 tests).
+
 - `stateAt` / `stateAtFromHistory` now reject non-canonical date
   strings (2026-11-25, backlog #1408): a string query time must
   already be canonical ISO-8601 (the `toISOString()` form,
