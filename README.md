@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2166 tests, all local
+npm test   # 2181 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1171,7 +1171,20 @@ makes a `PAYOUT_COMPLETE` dispatch without a `payoutAmount` throw
 usual validation (finite, non-negative, at most 2 decimal places), and
 0 is a legal amount. Same snapshot persistence, re-enabled via
 `fromHistory(id, history, { requirePayoutAmount: true })` on a
-history-only rebuild. For the other
+history-only rebuild. The third opt-in closes the loop the other two
+leave open: `new TaskLifecycle(id, { requireExactPayout: true })`
+makes a `PAYOUT_COMPLETE` whose `payoutAmount` differs from the
+`quotedAmount` on the last `ACCEPT` entry throw
+`payout amount mismatch: …` — checked after the transition/budget
+checks and the presence gates, before the idempotency key is
+consumed, so a rejected dispatch leaves no trace. The comparison
+runs in integer minor units, so a legacy sub-cent pair that rounds
+to the same cent is not a mismatch, the same rule `payoutMismatch()`
+reports by. The gate only compares when both amounts exist: a task
+whose last `ACCEPT` carries no quote has nothing to compare against,
+and a missing `payoutAmount` stays the `requirePayoutAmount` gate's
+job, so enabling only this switch never turns a missing amount into
+an error. Same snapshot persistence and `fromHistory` re-enable. For the other
 half of the loop, the
 `unreconciledPayouts()` reconciliation helper flags `PAID` tasks whose
 `PAYOUT_COMPLETE` entry lacks one:
@@ -1422,6 +1435,24 @@ import { mismatchedPayouts, payoutMismatch } from "dataquest-task-lifecycle";
 payoutMismatch(paidTask); // => { quoted: 100, paid: 90, delta: -10 } — underpaid by 10
 mismatchedPayouts(allTasks); // => PAID tasks whose settled amount differs from the quote
 ```
+
+The read-side counterpart to the `requireExactPayout` dispatch
+gate is `isSettlementComplete(task, { exact: true })`: it
+additionally requires the settled amount to equal the quote on the
+last `ACCEPT` entry in integer minor units, so an under- or
+overpayment no longer counts as complete. A task whose last
+`ACCEPT` carries no quote can never be exactly complete (there is
+nothing to compare against), so it reports `false` even though the
+default call reports `true`; `unreconciledPayouts()` calls the
+predicate without options, so its population is unchanged. The
+balance itself is `remainingOwed(task)`: it returns
+`{ quoted, paid, remaining }` in integer minor units
+(`remaining = quoted - paid`, so an exact settlement reports
+`remaining: 0`, an underpayment a positive balance, an overpayment
+a negative one) and `undefined` when either amount was never
+recorded — unlike `payoutMismatch()`, an exact settlement is still
+a result, not `undefined`, because a zero balance is information
+a caller displays.
 
 `payoutMismatch()` returns `undefined` — no mismatch to report — when
 the task is not `PAID`, when either amount was never recorded (the
@@ -2865,7 +2896,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2166 tests covering the happy path, reject→resubmit
+`npm test` runs 2181 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,

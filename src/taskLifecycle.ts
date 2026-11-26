@@ -1613,6 +1613,18 @@ export function actOnStaleTasks(
  * {@link unreconciledPayouts} flags, not silently passes, so the
  * predicate aligns with that screen rather than with the state alone.
  *
+ * Strict variant: `isSettlementComplete(task, { exact: true })` (see
+ * {@link IsSettlementCompleteOptions}) additionally requires the
+ * settled amount to equal the quote on the last `ACCEPT` entry in
+ * integer minor units — the read-side counterpart to the
+ * `requireExactPayout` dispatch gate. A task whose last `ACCEPT`
+ * entry carries no quote can never be exactly complete (there is
+ * nothing to compare the settlement against), so it reports `false`
+ * even though the default call reports `true`. The default stays
+ * presence-only: an under- or overpayment is still "complete" until
+ * a caller asks for exactness, so `unreconciledPayouts()` (which
+ * calls this predicate without options) keeps its existing population.
+ *
  * Pure: reads the task, never mutates or dispatches.
  *
  * Shape guard (backlog #1362): a task that is not a task-shaped
@@ -1631,10 +1643,39 @@ export function actOnStaleTasks(
  * check only the task shape, and the entry scan here is the one
  * place the history is walked.
  */
-export function isSettlementComplete(task: TaskLifecycle): boolean {
+/** Options for {@link isSettlementComplete}. */
+export interface IsSettlementCompleteOptions {
+  /**
+   * When `true`, the task is only complete when the settled amount
+   * equals the quoted amount in integer minor units
+   * ({@link toMinorUnits}) — the read-side counterpart to the
+   * `requireExactPayout` dispatch gate. A task with no quote on its
+   * last `ACCEPT` entry can never be exactly complete (there is
+   * nothing to compare the settlement against), so it reports
+   * `false`. Default `false`: presence of both fields is enough,
+   * exactly as before.
+   */
+  exact?: boolean;
+}
+
+export function isSettlementComplete(
+  task: TaskLifecycle,
+  opts?: IsSettlementCompleteOptions,
+): boolean {
   assertTask(task, "isSettlementComplete");
+  if (opts !== undefined) {
+    if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+      throw new Error("invalid isSettlementComplete: opts must be an object");
+    }
+    if (opts.exact !== undefined && typeof opts.exact !== "boolean") {
+      throw new Error(
+        `invalid isSettlementComplete: exact must be a boolean, got ${String(opts.exact)}`,
+      );
+    }
+  }
   if (task.state !== "PAID") return false;
   let complete: TaskHistoryEntry | undefined;
+  let quoted: number | undefined;
   for (let i = 0; i < task.history.length; i++) {
     const entry = task.history[i];
     if (!isRecord(entry)) {
@@ -1645,11 +1686,22 @@ export function isSettlementComplete(task: TaskLifecycle): boolean {
     if (entry.event === "PAYOUT_COMPLETE") {
       complete = entry as unknown as TaskHistoryEntry;
     }
+    if (entry.event === "ACCEPT") {
+      quoted = entry.quotedAmount;
+    }
   }
   if (complete === undefined) return false;
-  return (
-    complete.payoutRef !== undefined && complete.payoutAmount !== undefined
-  );
+  if (
+    complete.payoutRef === undefined ||
+    complete.payoutAmount === undefined
+  ) {
+    return false;
+  }
+  if (opts?.exact === true) {
+    if (quoted === undefined) return false;
+    return toMinorUnits(complete.payoutAmount) === toMinorUnits(quoted);
+  }
+  return true;
 }
 
 /**
@@ -2670,6 +2722,77 @@ export function payoutMismatch(task: TaskLifecycle): PayoutMismatch | undefined 
 }
 
 /**
+ * One task's outstanding payout balance, as returned by
+ * {@link remainingOwed}. All three fields are integer minor units
+ * (cents) — the same {@link toMinorUnits} convention
+ * {@link payoutMismatch} compares in — so a caller can display the
+ * balance without hand-scanning the history.
+ */
+export interface RemainingOwed {
+  /** Quoted (owed) amount from the last `ACCEPT` entry, in minor units. */
+  quoted: number;
+  /** Actually settled amount from the `PAYOUT_COMPLETE` entry, in minor units. */
+  paid: number;
+  /**
+   * `quoted - paid`, in minor units: positive means still owed,
+   * zero means settled exactly as quoted, negative means overpaid.
+   */
+  remaining: number;
+}
+
+/**
+ * Reconciliation helper: how much of a task's quote is still
+ * outstanding.
+ *
+ * The quote is the `quotedAmount` on the LAST `ACCEPT` entry; the
+ * settled amount is the `payoutAmount` on the `PAYOUT_COMPLETE`
+ * entry (the same entries {@link payoutMismatch} reads). Returns
+ * `{ quoted, paid, remaining }` in integer minor units
+ * ({@link toMinorUnits}), with `remaining = quoted - paid` — so an
+ * exactly-settled task reports `remaining: 0`, an underpayment a
+ * positive balance, and an overpayment a negative one.
+ *
+ * Returns `undefined` — "no balance to report" — when either amount
+ * was never recorded (no `ACCEPT` quote, or no `PAYOUT_COMPLETE`
+ * amount — the library cannot compare what it cannot observe). The
+ * check is presence-based, not state-based: a task that has not
+ * settled yet reports `undefined` because there is no payment to
+ * compare, and a task whose settlement is recorded reports its
+ * balance whether or not it is currently `PAID` (a `PAYOUT_COMPLETE`
+ * entry only ever arises on the way to `PAID` through the validated
+ * construction paths). Unlike {@link payoutMismatch}, an exact
+ * settlement is still a result (`remaining: 0`), not `undefined` —
+ * a zero balance is information a caller displays, not the absence
+ * of a mismatch.
+ *
+ * Pure: reads the task, never mutates or dispatches. Fail-fast, before
+ * any field is read (backlog #1341): a task that is not a task-shaped
+ * object throws `invalid remainingOwed: task must be a TaskLifecycle`
+ * — the same guard {@link payoutMismatch} uses.
+ */
+export function remainingOwed(task: TaskLifecycle): RemainingOwed | undefined {
+  assertTask(task, "remainingOwed");
+  let quoted: number | undefined;
+  let paid: number | undefined;
+  for (const entry of task.history) {
+    if (entry.event === "ACCEPT") {
+      quoted = entry.quotedAmount;
+    }
+    if (entry.event === "PAYOUT_COMPLETE") {
+      paid = entry.payoutAmount;
+    }
+  }
+  if (quoted === undefined || paid === undefined) return undefined;
+  const quotedMinorUnits = toMinorUnits(quoted);
+  const paidMinorUnits = toMinorUnits(paid);
+  return {
+    quoted: quotedMinorUnits,
+    paid: paidMinorUnits,
+    remaining: quotedMinorUnits - paidMinorUnits,
+  };
+}
+
+/**
  * Reconciliation helper: from a batch of tasks, return the ones whose
  * settled payout differs from the quoted amount — the batch form of
  * {@link payoutMismatch}, mirroring {@link unreconciledPayouts}' pure
@@ -3329,6 +3452,31 @@ export type RolePolicy = Partial<Record<TaskEvent, string[]>>;
  * history-only rebuild. Invalid values throw `invalid option: …` at
  * construction.
  *
+ * `requireExactPayout` is an optional boolean (default `false`): when
+ * `true`, `dispatch("PAYOUT_COMPLETE")` whose `payoutAmount` differs
+ * from the `quotedAmount` on the last `ACCEPT` entry throws
+ * `payout amount mismatch: …` and appends nothing. This is the opt-in
+ * up-front counterpart to the advisory {@link payoutMismatch} helper,
+ * which only reports the difference after the fact — for payout flows
+ * where the settled amount must equal the agreed quote to the cent.
+ * The comparison is in integer minor units ({@link toMinorUnits}), so
+ * a legacy sub-cent pair that rounds to the same cent is not a
+ * mismatch, exactly the rule `payoutMismatch` uses. The gate only
+ * compares when both amounts exist: a task whose last `ACCEPT` entry
+ * carries no `quotedAmount` has nothing to compare against, so the
+ * dispatch passes (the same "no quote, no mismatch" rule
+ * `payoutMismatch` returns `undefined` under), and a missing
+ * `payoutAmount` is the `requirePayoutAmount` gate's job, not this
+ * one's — the two switches stay orthogonal, and enabling only this
+ * one never turns a missing amount into an error. The switch is task
+ * configuration, not audit data, but it IS written into the
+ * `toJSON()` snapshot envelope when enabled, so `fromJSON()` restores
+ * it — an explicit `opts.requireExactPayout` overrides the snapshot's
+ * value, and a legacy snapshot without the field restores gate-off.
+ * `fromHistory(id, history, { requireExactPayout: true })` still
+ * re-enables it on a history-only rebuild. Invalid values throw
+ * `invalid option: …` at construction.
+ *
  * `requireActor` is an optional boolean (default `false`): when `true`,
  * every `dispatch()` without an `actor` throws
  * `actor required: …` and appends nothing. This is the opt-in up-front
@@ -3375,6 +3523,7 @@ export interface TaskLifecycleOptions {
   rolePolicy?: RolePolicy;
   requirePayoutRef?: boolean;
   requirePayoutAmount?: boolean;
+  requireExactPayout?: boolean;
   requireActor?: boolean;
   idempotencyKeys?: string[];
   idempotencyKeyFingerprints?: Record<string, IdempotencyFingerprint>;
@@ -3416,6 +3565,7 @@ const TASK_OPTION_FIELDS = new Set([
   "rolePolicy",
   "requirePayoutRef",
   "requirePayoutAmount",
+  "requireExactPayout",
   "requireActor",
   "idempotencyKeys",
   "idempotencyKeyFingerprints",
@@ -3463,6 +3613,16 @@ function assertRequirePayoutAmount(value: unknown, tag: string): boolean {
   if (typeof value !== "boolean") {
     throw new Error(
       `${tag}: requirePayoutAmount must be a boolean, got ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+function assertRequireExactPayout(value: unknown, tag: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${tag}: requireExactPayout must be a boolean, got ${String(value)}`,
     );
   }
   return value;
@@ -4072,7 +4232,8 @@ export interface SubscribeOptions {
  * on, and a tampered binding is rejected instead of silently
  * re-interpreted.
  *
- * `requirePayoutRef` / `requirePayoutAmount` / `requireActor` are
+ * `requirePayoutRef` / `requirePayoutAmount` / `requireExactPayout` /
+ * `requireActor` are
  * present only when the corresponding gate is enabled. `toJSON()`
  * writes each field ONLY when its gate is on, so a gate-off task's
  * snapshot keeps its exact legacy shape; `fromJSON()` restores them
@@ -4160,6 +4321,15 @@ export interface TaskSnapshot {
    */
   requirePayoutAmount?: boolean;
   /**
+   * Exact-payout gate (see {@link TaskLifecycleOptions.requireExactPayout}),
+   * present only when the gate is enabled. Same write/restore rules
+   * as `requirePayoutRef`: `toJSON()` writes it ONLY when true,
+   * `fromJSON()` restores it unless an explicit
+   * `opts.requireExactPayout` overrides it, and a legacy snapshot
+   * without the field restores with the gate off.
+   */
+  requireExactPayout?: boolean;
+  /**
    * Audit-attribution gate (see {@link TaskLifecycleOptions.requireActor}),
    * present only when the gate is enabled. Same write/restore rules
    * as `requirePayoutRef`: `toJSON()` writes it ONLY when true,
@@ -4196,6 +4366,7 @@ const SNAPSHOT_FIELDS = new Set([
   "idempotencyKeyFingerprints",
   "requirePayoutRef",
   "requirePayoutAmount",
+  "requireExactPayout",
   "requireActor",
 ]);
 
@@ -4246,7 +4417,7 @@ const HISTORY_ENTRY_FIELDS = new Set([
  * only — the snapshot-level fields (`state`, `slaDeadlines`,
  * `maxResubmits`, `maxDisputes`, `maxVisitsByState`, `rolePolicy`,
  * `idempotencyKeys`, `idempotencyKeyFingerprints`,
- * `requirePayoutRef`, `requirePayoutAmount`,
+ * `requirePayoutRef`, `requirePayoutAmount`, `requireExactPayout`,
  * `requireActor`) sit outside the chain, so a rewritten persisted
  * snapshot could push an SLA deadline back, loosen a budget or a
  * policy, drop a payout/actor gate, or clear consumed idempotency
@@ -4623,6 +4794,13 @@ function assertTaskSnapshotShape(snapshot: unknown, tag: string): void {
       );
     }
   }
+  if (snapshot.requireExactPayout !== undefined) {
+    if (typeof snapshot.requireExactPayout !== "boolean") {
+      throw new Error(
+        `${tag}: requireExactPayout must be a boolean, got ${JSON.stringify(snapshot.requireExactPayout)}`,
+      );
+    }
+  }
   if (snapshot.requireActor !== undefined) {
     if (typeof snapshot.requireActor !== "boolean") {
       throw new Error(
@@ -4699,6 +4877,13 @@ export interface TaskSnapshotDiff {
    */
   payoutAmountGateChanged?: { from: boolean; to: boolean };
   /**
+   * Exact-payout gate flipped. Same reporting as
+   * `payoutRefGateChanged`: an absent field and an explicit `false`
+   * are the same state (gate off), so only a true off->on or
+   * on->off flip is a change.
+   */
+  exactPayoutGateChanged?: { from: boolean; to: boolean };
+  /**
    * Audit-attribution gate flipped. Same reporting as
    * `payoutRefGateChanged`: an absent field and an explicit `false`
    * are the same state (gate off), so only a true off->on or
@@ -4728,9 +4913,9 @@ export interface TaskSnapshotDiff {
  * idempotency-key set as a whole (compared order-insensitively; a
  * snapshot without the field is the empty set), the fingerprint
  * record as a whole (compared key-insensitively; a snapshot without
- * the field carries no bindings), the three
+ * the field carries no bindings), the four
  * payout/actor gates `requirePayoutRef` / `requirePayoutAmount` /
- * `requireActor` (only an off->on or on->off flip counts — an absent
+ * `requireExactPayout` / `requireActor` (only an off->on or on->off flip counts — an absent
  * field and an explicit `false` are the same gate-off state), and
  * history appends.
  * `v` and the configuration fields (`maxResubmits`, `maxDisputes`,
@@ -4871,6 +5056,14 @@ export function diffTaskSnapshots(
     diff.payoutAmountGateChanged = {
       from: a.requirePayoutAmount === true,
       to: b.requirePayoutAmount === true,
+    };
+  }
+  if (
+    (a.requireExactPayout === true) !== (b.requireExactPayout === true)
+  ) {
+    diff.exactPayoutGateChanged = {
+      from: a.requireExactPayout === true,
+      to: b.requireExactPayout === true,
     };
   }
   if ((a.requireActor === true) !== (b.requireActor === true)) {
@@ -5649,7 +5842,7 @@ function computeSignedSnapshotMac(
  *    dropped: only `v`/`id`/`state`/`history`/`slaDeadlines`/
  *    `maxResubmits`/`maxDisputes`/`maxVisitsByState`/`rolePolicy`/
  *    `idempotencyKeys`/`idempotencyKeyFingerprints`/
- *    `requirePayoutRef`/`requirePayoutAmount`/
+ *    `requirePayoutRef`/`requirePayoutAmount`/`requireExactPayout`/
  *    `requireActor` are allowed (`unknown field "<name>"`), checked
  *    right after the version gate and before any field is consumed, so a
  *    typo like `deadlline` fails loudly instead of quietly losing the
@@ -5676,7 +5869,8 @@ function computeSignedSnapshotMac(
  *    fingerprint's `event` must be a known event, and unknown
  *    fingerprint fields are rejected. Keys without an entry restore
  *    as legacy bare keys.
- *  - requirePayoutRef / requirePayoutAmount / requireActor, when
+ *  - requirePayoutRef / requirePayoutAmount / requireExactPayout /
+ *    requireActor, when
  *    present, must each be a boolean (absent means that gate is off,
  *    the legacy shape; a history that already lacks the gated evidence
  *    does NOT fail rehydration — the gates only govern future
@@ -5696,6 +5890,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
   idempotencyKeys: Map<string, IdempotencyFingerprint | undefined>;
   requirePayoutRef: boolean | undefined;
   requirePayoutAmount: boolean | undefined;
+  requireExactPayout: boolean | undefined;
   requireActor: boolean | undefined;
 } {
   if (!isRecord(snapshot)) {
@@ -5821,7 +6016,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     idempotencyKeys.set(key, idempotencyKeyFingerprints.get(key));
   }
 
-  // Same for the three payout/actor gates: configuration for future
+  // Same for the four payout/actor gates: configuration for future
   // dispatches, validated strictly but never consulted against the
   // stored history — a snapshot carrying `requirePayoutRef: true`
   // restores gate-on, a snapshot without the field restores gate-off
@@ -5846,6 +6041,15 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     }
     requirePayoutAmount = snapshot.requirePayoutAmount;
   }
+  let requireExactPayout: boolean | undefined;
+  if (snapshot.requireExactPayout !== undefined) {
+    if (typeof snapshot.requireExactPayout !== "boolean") {
+      throw new Error(
+        `invalid snapshot: requireExactPayout must be a boolean, got ${JSON.stringify(snapshot.requireExactPayout)}`,
+      );
+    }
+    requireExactPayout = snapshot.requireExactPayout;
+  }
   let requireActor: boolean | undefined;
   if (snapshot.requireActor !== undefined) {
     if (typeof snapshot.requireActor !== "boolean") {
@@ -5856,7 +6060,7 @@ function parseSnapshot(snapshot: unknown, auditSecret?: AuditSecret): {
     requireActor = snapshot.requireActor;
   }
 
-  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, maxVisitsByState, rolePolicy, idempotencyKeys, requirePayoutRef, requirePayoutAmount, requireActor };
+  return { id: snapshot.id, state, history, slaDeadlines, maxResubmits, maxDisputes, maxVisitsByState, rolePolicy, idempotencyKeys, requirePayoutRef, requirePayoutAmount, requireExactPayout, requireActor };
 }
 
 /** Stateful task with an append-only audit history. */
@@ -5882,6 +6086,14 @@ export class TaskLifecycle {
    * re-enables it via fromHistory(id, history, { requirePayoutAmount }).
    */
   private _requirePayoutAmount: boolean;
+  /**
+   * Up-front enforcement that a PAYOUT_COMPLETE settles exactly the
+   * quoted amount. Task configuration: written into the JSON snapshot
+   * when enabled (see toJSON), so a rehydrated task restores it via
+   * fromJSON; a history-only rebuild re-enables it via
+   * fromHistory(id, history, { requireExactPayout }).
+   */
+  private _requireExactPayout: boolean;
   /**
    * Up-front enforcement for audit attribution. Task configuration:
    * written into the JSON snapshot when enabled (see toJSON), so a
@@ -5942,6 +6154,10 @@ export class TaskLifecycle {
     );
     this._requirePayoutAmount = assertRequirePayoutAmount(
       opts?.requirePayoutAmount,
+      "invalid option",
+    );
+    this._requireExactPayout = assertRequireExactPayout(
+      opts?.requireExactPayout,
       "invalid option",
     );
     this._requireActor = assertRequireActor(
@@ -6378,6 +6594,22 @@ export class TaskLifecycle {
    * matching actor, not just any actor. The default is anonymous
    * dispatches stay legal.
    *
+   * Exact-payout enforcement: when the task was constructed with
+   * `requireExactPayout: true`, a `PAYOUT_COMPLETE` whose
+   * `payoutAmount` differs from the `quotedAmount` on the last
+   * `ACCEPT` entry throws `payout amount mismatch: …` (checked after
+   * the transition/RBAC/budget checks and the presence gates, before
+   * the idempotency key is consumed — a rejected dispatch leaves no
+   * trace and consumes nothing). The comparison is in integer minor
+   * units, so a legacy sub-cent pair that rounds to the same cent is
+   * not a mismatch, the same rule {@link payoutMismatch} reports by.
+   * The gate only compares when both amounts exist: a task with no
+   * quote on its last `ACCEPT` passes (nothing to compare against),
+   * and a missing `payoutAmount` is the `requirePayoutAmount` gate's
+   * job. The default stays advisory: without the switch, an
+   * under- or overpayment still lands in `PAID` and is only visible
+   * to the {@link payoutMismatch} / {@link remainingOwed} readers.
+   *
    * After the audit entry is appended, registered `subscribe()` listeners
    * are notified (event, from, to, entry) in subscription order; a listener
    * that throws is isolated — the dispatch still returns normally and the
@@ -6666,6 +6898,39 @@ export class TaskLifecycle {
         "payout amount required: PAYOUT_COMPLETE must carry a payoutAmount when requirePayoutAmount is enabled",
       );
     }
+    if (
+      event === "PAYOUT_COMPLETE" &&
+      this._requireExactPayout &&
+      opts?.payoutAmount !== undefined
+    ) {
+      // Exact-payout gate (backlog #1425): the settled amount must
+      // equal the quote on the last ACCEPT entry, compared in integer
+      // minor units (the same comparison `payoutMismatch` reports
+      // after the fact — this one blocks the dispatch instead). Only
+      // fires when both amounts exist: a task whose last ACCEPT
+      // carries no quote has nothing to compare against, and a
+      // missing payoutAmount is the requirePayoutAmount gate's job,
+      // so neither case is rejected here. The quote is read from the
+      // audit history, never from the dispatch options, so a caller
+      // cannot smuggle a matching quote in alongside the payment.
+      // Checked before the idempotency key is consumed, so a rejected
+      // dispatch consumes nothing and leaves no trace.
+      let quoted: number | undefined;
+      for (const entry of this._history) {
+        if (entry.event === "ACCEPT") {
+          quoted = entry.quotedAmount;
+        }
+      }
+      if (quoted !== undefined) {
+        const paidMinorUnits = toMinorUnits(opts.payoutAmount);
+        const quotedMinorUnits = toMinorUnits(quoted);
+        if (paidMinorUnits !== quotedMinorUnits) {
+          throw new Error(
+            `payout amount mismatch: PAYOUT_COMPLETE payoutAmount ${opts.payoutAmount} does not match quotedAmount ${quoted} from the last ACCEPT entry when requireExactPayout is enabled`,
+          );
+        }
+      }
+    }
     // All checks passed: consume the idempotency key exactly once, with the
     // successful append, bound to this dispatch (see the dedupe check
     // above). Keys are never recorded for failed dispatches,
@@ -6919,6 +7184,9 @@ export class TaskLifecycle {
     if (this._requirePayoutAmount) {
       snapshot.requirePayoutAmount = true;
     }
+    if (this._requireExactPayout) {
+      snapshot.requireExactPayout = true;
+    }
     if (this._requireActor) {
       snapshot.requireActor = true;
     }
@@ -6985,8 +7253,8 @@ export class TaskLifecycle {
    * a secret is chained in keyed mode on rehydration, so its live
    * history verifies with that secret from then on.
    *
-   * The three payout/actor gates (`requirePayoutRef`,
-   * `requirePayoutAmount`, `requireActor`) are snapshot state with
+   * The payout/actor gates (`requirePayoutRef`,
+   * `requirePayoutAmount`, `requireExactPayout`, `requireActor`) are snapshot state with
    * override semantics, mirroring the sibling
    * escrow-state-machine-ts `fromJSON` merge table (backlog #1256):
    * an explicit (non-undefined) `opts` value wins, otherwise the
@@ -7012,6 +7280,9 @@ export class TaskLifecycle {
       ...(parsed.requirePayoutAmount !== undefined
         ? { requirePayoutAmount: parsed.requirePayoutAmount }
         : {}),
+      ...(parsed.requireExactPayout !== undefined
+        ? { requireExactPayout: parsed.requireExactPayout }
+        : {}),
       ...(parsed.requireActor !== undefined
         ? { requireActor: parsed.requireActor }
         : {}),
@@ -7027,6 +7298,9 @@ export class TaskLifecycle {
               : {}),
             ...(opts.requirePayoutAmount !== undefined
               ? { requirePayoutAmount: opts.requirePayoutAmount }
+              : {}),
+            ...(opts.requireExactPayout !== undefined
+              ? { requireExactPayout: opts.requireExactPayout }
               : {}),
             ...(opts.requireActor !== undefined
               ? { requireActor: opts.requireActor }
@@ -7076,7 +7350,7 @@ export class TaskLifecycle {
    * `slaDeadlines`, `maxResubmits`, `maxDisputes`,
    * `maxVisitsByState`, `rolePolicy`, `idempotencyKeys`,
    * `idempotencyKeyFingerprints`,
-   * `requirePayoutRef`, `requirePayoutAmount`, or `requireActor`, a
+   * `requirePayoutRef`, `requirePayoutAmount`, `requireExactPayout`, or `requireActor`, a
    * tampered history entry, or a wrong secret all fail here, before
    * any snapshot parsing, so a tampered envelope can never partially
    * install. A MAC-valid envelope whose snapshot is itself malformed
