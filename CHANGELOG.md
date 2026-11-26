@@ -11,6 +11,25 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Strict payout webhook verification entry point (2026-11-26,
+  backlog #1427): `verifyPayoutWebhookStrict(body, signature,
+  secret, opts)` is the recommended receiver path — the legacy
+  `verifyPayoutWebhook` with all three opt-in gates switched on by
+  default in one call: `maxAgeMs` 300_000 (5 minutes, exported as
+  `STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS`), `maxFutureSkewMs` 60_000
+  (exported as `STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS`), and
+  `requireEventId: true`. Each default is overridable per field (an
+  explicit `maxAgeMs` of one hour accepts a 10-minute-old payload),
+  an explicit `undefined` for a window field falls back to the strict
+  default, and explicitly passing `maxAgeMs: undefined` together with
+  `requireEventId: false` throws a caller configuration error, so
+  strict cannot be quietly downgraded back to signature-only
+  verification. The legacy `verifyPayoutWebhook()` defaults are
+  untouched, the signature is still checked first, secret rotation
+  via `{ secrets }` still composes, and the module header and README
+  now point new receivers at the strict entry. The test count rises
+  by sixteen (2191 to 2207 tests).
+
 - CLI demo actor attribution enforcement segment (2026-11-22, backlog #1315):
   `src/demo.ts` shows the `requireActor` gate the way the payout
   gates are already shown: a default task publishes without an

@@ -70,8 +70,11 @@ export {
   retryPayoutWebhookOutbox,
   truncateOutboxError,
   verifyPayoutWebhook,
+  verifyPayoutWebhookStrict,
   MAX_EVENT_ID_LENGTH,
   MAX_OUTBOX_ERROR_LENGTH,
+  STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS,
+  STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS,
 } from "./settlementWebhook.js";
 export type {
   BuildPayoutWebhookOptions,

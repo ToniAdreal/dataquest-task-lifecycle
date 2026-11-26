@@ -36,7 +36,13 @@
  *   an opt-in `maxAgeMs` freshness window additionally bounds replays of
  *   legitimately-signed old payloads, and an opt-in `maxFutureSkewMs`
  *   bounds how far in the future a payload `at` may lie, but receivers
- *   must still deduplicate on `eventId`. During a secret rotation window the
+ *   must still deduplicate on `eventId`. Receivers that want safe
+ *   defaults instead of assembling the three opt-in gates themselves
+ *   should use {@link verifyPayoutWebhookStrict}: it enforces a
+ *   5-minute `maxAgeMs`, a 60-second `maxFutureSkewMs`, and
+ *   `requireEventId: true` unless the caller explicitly overrides a
+ *   field, and it refuses an explicit downgrade back to
+ *   signature-only verification. During a secret rotation window the
  *   receiver can pass `secrets: [newSecret, oldSecret]` instead of a
  *   single secret (the two shapes are mutually exclusive) so in-flight
  *   notifications signed with either secret verify; signing always uses
@@ -804,6 +810,14 @@ export interface VerifyPayoutWebhookOptions {
  * Verify a payout webhook signature. Returns `true` only when the
  * signature matches the HMAC-SHA256 of the given body under the secret.
  *
+ * This entry point is signature-only by default: the freshness and
+ * `eventId` gates below are opt-in, so a legitimately-signed old or
+ * keyless payload verifies. New receivers should prefer
+ * {@link verifyPayoutWebhookStrict}, which switches all three gates on
+ * with safe defaults (5-minute age window, 60-second future-skew
+ * window, `eventId` required) unless the caller explicitly overrides
+ * a field.
+ *
  * Prefer passing the raw body `string`; a parsed object is re-stringified
  * (fine in-process, but raw bytes are the safe transport path).
  * Malformed signatures return `false` rather than throwing, so a hostile
@@ -1012,6 +1026,92 @@ export function verifyPayoutWebhook(
   // never here, and unauthenticated bodies are never timestamp-parsed.
   if (maxAgeMs === undefined && maxFutureSkewMs === undefined) return true;
   return payloadFreshEnough(body, maxAgeMs, maxFutureSkewMs, nowMs);
+}
+
+/**
+ * Default `maxAgeMs` (5 minutes) for {@link verifyPayoutWebhookStrict}.
+ * A legitimately-signed payload older than this is rejected unless the
+ * caller explicitly overrides the window.
+ */
+export const STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS = 300_000;
+
+/**
+ * Default `maxFutureSkewMs` (60 seconds) for
+ * {@link verifyPayoutWebhookStrict}. A legitimately-signed payload whose
+ * `at` lies further in the future than this is rejected unless the
+ * caller explicitly overrides the window.
+ */
+export const STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS = 60_000;
+
+/**
+ * Strict payout webhook verification (backlog #1427): the recommended
+ * receiver path. It is {@link verifyPayoutWebhook} with all three
+ * opt-in gates switched on by default, in one call:
+ *
+ * - `maxAgeMs` defaults to {@link STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS}
+ *   (5 minutes): a legitimately-signed payload older than that returns
+ *   `false`, so a captured webhook cannot be replayed indefinitely.
+ * - `maxFutureSkewMs` defaults to
+ *   {@link STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS} (60 seconds): a
+ *   legitimately-signed payload issued further in the future returns
+ *   `false`, so a fast sender clock cannot open a near-unbounded
+ *   replay window.
+ * - `requireEventId` defaults to `true`: a signed payload without a
+ *   usable `eventId` returns `false`, so the receiver always has a key
+ *   to deduplicate on (`PayoutEventDedupe`).
+ *
+ * Every default is overridable per field: pass an explicit `maxAgeMs`
+ * (e.g. one hour accepts a 10-minute-old payload), `maxFutureSkewMs`,
+ * or `requireEventId: false` and that value is used instead. An
+ * explicit `undefined` for a window field means "use the strict
+ * default", exactly like omitting it — except for one combination,
+ * which is a caller configuration error that throws: explicitly
+ * passing `maxAgeMs: undefined` together with `requireEventId: false`
+ * would strip two of the three gates at once, so strict refuses to be
+ * quietly downgraded back toward signature-only verification
+ * (`cannot verify payout webhook (strict): maxAgeMs must not be
+ * explicitly disabled while requireEventId is false …`). The same
+ * applies when both windows are explicitly disabled that way.
+ *
+ * Nothing else changes: the signature is still checked first (a
+ * forgery never reaches the gates), unknown option keys and illegal
+ * values still throw the same `verifyPayoutWebhook` configuration
+ * errors, secret rotation via `{ secrets }` still composes, and the
+ * legacy `verifyPayoutWebhook()` defaults are untouched — receivers
+ * that already rely on signature-only verification keep verifying
+ * exactly as before. Strict is defense-in-depth only: receivers MUST
+ * still deduplicate on `eventId` after a successful verify.
+ */
+export function verifyPayoutWebhookStrict(
+  body: string | PayoutWebhookPayload,
+  signature: string,
+  secret: string | Buffer | undefined,
+  opts: VerifyPayoutWebhookOptions = {},
+): boolean {
+  // A null/non-object options value is a caller bug: fail closed with
+  // the same configuration error `verifyPayoutWebhook` raises, never a
+  // bare `TypeError` from the `"maxAgeMs" in opts` check below.
+  assertOptionsObject(opts, "cannot verify payout webhook (strict)");
+  // Downgrade guard: explicitly disabling the age window while also
+  // switching the eventId gate off strips two of the three strict
+  // gates at once. Refuse it as a configuration error rather than
+  // silently verifying a payload strict was asked to bound.
+  if (
+    "maxAgeMs" in opts &&
+    opts.maxAgeMs === undefined &&
+    opts.requireEventId === false
+  ) {
+    throw new Error(
+      "cannot verify payout webhook (strict): maxAgeMs must not be explicitly disabled while requireEventId is false; strict verification cannot be downgraded to signature-only",
+    );
+  }
+  return verifyPayoutWebhook(body, signature, secret, {
+    ...opts,
+    maxAgeMs: opts.maxAgeMs ?? STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS,
+    maxFutureSkewMs:
+      opts.maxFutureSkewMs ?? STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS,
+    requireEventId: opts.requireEventId ?? true,
+  });
 }
 
 /**

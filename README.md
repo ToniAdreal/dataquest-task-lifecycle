@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2191 tests, all local
+npm test   # 2207 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1779,6 +1779,33 @@ reaches this gate; an unparseable string body fails the gate as
 `false`, never throws. Default off, so legacy keyless payloads keep
 verifying on their signature alone.
 
+New receivers should prefer the strict entry point instead of
+assembling the three opt-in gates by hand:
+
+```ts
+verifyPayoutWebhookStrict(rawBody, signature, secret);
+// => maxAgeMs 5 * 60_000, maxFutureSkewMs 60_000, requireEventId: true
+```
+
+It is `verifyPayoutWebhook` with all three gates switched on by
+default: a legitimately-signed payload older than 5 minutes or more
+than 60 seconds in the future returns `false`, as does a signed
+payload without a usable `eventId`. Each default is overridable per
+field — pass an explicit `maxAgeMs` (one hour accepts a 10-minute-old
+payload), `maxFutureSkewMs`, or `requireEventId: false` — and an
+explicit `undefined` for a window field means "use the strict
+default". One combination throws a configuration error instead of
+verifying: explicitly passing `maxAgeMs: undefined` together with
+`requireEventId: false`, which would strip two of the three gates at
+once, so strict cannot be quietly downgraded back to signature-only
+verification. The defaults themselves are exported as
+`STRICT_PAYOUT_WEBHOOK_MAX_AGE_MS` and
+`STRICT_PAYOUT_WEBHOOK_MAX_FUTURE_SKEW_MS`. The legacy
+`verifyPayoutWebhook()` defaults are unchanged — receivers that
+already rely on signature-only verification keep verifying exactly as
+before. Strict is defense-in-depth only: receivers MUST still
+deduplicate on `eventId` after a successful verify.
+
 Verification is signature-only by default — and a signature has no
 expiry, so a captured webhook could otherwise be replayed forever. Pass
 the opt-in fourth argument to bound replays with a freshness window:
@@ -2903,7 +2930,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2191 tests covering the happy path, reject→resubmit
+`npm test` runs 2207 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
