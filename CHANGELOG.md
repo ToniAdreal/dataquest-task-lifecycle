@@ -11,6 +11,20 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Clock-skew coverage for `PayoutEventDedupe` (2026-11-28,
+  backlog #1453): `test/payoutEventDedupeClockSkew.test.ts`
+  (6 cases) pins the existing behaviour under a backwards clock
+  jump, verified against the sibling rfc9421 `ReplayCache` — a
+  seen `eventId` stays a duplicate while the clock is behind
+  (negative age is still `< ttl`, fail-closed), repeated
+  duplicates keep the original first-seen timestamp so the
+  deadline never moves, a new id recorded under the skewed clock
+  gets its own deadline, and an old id still expires once the
+  wall clock passes `prev + ttl` (skew delays expiry, never
+  retains an id permanently); `size`/`exportSnapshot` and LRU
+  pruning agree. No `src/` change: the tests revealed no bug.
+  The test count rises by six (2229 to 2235 tests).
+
 - Stuck-task selector and unexpirable classification (2026-11-28,
   backlog #1440, mirrors escrow #1434): `stuckTasks(tasks, now)`
   lists exactly the overdue tasks that can never expire — non-terminal,
