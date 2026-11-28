@@ -26,6 +26,26 @@ change type; no entry describes a feature that is not in the history.
   exactly as before. The test count rises by fourteen (2215 to 2229
   tests).
 
+- `stuckTasks` benchmark row (2026-11-28, backlog #1448, mirrors
+  escrow #1442): `npm run bench` now measures the overdue-but-
+  unexpirable selector on its own row — one timed pass is a single
+  pure `stuckTasks()` call over a fixed 40-task batch (15
+  expirable-overdue OPEN, 10 expirable-overdue IN_REVIEW, 4 stuck
+  DRAFT, 3 stuck REJECTED, 3 stuck DISPUTED, 5 not yet overdue),
+  self-checked per iteration for exactly the 10 hand-counted stuck
+  ids in batch order, with the stuck + expirable-overdue partition
+  of the 35 expired ids and the selector's purity pinned once
+  outside the timed loop. The README Benchmarks table gains the row
+  and the hot-path count rises from 119 to 120. Measured at
+  ~55,715 ops/sec (17.95 µs/op) on Node v24.22.1, linux/x64.
+  Also repairs the bench, which could not run at all since backlog
+  #1440: `checkExpireResults` and the expire-subscribe
+  failure-isolation fixture still demanded an invalid-transition
+  error for the stuck WD-06 outcome, but #1440 classifies it
+  `{ expired: false, unexpirable: true }` with no error — the checks
+  now pin the classification instead (verified failing on pristine
+  HEAD before the repair).
+
 - Late-state expiry edges (2026-11-26, backlog #1428): the
   transition table gains `EXPIRE: "EXPIRED"` edges on IN_REVIEW,
   APPROVED and PAYOUT_PENDING, so an overdue task in any of those

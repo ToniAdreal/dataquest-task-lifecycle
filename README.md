@@ -3138,7 +3138,7 @@ No network, no randomness in assertions.
 
 ## Benchmarks
 
-`npm run bench` measures locally-observed throughput for the one hundred nineteen hot
+`npm run bench` measures locally-observed throughput for the one hundred twenty hot
 paths (3000 timed iterations per op after 200 warmup, printing the Node
 version and CPU): hash-chained `dispatch`, dispatch
 idempotency dedupe (`dispatch` with a pinned
@@ -3329,7 +3329,9 @@ tamper-evident persistence, the canonical-JSON + HMAC overhead
 over the unsigned snapshot rows), batch
 payout webhook building (`buildPayoutWebhooks` over
 a batch of PAID tasks), watchdog screening (`expiredTasks` /
-`staleTasks` over a batch of mixed-state tasks), state-filter listing (`tasksByState` over the same 12-task batch — the OPEN slice), actor-filter listing (`tasksByActor` over a fixed 6-task mixed-actor batch — the moderator slice), event-filter listing (`tasksByEvent` over a fixed 6-task mixed-history batch — the RESUBMIT slice, the twice-resubmitted task matched once), combined-filter listing (`tasksByFilters` over a fixed 6-task mixed batch — the reviewer + IN_REVIEW + REJECT slice, the dispute-round task matched once), external-ledger reconciliation (`reconcilePayouts` over a fixed 5-task batch against a 4-row ledger — matched, task-only, ledger-only, amount-mismatch, and unreconciled groups, self-checked per iteration for the five group counts and the matched amount 350), snapshot comparison (`diffTaskSnapshots` over a fixed 25-entry before snapshot against a 28-entry after snapshot — state, settled payout, appended history, and SLA-map changes, self-checked per iteration for the four changed keys and the appended seq range 26..28), payout aging (`payoutAging` over a fixed 10-task batch — seven unreconciled PAID tasks across all four buckets including the 7-day and 30-day endpoints, one unknown stand-in, one reconciled task, and one PAYOUT_PENDING task, self-checked per iteration for the four bucket counts and the pinned age days), payout-reference reverse lookup (`tasksByPayoutRef` over a fixed 6-task batch — two PAID tasks settled under one ref, one under a different ref, one request-only task, one no-ref task, and one fresh task, self-checked per iteration for the two-hit slice in input order holding the same task objects), minor-unit display formatting (`formatMinorUnits` over the fixed 12-vector demo corpus — positive, zero, negative, -0, large, and MAX_SAFE_INTEGER, plus the finance-pass total — self-checked against the demo's pinned strings), minor-unit string parsing (`parseMinorUnits` over a fixed 10-vector corpus — positive, zero, negative, whitespace-trimmed, `-0.00` without a minus sign, and MAX_SAFE_INTEGER-adjacent — self-checked per iteration against the hand-pinned minor units, with illegal shapes pinned to their exact fail-fast errors), minor-unit conversion (`toMinorUnits`/`fromMinorUnits` over a fixed 4-vector corpus — the finance-pass total, zero, a negative amount, and the 0.33 round-trip — plus the 0.333 nearest-cent rounding vector, self-checked in both directions, with a fractional minor input pinned to its exact fail-fast error), SLA
+`staleTasks` over a batch of mixed-state tasks, plus `stuckTasks`
+over a fixed 40-task batch — 25 expirable-overdue, 10 stuck across
+DRAFT / REJECTED / DISPUTED, 5 not yet overdue), state-filter listing (`tasksByState` over the same 12-task batch — the OPEN slice), actor-filter listing (`tasksByActor` over a fixed 6-task mixed-actor batch — the moderator slice), event-filter listing (`tasksByEvent` over a fixed 6-task mixed-history batch — the RESUBMIT slice, the twice-resubmitted task matched once), combined-filter listing (`tasksByFilters` over a fixed 6-task mixed batch — the reviewer + IN_REVIEW + REJECT slice, the dispute-round task matched once), external-ledger reconciliation (`reconcilePayouts` over a fixed 5-task batch against a 4-row ledger — matched, task-only, ledger-only, amount-mismatch, and unreconciled groups, self-checked per iteration for the five group counts and the matched amount 350), snapshot comparison (`diffTaskSnapshots` over a fixed 25-entry before snapshot against a 28-entry after snapshot — state, settled payout, appended history, and SLA-map changes, self-checked per iteration for the four changed keys and the appended seq range 26..28), payout aging (`payoutAging` over a fixed 10-task batch — seven unreconciled PAID tasks across all four buckets including the 7-day and 30-day endpoints, one unknown stand-in, one reconciled task, and one PAYOUT_PENDING task, self-checked per iteration for the four bucket counts and the pinned age days), payout-reference reverse lookup (`tasksByPayoutRef` over a fixed 6-task batch — two PAID tasks settled under one ref, one under a different ref, one request-only task, one no-ref task, and one fresh task, self-checked per iteration for the two-hit slice in input order holding the same task objects), minor-unit display formatting (`formatMinorUnits` over the fixed 12-vector demo corpus — positive, zero, negative, -0, large, and MAX_SAFE_INTEGER, plus the finance-pass total — self-checked against the demo's pinned strings), minor-unit string parsing (`parseMinorUnits` over a fixed 10-vector corpus — positive, zero, negative, whitespace-trimmed, `-0.00` without a minus sign, and MAX_SAFE_INTEGER-adjacent — self-checked per iteration against the hand-pinned minor units, with illegal shapes pinned to their exact fail-fast errors), minor-unit conversion (`toMinorUnits`/`fromMinorUnits` over a fixed 4-vector corpus — the finance-pass total, zero, a negative amount, and the 0.33 round-trip — plus the 0.333 nearest-cent rounding vector, self-checked in both directions, with a fractional minor input pinned to its exact fail-fast error), SLA
 approaching-deadline screening (`tasksApproachingDeadline` over a
 fixed 6-task batch — in-window, upper-bound, lower-bound, overdue,
 no-deadline, and terminal cases under the half-open window `(now,
@@ -4412,6 +4414,7 @@ See the throughput row below. One real run on 2026-11-16:
 | PayoutWebhookOutbox restoreSignedSnapshot (1,000-pair snapshot, JSON round-trip) | ~222.8 ops/sec (4487.44 µs/op) |
 | buildPayoutWebhooks (batch of 12 PAID tasks) | ~6,406 ops/sec (156.11 µs/op) |
 | expiredTasks (12 mixed-state tasks) | ~282,312 ops/sec (3.54 µs/op) |
+| stuckTasks (40 mixed tasks, 10 stuck) | ~55,715 ops/sec (17.95 µs/op) |
 | staleTasks (12 mixed-state tasks) | ~93,988 ops/sec (10.64 µs/op) |
 | expireOverdueTasks (12 mixed-state tasks, fresh fixture) | ~2,010 ops/sec (497.57 µs/op) |
 | actOnStaleTasks (12 mixed-state tasks, fresh fixture) | ~1,145 ops/sec (873.62 µs/op) |
@@ -4459,7 +4462,8 @@ swing widely between runs on this host, so treat each figure as an
 order of magnitude, not a precise rate). The PayoutWebhookOutbox stats row above was measured on a
 2026-11-18 run; the retryPayoutWebhookOutbox and budget remaining
 rows were measured on 2026-11-17 runs; the isSettlementComplete row
-was measured on a 2026-11-20 run; the rest of the table is the
+was measured on a 2026-11-20 run; the stuckTasks row was measured on
+a 2026-11-28 run; the rest of the table is the
 2026-11-16 run. Machine-local
 measurements for capacity planning, not guaranteed throughput —
 run `npm run bench` on your own hardware.
