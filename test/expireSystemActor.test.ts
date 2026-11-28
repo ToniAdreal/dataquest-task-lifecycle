@@ -66,22 +66,23 @@ describe("expireOverdueTasks system-actor attribution (#550)", () => {
     assert.equal(verifyHistoryChain(t.history), true);
   });
 
-  it("a failed dispatch leaves the task untouched: no system signature anywhere", () => {
+  it("an unexpirable task leaves the task untouched: no system signature anywhere", () => {
     const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
     const before = JSON.stringify(stuck.history);
 
     const [result] = expireOverdueTasks([stuck], NOW);
     assert.equal(result.expired, false);
-    assert.ok(result.error, "expected an error message");
+    assert.equal(result.unexpirable, true);
+    assert.equal("error" in result, false);
 
-    // failed tasks are untouched: no new entry, no residue
+    // classified tasks are untouched: no new entry, no residue
     assert.equal(stuck.state, "REJECTED");
     assert.equal(JSON.stringify(stuck.history), before);
-    assert.ok(!("entry" in result), "failure must not carry an entry field");
+    assert.ok(!("entry" in result), "unexpirable outcome must not carry an entry field");
     assert.ok(
       !stuck.history.some((entry) => entry.actor === "system"),
-      "no system-attributed entry may leak into a failed task",
+      "no system-attributed entry may leak into an unexpirable task",
     );
   });
 

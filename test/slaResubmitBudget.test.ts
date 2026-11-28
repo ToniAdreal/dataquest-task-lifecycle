@@ -149,7 +149,7 @@ describe("SLA overdue x RESUBMIT budget", () => {
     );
   });
 
-  it("watchdog batch: one expires, the unexpirable one reports a transition error, never a budget error", () => {
+  it("watchdog batch: one expires, the unexpirable one is classified unexpirable, never a budget error", () => {
     const capturing = exhaustedInCapturing("sla-resubmit-5a");
     capturing.setSlaDeadline(PAST);
     const rejected = exhaustedInRejected("sla-resubmit-5b");
@@ -163,11 +163,13 @@ describe("SLA overdue x RESUBMIT budget", () => {
     assert.equal(results[0].entry?.event, "EXPIRE");
     assert.equal(results[0].entry?.to, "EXPIRED");
 
-    // REJECTED has no EXPIRE edge: the watchdog must report that
-    // transition failure per task and keep going — and the failure must
-    // be about the missing edge, not the exhausted budget.
+    // REJECTED has no EXPIRE edge: the watchdog must classify that
+    // task as unexpirable (no error) and keep going — and the
+    // classification must be about the missing edge, not the
+    // exhausted budget.
     assert.equal(results[1].expired, false);
-    assert.equal(results[1].error, "invalid transition: EXPIRE from REJECTED");
+    assert.equal(results[1].unexpirable, true);
+    assert.equal("error" in results[1], false);
     assert.equal(results[1].entry, undefined);
     assert.equal(results[1].task.state, "REJECTED");
   });

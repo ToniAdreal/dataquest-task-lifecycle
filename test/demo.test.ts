@@ -5521,11 +5521,12 @@ test("demo SLA watchdog execution entry citations: result.entry lines match the 
   // expired), so the invariant is also pinned on an independent
   // stuck batch the demo batch cannot show: an overdue REJECTED
   // task has no EXPIRE edge (backlog #1428 gave IN_REVIEW one),
-  // so its outcome must omit `entry`. Every dispatch carries a
-  // fixed `at` before the 2026-03-06 screening now: a bare
-  // dispatch would stamp the wall clock, and the EXPIRE audit
-  // timestamp (the screening now) would trip the backward-clock
-  // check before ever reaching the transition check.
+  // so its outcome must omit `entry` and classify it as
+  // `unexpirable: true` with no error (backlog #1440). Every
+  // dispatch carries a fixed `at` before the 2026-03-06 screening
+  // now: a bare dispatch would stamp the wall clock, and the EXPIRE
+  // audit timestamp (the screening now) would trip the
+  // backward-clock check before ever reaching the transition check.
   assert.ok(
     expireExecutionResults.every((r) => r.expired || !("entry" in r)),
   );
@@ -5542,7 +5543,11 @@ test("demo SLA watchdog execution entry citations: result.entry lines match the 
     new Date("2026-03-06T09:00:00.000Z"),
   );
   assert.equal(stuckResult.expired, false);
-  assert.match(stuckResult.error ?? "", /invalid transition: EXPIRE from REJECTED/);
+  assert.equal(stuckResult.unexpirable, true);
+  assert.ok(
+    !("error" in stuckResult),
+    "unexpirable outcome must not carry an error field",
+  );
   assert.ok(
     !("entry" in stuckResult),
     "failed outcome must not carry an entry field",

@@ -216,9 +216,10 @@ test("mixed batch: an unexpirable task does not block a requireActor sibling", (
   const results = expireOverdueTasks([stuck, gated], NOW);
   assert.equal(results.length, 2);
 
-  // the stuck task fails on the missing EXPIRE edge, not on the actor gate
+  // the stuck task is classified unexpirable on the missing EXPIRE edge, not on the actor gate
   assert.equal(results[0].expired, false);
-  assert.match(results[0].error ?? "", /invalid transition: EXPIRE from REJECTED/);
+  assert.equal(results[0].unexpirable, true);
+  assert.equal("error" in results[0], false);
   assert.equal(stuck.state, "REJECTED");
 
   // the requireActor sibling still expires in the same batch

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2215 tests, all local
+npm test   # 2229 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -743,9 +743,11 @@ For rehearsing a batch before expiring it for real, pass
 screens the same set in the same order but dispatches nothing — no
 state change, no history append, no subscription notification — and
 each result carries `wouldExpire` (true exactly when the live run
-would have expired that task) and, when false, the same-wording
-`error` the live run would have reported (no `EXPIRE` edge, a
-backdated `at` pin, or a `rolePolicy` that does not admit `system`);
+would have expired that task) and, when false, either the same-wording
+`error` the live run would have reported (a backdated `at` pin, or a
+`rolePolicy` that does not admit `system`) or `unexpirable: true`
+when the task's state has no `EXPIRE` edge — the live run classifies
+those the same way, with no error;
 `expired` is false throughout and `entry` is never present. The
 clock check reads the resolved audit timestamp — the `at` pin when
 given, else the screening `now` — so the prediction and the live
@@ -762,19 +764,27 @@ human one in the append-only history.
 Why the executor exists instead of a hand-written loop: `expiredTasks()`
 only checks the deadline and the terminal flag, but `EXPIRE` is **not** a
 legal event from every non-terminal state — the transition table has
-`EXPIRE` edges on every non-terminal state except REJECTED and DISPUTED
-(backlog #1428 added them on IN_REVIEW, APPROVED and PAYOUT_PENDING,
-which used to be unexpirable). An overdue REJECTED task (or a deadline
-set on DISPUTED, the other state without the edge) makes
-`task.dispatch("EXPIRE")` throw
+`EXPIRE` edges on every non-terminal state except DRAFT, REJECTED and
+DISPUTED (backlog #1428 added them on IN_REVIEW, APPROVED and
+PAYOUT_PENDING, which used to be unexpirable). An overdue REJECTED task
+(or a deadline set on DISPUTED, or an overdue DRAFT — the other states
+without the edge) makes `task.dispatch("EXPIRE")` throw
 `invalid transition: EXPIRE from REJECTED`, aborting a naive
 `for (const task of expiredTasks(tasks)) task.dispatch("EXPIRE")` loop on
-the first such task. `expireOverdueTasks` catches that error per task —
-`{ task, expired: false, error: <message> }` — and keeps going, so one
-unexpirable task never blocks the rest of the batch. Only overdue
-(non-terminal, past deadline) tasks are attempted; nothing auto-migrates,
-every expiry is an explicit dispatch that lands in the append-only
-history.
+the first such task. `expireOverdueTasks` instead classifies those tasks
+as `{ task, expired: false, unexpirable: true }` — no error, no dispatch
+attempted, the task untouched — and keeps going, so one unexpirable
+task never blocks the rest of the batch. The two outcomes are distinct
+on purpose: `error` means the expiry was attempted and failed (a
+backdated `at` pin, or a `rolePolicy` that does not admit `system`);
+`unexpirable` means the task can never expire from its current state
+and belongs with a human, not in a retry queue. The batch selector for
+exactly those tasks is `stuckTasks(tasks, now)` — overdue, non-terminal,
+no `EXPIRE` edge, read off the transition table — so `stuckTasks` plus
+the expirable overdue set partitions `expiredTasks` with no overlap and
+no gap. Only overdue (non-terminal, past deadline) tasks are attempted;
+nothing auto-migrates, every expiry is an explicit dispatch that lands
+in the append-only history.
 
 A related but distinct screening is `staleTasks(tasks, maxAgeByState, now)`
 — it finds tasks stuck in their *current* non-terminal state longer than a
@@ -3071,8 +3081,10 @@ forgery detection, snapshot secrecy — the secret never enters
 continued dispatch, legacy snapshot keyed re-chaining, and keyed NDJSON
 round-trips), and the overdue-expiry
 watchdog executor (`expireOverdueTasks`: mixed-batch per-task outcomes,
-unexpirable tasks never blocking the batch, failed tasks untouched,
-auditable dispatch appends with an unbroken hash chain), and
+unexpirable tasks classified `unexpirable: true` with no error instead
+of failing, the `stuckTasks` selector partitioning the overdue set,
+failed tasks untouched, auditable dispatch appends with an unbroken
+hash chain), and
 documentation-shape coverage (the README claims about history-entry
 fields and the snapshot shape are verified against `TaskHistoryEntry`
 and `TaskSnapshot` in `src/taskLifecycle.ts`; no behavior changed in

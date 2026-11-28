@@ -157,14 +157,12 @@ describe("expireOverdueTasks late states (#1428)", () => {
       results.map((r) => r.expired),
       [true, true, true, true, false, false],
     );
-    assert.match(
-      results[4].error ?? "",
-      /invalid transition: EXPIRE from REJECTED/,
-    );
-    assert.match(
-      results[5].error ?? "",
-      /invalid transition: EXPIRE from DISPUTED/,
-    );
+    // REJECTED / DISPUTED have no EXPIRE edge: classified
+    // unexpirable, not failed (backlog #1440).
+    assert.equal(results[4].unexpirable, true);
+    assert.equal("error" in results[4], false);
+    assert.equal(results[5].unexpirable, true);
+    assert.equal("error" in results[5], false);
     assert.equal(results[4].task.state, "REJECTED");
     assert.equal(results[5].task.state, "DISPUTED");
   });

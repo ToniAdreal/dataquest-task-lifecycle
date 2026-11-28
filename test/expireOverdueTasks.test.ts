@@ -89,8 +89,10 @@ describe("expireOverdueTasks", () => {
 
     const blocked = byId(results, "stuck");
     assert.equal(blocked.expired, false);
-    assert.match(blocked.error ?? "", /invalid transition: EXPIRE from REJECTED/);
-    // the failed task is untouched: still REJECTED, no new history
+    // REJECTED has no EXPIRE edge: classified unexpirable, not failed
+    assert.equal(blocked.unexpirable, true);
+    assert.equal("error" in blocked, false);
+    // the classified task is untouched: still REJECTED, no new history
     assert.equal(blocked.task.state, "REJECTED");
   });
 
@@ -124,7 +126,7 @@ describe("expireOverdueTasks", () => {
     assert.equal(results[0].expired, true);
   });
 
-  it("leaves failed tasks untouched: state and history unchanged", () => {
+  it("leaves classified tasks untouched: state and history unchanged", () => {
     const stuck = rejectedTask("stuck");
     stuck.setSlaDeadline(PAST);
     const before = JSON.stringify(stuck.history);
@@ -132,6 +134,8 @@ describe("expireOverdueTasks", () => {
     const results = expireOverdueTasks([stuck], NOW);
     assert.equal(results.length, 1);
     assert.equal(results[0].expired, false);
+    assert.equal(results[0].unexpirable, true);
+    assert.equal("error" in results[0], false);
     assert.equal(stuck.state, "REJECTED");
     assert.equal(JSON.stringify(stuck.history), before);
   });

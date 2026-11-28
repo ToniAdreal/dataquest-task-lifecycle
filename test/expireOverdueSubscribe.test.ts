@@ -161,7 +161,8 @@ test("expireOverdueSubscribe: failure-isolated task notifies nobody and the batc
 
   const blocked = byId(results, "t-stuck");
   assert.equal(blocked.expired, false);
-  assert.match(blocked.error ?? "", /invalid transition: EXPIRE from REJECTED/);
+  assert.equal(blocked.unexpirable, true);
+  assert.equal("error" in blocked, false);
   assert.equal(blocked.entry, undefined);
   assert.equal(s.calls.length, 0);
   assert.equal(stuck.state, "REJECTED");

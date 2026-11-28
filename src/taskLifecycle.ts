@@ -357,11 +357,13 @@ export function isOverdue(task: TaskLifecycle, now: Date = new Date()): boolean 
  * never reach {@link isOverdue}).
  *
  * NOTE: this returns every overdue task. Since backlog #1428 every
- * non-terminal state except REJECTED and DISPUTED carries an `EXPIRE`
- * edge, so every task this returns is one {@link expireOverdueTasks}
- * can actually expire — the only overdue tasks the executor still
- * reports as failures are overdue REJECTED / DISPUTED ones (see
- * {@link expireOverdueTasks}).
+ * non-terminal state except DRAFT, REJECTED and DISPUTED carries an
+ * `EXPIRE` edge, so every task this returns is one
+ * {@link expireOverdueTasks} can actually expire — except the overdue
+ * DRAFT / REJECTED / DISPUTED ones, which the executor classifies
+ * as `{ expired: false, unexpirable: true }` instead of failing
+ * them (backlog #1440; see {@link stuckTasks} for the selector
+ * that lists exactly those tasks).
  */
 export function expiredTasks(
   tasks: readonly TaskLifecycle[],
@@ -372,6 +374,55 @@ export function expiredTasks(
     throw new Error("invalid now: expected a valid Date");
   }
   return tasks.filter((task) => isOverdue(task, now));
+}
+
+/**
+ * Watchdog helper: from a batch of tasks, return the ones that are
+ * overdue but can never expire — non-terminal AND past their SLA
+ * deadline AND with no `EXPIRE` edge from their current state.
+ *
+ * Today that is exactly the `DRAFT`, `REJECTED` and `DISPUTED`
+ * tasks: the transition table deliberately carries no `EXPIRE` edge
+ * from any of them (a draft that missed its deadline must be
+ * published or reworked, not expired out from under its author; a
+ * rejected task goes back through dispute or resubmission; a
+ * disputed task waits on arbitration, which expiry must not walk
+ * out of unilaterally). The set is read off the transition table
+ * (`allowedEvents`), not hard-coded to those three states, so it
+ * stays correct if the table ever gains or loses an edge.
+ *
+ * This is the companion to {@link expiredTasks}: the two selectors
+ * partition the overdue batch — every overdue task is either in
+ * `stuckTasks` (unexpirable, needs a human decision) or expirable
+ * by {@link expireOverdueTasks}, never both, never neither. An
+ * operator that only watches `expiredTasks` re-reads the same
+ * stuck tasks every round; screening `stuckTasks` tells them
+ * which ones to route to a human instead of re-trying expiry.
+ *
+ * Pure: reads the tasks, never mutates or dispatches, returns the
+ * same task objects in input order. The `now` default is the real
+ * clock, so unit tests pin it to a fixed date. The batch is
+ * validated before anything is read: a non-array batch or a
+ * non-`TaskLifecycle` entry throws a named
+ * `invalid stuckTasks: …` error instead of a bare `TypeError`.
+ * An invalid `now` throws `invalid now: expected a valid Date`
+ * fail-fast — even for an empty batch, so a broken clock can never
+ * silently screen an empty list as "nothing stuck" (backlog #1334;
+ * the guard is checked here, before the filter, because an empty
+ * batch would otherwise never reach {@link isOverdue}).
+ */
+export function stuckTasks(
+  tasks: readonly TaskLifecycle[],
+  now: Date = new Date(),
+): TaskLifecycle[] {
+  assertTaskInstanceBatch("stuckTasks", tasks);
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new Error("invalid now: expected a valid Date");
+  }
+  return tasks.filter(
+    (task) =>
+      isOverdue(task, now) && !allowedEvents(task.state).includes("EXPIRE"),
+  );
 }
 
 /**
@@ -1005,8 +1056,27 @@ export interface ExpireOverdueResult {
   task: TaskLifecycle;
   /** True when the EXPIRE dispatch succeeded and the task is now EXPIRED. */
   expired: boolean;
-  /** Set when the EXPIRE dispatch threw; the message of the caught error. */
+  /**
+   * Set when the EXPIRE dispatch threw; the message of the caught error.
+   * Unexpirable tasks carry no error — their outcome is classified
+   * via `unexpirable`, not failed.
+   */
   error?: string;
+  /**
+   * True when the task is overdue but its current state has no
+   * `EXPIRE` edge — today that means `DRAFT`, `REJECTED` or
+   * `DISPUTED` (a draft must be published or reworked, a rejected
+   * task goes back through dispute or resubmission, and arbitration
+   * must not be walked out of unilaterally) — so the executor
+   * classified it instead of failing it: no dispatch was attempted,
+   * no `error` is reported, and the task is untouched (state and
+   * history unchanged, no notification). Present only when true; a
+   * live run and a dry run report it the same way, so a rehearsal
+   * and the real run agree about which tasks are stuck. See
+   * {@link stuckTasks} for the batch selector that lists exactly
+   * these tasks.
+   */
+  unexpirable?: boolean;
   /**
    * The EXPIRE audit entry that the successful dispatch appended — a
    * frozen, detached copy of the task's last history entry, so an SLA
@@ -1068,9 +1138,10 @@ export interface ExpireOverdueTasksOptions {
    * dispatches nothing — no state change, no history append, no
    * subscription notification — and returns the same per-task
    * results the live run would have attempted, each carrying
-   * `wouldExpire` (and, when false, the same-wording `error` the
-   * live run would have reported). `expired` is false throughout a
-   * dry run and `entry` is never present. Illegal values fail fast
+   * `wouldExpire` (and, when false, either the same-wording `error`
+   * the live run would have reported, or `unexpirable: true` when
+   * the task's state has no `EXPIRE` edge). `expired` is false
+   * throughout a dry run and `entry` is never present. Illegal values fail fast
    * (`opts` must be an object, `dryRun` must be a boolean).
    */
   dryRun?: boolean;
@@ -1090,8 +1161,9 @@ export interface ExpireOverdueTasksOptions {
  * as the live run does — a task whose last entry sits after the
  * screening `now` predicts refusal, and the live run fails the
  * same way; (2) edge legality, read off the transition table via
- * `transition()` (its throw carries the exact message the live run
- * would report); (3) RBAC, read off the task's snapshot policy —
+ * `allowedEvents` — a state with no `EXPIRE` edge is classified
+ * `unexpirable` (no error), the same classification the live run
+ * reports; (3) RBAC, read off the task's snapshot policy —
  * the live run dispatches as the `system` actor, so a policy that
  * lists `EXPIRE` must include it. The `requireActor` gate needs no
  * prediction: the live run always passes an actor (`system`), and
@@ -1129,15 +1201,19 @@ function predictExpireOverdueTask(
       error: `invalid dispatch options: at ${auditAt} is earlier than the previous entry's at ${last.at}`,
     };
   }
-  // (2) Edge legality from the transition table, no dispatch.
-  try {
-    transition(task.state, "EXPIRE");
-  } catch (err) {
+  // (2) Edge legality from the transition table, no dispatch. A
+  // state with no EXPIRE edge is classified `unexpirable`, not
+  // failed — the live run reports the same classification (no error),
+  // so a rehearsal and the real run agree about which tasks are
+  // stuck. The check runs after the clock check above, so a backdated
+  // `at` still surfaces its own error first, exactly as the live run
+  // does (dispatch checks the clock before edge legality).
+  if (!allowedEvents(task.state).includes("EXPIRE")) {
     return {
       task,
       expired: false,
       wouldExpire: false,
-      error: err instanceof Error ? err.message : String(err),
+      unexpirable: true,
     };
   }
   // (3) RBAC: the live run dispatches as `system`; toJSON writes the
@@ -1162,14 +1238,21 @@ function predictExpireOverdueTask(
  * This exists because a hand-written loop over `expiredTasks()` has a
  * real trap: `expiredTasks()` only checks the deadline and the terminal
  * flag, but `EXPIRE` is not a legal event from every non-terminal state.
- * `EXPIRE` edges exist on every non-terminal state except REJECTED and
- * DISPUTED (backlog #1428 added the edges on IN_REVIEW, APPROVED and
- * PAYOUT_PENDING, which used to be unexpirable) — an overdue REJECTED
- * task (or a DISPUTED one, when a deadline was set for it) throws
+ * `EXPIRE` edges exist on every non-terminal state except DRAFT,
+ * REJECTED and DISPUTED (backlog #1428 added the edges on IN_REVIEW,
+ * APPROVED and PAYOUT_PENDING, which used to be unexpirable) — an
+ * overdue REJECTED task (or a DISPUTED one, when a deadline was set
+ * for it, or an overdue DRAFT) throws
  * `invalid transition: EXPIRE from REJECTED`, aborting a naive loop on
- * the first such task. This executor catches the error per task
- * (`expired: false, error: <message>`) and keeps going, so one
- * unexpirable task never blocks the rest of the batch.
+ * the first such task. This executor instead classifies them as
+ * `{ expired: false, unexpirable: true }` (no error, no dispatch
+ * attempted, task untouched) and keeps going, so one unexpirable
+ * task never blocks the rest of the batch. The two outcomes are
+ * distinct on purpose: `error` means the expiry was attempted and
+ * failed (a backdated `now`, or a `rolePolicy` that does not admit
+ * `system`); `unexpirable` means the task can never expire from its
+ * current state and belongs with a human, not in a retry queue. The
+ * batch selector for exactly those tasks is {@link stuckTasks}.
  *
  * Successful outcomes also carry `entry` — a frozen, detached copy of
  * the EXPIRE audit entry just appended — so a caller can write an SLA
@@ -1223,9 +1306,11 @@ function predictExpireOverdueTask(
  * set, in the same order, but dispatches nothing: no state change, no
  * history append, no subscription notification. Each result carries
  * `wouldExpire` (true exactly when the live run would have expired
- * that task) and, when false, the same-wording `error` the live run
- * would have reported (no `EXPIRE` edge, a backdated audit timestamp,
- * or a `rolePolicy` that does not admit `system`); `expired` is false
+ * that task) and, when false, either the same-wording `error` the
+ * live run would have reported (a backdated audit timestamp, or a
+ * `rolePolicy` that does not admit `system`) or `unexpirable: true`
+ * when the task's state has no `EXPIRE` edge — the live run
+ * classifies those the same way, with no error; `expired` is false
  * throughout and `entry` is never present. The prediction replays the
  * live dispatch's checks off the transition table and the task's own
  * history and snapshot policy — it never dispatches, so a dry run
@@ -1293,6 +1378,18 @@ export function expireOverdueTasks(
       const history = task.history;
       return { task, expired: true, entry: history[history.length - 1] };
     } catch (err) {
+      // A missing EXPIRE edge is a classification, not a failure:
+      // the task is overdue but unexpirable (DRAFT, REJECTED or
+      // DISPUTED), so report `unexpirable: true` with no error
+      // instead of re-reporting the transition error every round.
+      // Any other dispatch failure (backdated `at`, a rolePolicy
+      // that does not admit `system`) still reports its error. The
+      // edge check runs here, after the dispatch attempt, so a
+      // backdated `at` still surfaces its own error first — exactly
+      // the order the dry-run predictor uses.
+      if (!allowedEvents(task.state).includes("EXPIRE")) {
+        return { task, expired: false, unexpirable: true };
+      }
       return {
         task,
         expired: false,

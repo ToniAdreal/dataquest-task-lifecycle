@@ -9,11 +9,14 @@
  * false, the same-wording `error` the live run would have reported.
  *
  * The wording pins are the point of this file: for every failure mode
- * (no EXPIRE edge, a backdated audit timestamp, a `rolePolicy` that
- * does not admit `system`) a twin task is built identically, the live
- * run is executed on the twin, and the dry-run error must equal the
- * live error byte for byte — a rehearsal that disagrees with the real
- * run about WHY a task would not expire is worse than no rehearsal.
+ * (a backdated audit timestamp, a `rolePolicy` that does not admit
+ * `system`) a twin task is built identically, the live run is executed
+ * on the twin, and the dry-run error must equal the live error byte
+ * for byte — a rehearsal that disagrees with the real run about WHY
+ * a task would not expire is worse than no rehearsal. The no-`EXPIRE`
+ * -edge case is a classification, not a failure: the dry run must
+ * report the same `unexpirable: true` (and no error) the live run
+ * reports for it.
  *
  * One deliberate difference from the escrow mirror used to exist:
  * this executor took a separate `at` pin for the audit timestamp,
@@ -192,7 +195,7 @@ describe("expireOverdueTasks dryRun", () => {
     assert.equal(task.state, "OPEN");
   });
 
-  it("REJECTED overdue: wouldExpire false with the live run's exact error wording", () => {
+  it("REJECTED overdue: wouldExpire false with the live run's unexpirable classification", () => {
     const build = () => rejectedOverdueTask("stuck");
     const [dry] = expireOverdueTasks([build()], NOW, undefined, {
       dryRun: true,
@@ -200,8 +203,14 @@ describe("expireOverdueTasks dryRun", () => {
     assert.equal(dry.wouldExpire, false);
     assert.equal(dry.expired, false);
     assert.equal("entry" in dry, false);
-    assert.equal(dry.error, liveError(build, NOW));
-    assert.match(dry.error ?? "", /invalid transition: EXPIRE from REJECTED/);
+    assert.equal(dry.unexpirable, true);
+    assert.equal("error" in dry, false);
+    // The live twin agrees: same classification, no error.
+    const [live] = expireOverdueTasks([build()], NOW);
+    assert.equal(live.expired, false);
+    assert.equal(live.unexpirable, true);
+    assert.equal("error" in live, false);
+    assert.equal(live.task.state, "REJECTED");
   });
 
   it("backdated at pin: wouldExpire false with the live run's exact error wording", () => {

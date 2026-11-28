@@ -75,15 +75,16 @@ describe("expireOverdueTasks entry (auditable watchdog report)", () => {
     assert.equal(result.entry?.actor, "system");
   });
 
-  it("omits the entry field entirely on a failed dispatch", () => {
+  it("omits the entry field entirely on an unexpirable task", () => {
     const t = stuckTask("stuck");
     const [result] = expireOverdueTasks([t], NOW);
 
     assert.equal(result.expired, false);
-    assert.ok(result.error, "expected an error message");
+    assert.equal(result.unexpirable, true);
+    assert.equal("error" in result, false);
     assert.ok(
       !("entry" in result),
-      "failed outcome must not carry an entry field",
+      "unexpirable outcome must not carry an entry field",
     );
   });
 

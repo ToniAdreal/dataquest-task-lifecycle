@@ -11,6 +11,21 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- Stuck-task selector and unexpirable classification (2026-11-28,
+  backlog #1440, mirrors escrow #1434): `stuckTasks(tasks, now)`
+  lists exactly the overdue tasks that can never expire — non-terminal,
+  past their SLA deadline, with no `EXPIRE` edge from their current
+  state (today `DRAFT`, `REJECTED` and `DISPUTED`), read off the
+  transition table rather than hard-coded — so `stuckTasks` plus the
+  expirable overdue set partitions `expiredTasks` with no overlap and
+  no gap. `expireOverdueTasks` now classifies those tasks as
+  `{ expired: false, unexpirable: true }` (no error, no dispatch
+  attempted, task untouched) in both the live run and the dry-run
+  prediction, instead of re-reporting the same transition error every
+  round; a backdated `at` pin still surfaces its own error first,
+  exactly as before. The test count rises by fourteen (2215 to 2229
+  tests).
+
 - Late-state expiry edges (2026-11-26, backlog #1428): the
   transition table gains `EXPIRE: "EXPIRED"` edges on IN_REVIEW,
   APPROVED and PAYOUT_PENDING, so an overdue task in any of those

@@ -30,6 +30,7 @@ export {
   staleTasks,
   stateAtFromHistory,
   stateDiagram,
+  stuckTasks,
   summarizeTaskSettlements,
   tasksApproachingDeadline,
   tasksByActor,
