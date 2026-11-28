@@ -11,6 +11,33 @@ change type; no entry describes a feature that is not in the history.
 
 ### Added
 
+- End-to-end replay rejection for `verifyPayoutWebhookStrict`
+  (2026-11-28, backlog #1456):
+  `test/verifyPayoutWebhookStrictReplay.test.ts` (5 cases) pins the
+  documented receiver pipeline — strict-verify first, then
+  `PayoutEventDedupe.checkAndRecord(eventId)` — against a whole
+  intercepted delivery: a first delivery is accepted and an
+  identical re-delivery inside the 5-minute window is caught by
+  the dedupe store (strict alone still returns `true` for it, so
+  the store, not the age gate, is what stops the double payout);
+  the same signed bytes replayed past the window are refused by
+  strict while the legacy verifier still returns `true`, proving
+  only the age gate rejects, and the replay never reaches the
+  dedupe store; at exactly 5 minutes old the replay still verifies
+  (inclusive boundary) and is caught by dedupe instead; an
+  intercepted body re-keyed with a fresh `eventId` fails the
+  signature (strict and legacy alike) and the forged key is never
+  recorded; a stale body with its `at` rewritten to look fresh
+  fails the signature the same way, so the age gate cannot be
+  bypassed by editing the timestamp. Mutation-checked in an
+  isolated scratch copy: disabling the age gate turns only the
+  past-window case red, disabling the signature check turns only
+  the two tamper cases red. No `src/` change: the tests revealed
+  no bug. The README payout webhook section gains one sentence
+  tying the three layers together, and the stale Reproducibility
+  test count (2215) is aligned to the new total. The test count
+  rises by five (2235 to 2240 tests).
+
 - Clock-skew coverage for `PayoutEventDedupe` (2026-11-28,
   backlog #1453): `test/payoutEventDedupeClockSkew.test.ts`
   (6 cases) pins the existing behaviour under a backwards clock

@@ -15,7 +15,7 @@ Node.js ≥ 20.
 ```bash
 npm install
 npm run build
-npm test   # 2235 tests, all local
+npm test   # 2240 tests, all local
 ```
 
 Prefer the demo: `npm run demo` builds, then runs `dist/src/demo.js` — one task
@@ -1819,7 +1819,12 @@ verification. The defaults themselves are exported as
 `verifyPayoutWebhook()` defaults are unchanged — receivers that
 already rely on signature-only verification keep verifying exactly as
 before. Strict is defense-in-depth only: receivers MUST still
-deduplicate on `eventId` after a successful verify.
+deduplicate on `eventId` after a successful verify. End to end the
+two layers split replay defence: a captured copy replayed more than
+5 minutes later is refused by the age gate, a copy replayed inside
+the window is caught by the dedupe store on its `eventId`, and
+re-keying the copy or rewriting its `at` to look fresh invalidates
+the signature, so neither dodge works.
 
 Verification is signature-only by default — and a signature has no
 expiry, so a captured webhook could otherwise be replayed forever. Pass
@@ -2945,7 +2950,7 @@ Security scope, the caller-trust model, and what this library does
 
 ## Reproducibility
 
-`npm test` runs 2215 tests covering the happy path, reject→resubmit
+`npm test` runs 2240 tests covering the happy path, reject→resubmit
 (including the RESUBMIT retry budget: budget enforcement, invalid
 budgets, and snapshot round-trips that preserve the budget and used
 count), the DISPUTE appeal budget (`maxDisputes`: budget enforcement,
